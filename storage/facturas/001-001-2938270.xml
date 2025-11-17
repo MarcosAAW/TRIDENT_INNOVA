@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<factura>
+  <cabecera>
+    <numero>001-001-2938270</numero>
+    <fecha_emision>2025-11-05T15:53:52.617Z</fecha_emision>
+    <estado>PAGADA</estado>
+    <ruc_emisor>80132959-0</ruc_emisor>
+    <nombre_emisor>TRIDENT INNOVA E.A.S</nombre_emisor>
+    <cliente>
+      <nombre>Cliente Tres</nombre>
+      <ruc>33333301-0</ruc>
+      <telefono></telefono>
+      <correo></correo>
+    </cliente>
+  </cabecera>
+  <detalles>
+    <detalle numero="1">
+      <producto>Dron importado</producto>
+      <sku>DRON-USD</sku>
+      <cantidad>1</cantidad>
+      <precio_unitario>730000.00</precio_unitario>
+      <subtotal>730000.00</subtotal>
+    </detalle>
+  </detalles>
+  <totales>
+    <subtotal>730000.00</subtotal>
+    <descuento>20000.00</descuento>
+    <iva porcentaje="10">64545.45</iva>
+    <total>710000.00</total>
+  </totales>
+</factura>

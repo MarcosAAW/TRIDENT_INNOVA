@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trident Innova EAS</title>
+  <link rel="icon" href="img/logo.png" type="image/png" sizes="192x192">
+  <link rel="alternate icon" href="img/logo.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="img/logo.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="auth-pending">
+  <div class="auth-overlay" id="auth-overlay" aria-hidden="true" role="dialog" aria-modal="true">
+    <form class="auth-card" id="login-form" novalidate>
+      <img class="auth-logo" src="img/logo.png" alt="Logo de Trident Innova">
+      <h2>Inicia sesión</h2>
+      <p>Usa tu usuario interno para administrar módulos.</p>
+      <div id="login-feedback" class="feedback" role="status" aria-live="polite"></div>
+      <label class="form-field" for="login-usuario">
+        <span>Usuario *</span>
+        <input type="text" id="login-usuario" name="usuario" required autocomplete="username" placeholder="tu.usuario">
+      </label>
+      <label class="form-field" for="login-password">
+        <span>Contraseña *</span>
+        <input type="password" id="login-password" name="password" required autocomplete="current-password" placeholder="••••••">
+      </label>
+      <button type="submit" class="btn primary" id="login-submit">Ingresar</button>
+    </form>
+  </div>
+  <header class="hero">
+    <div class="hero-content">
+      <img class="logo" src="img/logo.png" alt="Logo de Trident Innova">
+        <div class="hero-copy">
+        <h1>Trident Innova EAS</h1>
+        <p>Sistema administrativo de Trident Innova.</p>
+        <div id="session-info" class="session-info" hidden>
+            <span id="session-user"></span>
+            <button type="button" class="btn ghost small" id="logout-button">Cerrar sesión</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="crud-panel" id="crud-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Administrar registros</h2>
+          <p>Gestiona módulos (productos, clientes, ventas y más) desde un solo lugar.</p>
+        </div>
+        <div class="panel-controls">
+          <button type="button" class="btn primary small" id="toggle-form-card" aria-expanded="false">Nuevo registro</button>
+          <div class="entity-tabs" role="tablist"></div>
+        </div>
+      </div>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+
+      <div class="panel-body">
+        <aside class="form-card">
+          <h3 id="form-title">Nuevo producto</h3>
+          <form id="record-form" novalidate>
+            <div id="form-fields" class="form-fields"></div>
+            <div class="form-actions">
+              <button type="submit" class="btn primary" id="submit-button">Guardar</button>
+              <button type="button" class="btn ghost" id="cancel-edit" hidden>Cancelar</button>
+            </div>
+          </form>
+        </aside>
+
+        <div class="list-card">
+          <div class="list-actions">
+            <form id="filter-form" class="filter-form">
+              <input type="search" name="search" id="search-input" placeholder="Buscar por nombre, SKU o RUC" aria-label="Texto de búsqueda">
+              <div id="filter-extra" class="filter-extra"></div>
+              <label class="toggle" for="include-deleted">
+                <input type="checkbox" id="include-deleted" name="include_deleted">
+                <span>Ver eliminados</span>
+              </label>
+              <button type="submit" class="btn ghost">Aplicar</button>
+            </form>
+          </div>
+          <div class="table-wrapper">
+            <table id="records-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pagination" id="pagination"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <small>&copy; <span id="year"></span> Trident Innova EAS ·</small>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

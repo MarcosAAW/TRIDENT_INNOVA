@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: trident_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trident
+      POSTGRES_PASSWORD: tridentpass
+      POSTGRES_DB: trident_db
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5440:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:
+
+

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<factura>
+  <cabecera>
+    <numero>001-001-9CC0B99</numero>
+    <fecha_emision>2025-11-05T13:35:09.266Z</fecha_emision>
+    <estado>PAGADA</estado>
+    <ruc_emisor>80132959-0</ruc_emisor>
+    <nombre_emisor>TRIDENT INNOVA E.A.S</nombre_emisor>
+    <cliente>
+      <nombre>AGRORICE</nombre>
+      <ruc>8004152-152</ruc>
+      <telefono>45615156</telefono>
+      <correo>AGRO@GMAIL.COM</correo>
+    </cliente>
+  </cabecera>
+  <detalles>
+    <detalle numero="1">
+      <producto>DRON</producto>
+      <sku>DRON 001</sku>
+      <cantidad>1</cantidad>
+      <precio_unitario>140000000.00</precio_unitario>
+      <subtotal>140000000.00</subtotal>
+    </detalle>
+  </detalles>
+  <totales>
+    <subtotal>140000000.00</subtotal>
+    <descuento>30000.00</descuento>
+    <iva porcentaje="10">12724545.45</iva>
+    <total>139970000.00</total>
+  </totales>
+</factura>

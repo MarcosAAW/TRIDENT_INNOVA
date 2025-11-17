@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<factura>
+  <cabecera>
+    <numero>001-001-120C117</numero>
+    <fecha_emision>2025-10-30T15:32:05.880Z</fecha_emision>
+    <estado>PENDIENTE</estado>
+    <ruc_emisor>80132959-0</ruc_emisor>
+    <nombre_emisor>Trident Innova</nombre_emisor>
+    <cliente>
+      <nombre>Cliente Tres</nombre>
+      <ruc>33333301-0</ruc>
+      <telefono></telefono>
+      <correo></correo>
+    </cliente>
+  </cabecera>
+  <detalles>
+    <detalle numero="1">
+      <producto>Dron importado</producto>
+      <sku>DRON-USD</sku>
+      <cantidad>1</cantidad>
+      <precio_unitario>730000.00</precio_unitario>
+      <subtotal>730000.00</subtotal>
+    </detalle>
+  </detalles>
+  <totales>
+    <subtotal>730000.00</subtotal>
+    <descuento>0.00</descuento>
+    <iva porcentaje="10">66363.64</iva>
+    <total>730000.00</total>
+  </totales>
+</factura>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<factura>
+  <cabecera>
+    <numero>001-001-4B6BD81</numero>
+    <fecha_emision>2025-11-04T14:21:57.834Z</fecha_emision>
+    <estado>PAGADA</estado>
+    <ruc_emisor>80132959-0</ruc_emisor>
+    <nombre_emisor>TRIDENT INNOVA E.A.S</nombre_emisor>
+    <cliente>
+      <nombre>Cliente Demo S.A.</nombre>
+      <ruc>80000001-0</ruc>
+      <telefono>021-555-000</telefono>
+      <correo>facturacion@demo.com</correo>
+    </cliente>
+  </cabecera>
+  <detalles>
+    <detalle numero="1">
+      <producto>Dron Profesional</producto>
+      <sku>DRON-001</sku>
+      <cantidad>1</cantidad>
+      <precio_unitario>2500000.00</precio_unitario>
+      <subtotal>2500000.00</subtotal>
+    </detalle>
+  </detalles>
+  <totales>
+    <subtotal>2500000.00</subtotal>
+    <descuento>10000.00</descuento>
+    <iva porcentaje="10">226363.64</iva>
+    <total>2490000.00</total>
+  </totales>
+</factura>
