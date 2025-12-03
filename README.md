@@ -99,6 +99,7 @@ Si prefieres evitar tocar tu base local, puedes usar los seeds y reset para volv
 ## Recursos adicionales
 
 - `DEV_SETUP.md`: guía corta para montar el entorno.
+- `INFRASTRUCTURE.md`: configuración de DNS y Cloudflare.
 - `scripts/`: helpers (`db-check`, `seed`, `reset`).
 - `prisma/schema.prisma`: esquema en español (fuente de verdad). Mantén sincronizado `init.sql` si haces cambios.
 
