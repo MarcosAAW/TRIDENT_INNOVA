@@ -17,6 +17,8 @@ const posState = {
   cart: [],
   descuento: 0,
   ivaPorcentaje: 10,
+  moneda: 'PYG',
+  tipoCambio: null,
   lastSale: null,
   loading: false,
   productSearch: {
@@ -77,6 +79,17 @@ function ensureDom(container) {
               ${IVA_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
             </select>
           </div>
+          <div class="pos-summary-row">
+            <label for="pos-currency">Moneda de cobro</label>
+            <select id="pos-currency">
+              <option value="PYG">Guaraníes (PYG)</option>
+              <option value="USD">Dólares (USD)</option>
+            </select>
+          </div>
+          <div class="pos-summary-row" id="pos-exchange-row" hidden>
+            <label for="pos-exchange">Tipo de cambio</label>
+            <input type="number" id="pos-exchange" min="0" step="0.0001" placeholder="0.0000">
+          </div>
           <div class="pos-summary-totals" id="pos-summary-totals"></div>
         </div>
         <div class="pos-actions">
@@ -115,6 +128,9 @@ function ensureDom(container) {
     cartList: layout?.querySelector('#pos-cart-list') || null,
     discountInput: layout?.querySelector('#pos-discount') || null,
     ivaSelect: layout?.querySelector('#pos-iva') || null,
+    currencySelect: layout?.querySelector('#pos-currency') || null,
+    exchangeRow: layout?.querySelector('#pos-exchange-row') || null,
+    exchangeInput: layout?.querySelector('#pos-exchange') || null,
     feedback: layout?.querySelector('#pos-feedback') || null,
     confirmButton: layout?.querySelector('#pos-confirm') || null,
     clearButton: layout?.querySelector('#pos-clear') || null,
@@ -123,6 +139,7 @@ function ensureDom(container) {
     lastSale: layout?.querySelector('#pos-last-sale') || null
   };
 
+  renderCurrencyControls();
   attachEventListeners();
   attachGlobalShortcuts();
 
@@ -286,6 +303,33 @@ function attachEventListeners() {
     posState.ivaPorcentaje = IVA_OPTIONS.some((option) => option.value === value) ? value : 10;
     renderSummary();
   });
+  }
+
+  if (posDom.currencySelect) {
+    posDom.currencySelect.addEventListener('change', (event) => {
+      const nextValue = String(event.target.value || 'PYG').toUpperCase();
+      posState.moneda = nextValue === 'USD' ? 'USD' : 'PYG';
+      if (posState.moneda !== 'USD') {
+        posState.tipoCambio = null;
+        if (posDom.exchangeInput && document.activeElement !== posDom.exchangeInput) {
+          posDom.exchangeInput.value = '';
+        }
+      }
+      renderCurrencyControls();
+      renderSummary();
+    });
+  }
+
+  if (posDom.exchangeInput) {
+    posDom.exchangeInput.addEventListener('input', (event) => {
+      const numeric = Number(event.target.value);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        posState.tipoCambio = numeric;
+      } else {
+        posState.tipoCambio = null;
+      }
+      renderSummary();
+    });
   }
 
   if (posDom.clearButton) {
@@ -464,9 +508,12 @@ function clearCart() {
   posState.cart = [];
   posState.descuento = 0;
   posState.ivaPorcentaje = 10;
+  posState.moneda = 'PYG';
+  posState.tipoCambio = null;
   posState.lastSale = null;
   if (posDom.discountInput) posDom.discountInput.value = '';
   if (posDom.ivaSelect) posDom.ivaSelect.value = '10';
+  renderCurrencyControls();
   renderCart();
   renderSummary();
   renderLastSale();
@@ -624,18 +671,54 @@ function computeTotals() {
   };
 }
 
+function renderCurrencyControls() {
+  if (!posDom) return;
+  if (posDom.currencySelect) {
+    posDom.currencySelect.value = posState.moneda || 'PYG';
+  }
+  if (posDom.exchangeRow) {
+    posDom.exchangeRow.hidden = posState.moneda !== 'USD';
+  }
+  if (posDom.exchangeInput) {
+    const activeElement = typeof document !== 'undefined' ? document.activeElement : null;
+    if (posState.moneda !== 'USD') {
+      if (activeElement !== posDom.exchangeInput) {
+        posDom.exchangeInput.value = '';
+      }
+    } else if (posState.tipoCambio && activeElement !== posDom.exchangeInput) {
+      posDom.exchangeInput.value = posState.tipoCambio;
+    }
+  }
+}
+
 function renderSummary() {
   if (!posDom || !posDom.summaryTotals) return;
   const totals = computeTotals();
-  posDom.summaryTotals.innerHTML = `
+  const requiereCambio = posState.moneda === 'USD';
+  const tipoCambioValido = requiereCambio && Number(posState.tipoCambio) > 0;
+  const totalUsd = requiereCambio && tipoCambioValido ? totals.total / Number(posState.tipoCambio) : 0;
+
+  let summaryHtml = `
     <div class="row"><span>Subtotal</span><strong>${formatCurrency(totals.subtotal, 'PYG')}</strong></div>
     <div class="row"><span>Descuento</span><strong>${formatCurrency(totals.descuento, 'PYG')}</strong></div>
     <div class="row"><span>IVA (${posState.ivaPorcentaje}%)</span><strong>${formatCurrency(totals.ivaCalculado, 'PYG')}</strong></div>
     <div class="row total"><span>Total</span><strong>${formatCurrency(totals.total, 'PYG')}</strong></div>
   `;
+
+  if (requiereCambio) {
+    summaryHtml += `
+      <div class="row"><span>Tipo de cambio</span><strong>${tipoCambioValido ? formatNumber(posState.tipoCambio, 4) : '—'} Gs.</strong></div>
+      <div class="row total"><span>Total (USD)</span><strong>${
+        tipoCambioValido ? formatCurrency(totalUsd, 'USD') : 'Completar tipo de cambio'
+      }</strong></div>
+    `;
+  }
+
+  posDom.summaryTotals.innerHTML = summaryHtml;
   if (posDom.printButton) {
     posDom.printButton.hidden = !posState.lastSale;
   }
+  renderCurrencyControls();
   updateActionStates();
 }
 
@@ -647,12 +730,27 @@ function renderLastSale() {
     return;
   }
   const venta = posState.lastSale;
+  const totalGs = Number(venta.total) || 0;
+  const monedaVenta = String(venta.moneda || 'PYG').toUpperCase();
+  const isUsd = monedaVenta === 'USD';
+  const totalUsd = isUsd
+    ? Number(venta.total_moneda) ||
+      (Number(venta.tipo_cambio) && Number(venta.tipo_cambio) > 0 ? totalGs / Number(venta.tipo_cambio) : null)
+    : null;
   posDom.lastSale.hidden = false;
   posDom.lastSale.innerHTML = `
     <h4>Venta registrada</h4>
     <p>ID: <code>${escapeHtml(venta.id)}</code></p>
     <p>Cliente: ${escapeHtml(venta.cliente?.nombre_razon_social || 'Cliente eventual')}</p>
-    <p>Total: ${formatCurrency(Number(venta.total) || 0, 'PYG')}</p>
+    <p>Total Gs.: ${formatCurrency(totalGs, 'PYG')}</p>
+    ${
+      isUsd
+        ? `<p>Total USD: ${totalUsd ? formatCurrency(totalUsd, 'USD') : '—'}</p><small>Cambio aplicado: ${formatNumber(
+            venta.tipo_cambio,
+            4
+          )} Gs.</small>`
+        : ''
+    }
     <small>${formatDate(venta.created_at || new Date().toISOString())}</small>
   `;
 }
@@ -688,6 +786,15 @@ async function confirmSale() {
     return;
   }
 
+  if (posState.moneda === 'USD') {
+    const tipoCambioValido = Number(posState.tipoCambio);
+    if (!Number.isFinite(tipoCambioValido) || tipoCambioValido <= 0) {
+      setFeedback('Ingresá el tipo de cambio vigente para cobrar en USD.', 'error');
+      updateActionStates();
+      return;
+    }
+  }
+
   setFeedback('Registrando venta...', 'info');
   setPosLoading(true, 'Guardando...');
 
@@ -697,6 +804,8 @@ async function confirmSale() {
       clienteId: posState.cliente?.id || undefined,
       iva_porcentaje: posState.ivaPorcentaje,
       descuento_total: totals.descuento,
+      moneda: posState.moneda,
+      tipo_cambio: posState.moneda === 'USD' ? posState.tipoCambio : undefined,
       detalles: posState.cart.map((item) => ({
         productoId: item.productoId,
         cantidad: item.cantidad
@@ -740,32 +849,37 @@ async function generateInvoice() {
     posDom.printButton.textContent = 'Generando...';
   }
   try {
-    setFeedback('Generando factura electrónica...', 'info');
+    setFeedback('Generando factura digital...', 'info');
     const response = await request(`/ventas/${posState.lastSale.id}/facturar`, {
       method: 'POST'
     });
     const venta = response?.venta || response;
-    const factura = response?.factura || venta?.factura_electronica;
+    const facturaDigital = venta?.factura_digital;
+    const facturaElectronica = response?.factura || venta?.factura_electronica;
+    const pdfUrl = facturaDigital?.id
+      ? `/facturas-digitales/${encodeURIComponent(facturaDigital.id)}/pdf`
+      : facturaElectronica?.pdf_path;
+    const facturaTipo = facturaDigital ? 'digital' : 'electrónica';
     if (!venta) {
       throw new Error('No se recibió la venta generada.');
     }
-    if (factura?.pdf_path) {
-      const win = window.open(factura.pdf_path, '_blank');
+    if (pdfUrl) {
+      const win = window.open(pdfUrl, '_blank');
       if (!win) {
-        setFeedback('Factura generada. Desbloquea las ventanas emergentes para descargar el PDF.', 'warn');
+        setFeedback(`Factura ${facturaTipo} generada. Desbloquea las ventanas emergentes para descargar el PDF.`, 'warn');
       } else {
         win.focus();
-        setFeedback('Factura generada. El PDF se abrió en una nueva pestaña.', 'success');
+        setFeedback(`Factura ${facturaTipo} generada. El PDF se abrió en una nueva pestaña.`, 'success');
       }
     } else {
-      openInvoiceWindow(venta, factura);
-      setFeedback('Factura generada. Puedes imprimirla desde la ventana emergente.', 'success');
+      openInvoiceWindow(venta, facturaDigital || facturaElectronica);
+      setFeedback(`Factura ${facturaTipo} generada. Puedes imprimirla desde la ventana emergente.`, 'success');
     }
     posState.lastSale = venta;
     renderLastSale();
   } catch (error) {
     console.error(error);
-    setFeedback(error.message || 'No se pudo generar la factura electrónica.', 'error');
+    setFeedback(error.message || 'No se pudo generar la factura digital.', 'error');
   } finally {
     if (posDom?.printButton) {
       posDom.printButton.disabled = false;
@@ -824,11 +938,11 @@ function openInvoiceWindow(venta, factura) {
     <body>
       <header>
         <div>
-          <h1>Factura electrónica</h1>
+          <h1>Factura digital</h1>
           <div class="meta">
             <div>Nro: ${escapeHtml(numeroFactura)}</div>
             <div>Fecha: ${escapeHtml(formatDate(fechaEmision))}</div>
-            <div>Estado: ${escapeHtml((factura?.estado || 'PAGADA').toUpperCase())}</div>
+            <div>Estado: ${escapeHtml((factura?.estado || 'EMITIDA').toUpperCase())}</div>
           </div>
         </div>
         <div class="meta">
@@ -908,20 +1022,31 @@ function attachGlobalShortcuts() {
   window.addEventListener('keydown', globalKeydownHandler);
 }
 
-function focusProductSearch({ select = true } = {}) {
-  if (!posDom || !posDom.productSearchInput || posDom.productSearchInput.disabled) return;
-  posDom.productSearchInput.focus();
-  if (select) {
-    posDom.productSearchInput.select();
+function focusInputSafely(input, { select = true, preventScroll = true } = {}) {
+  if (!input || input.disabled) return;
+  try {
+    input.focus({ preventScroll });
+  } catch (error) {
+    input.focus();
+  }
+  if (select && typeof input.select === 'function') {
+    const selectFn = () => input.select();
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(selectFn);
+    } else {
+      setTimeout(selectFn, 0);
+    }
   }
 }
 
-function focusClientSearch({ select = true } = {}) {
-  if (!posDom || !posDom.clientSearchInput || posDom.clientSearchInput.disabled) return;
-  posDom.clientSearchInput.focus();
-  if (select) {
-    posDom.clientSearchInput.select();
-  }
+function focusProductSearch(options = {}) {
+  if (!posDom || !posDom.productSearchInput) return;
+  focusInputSafely(posDom.productSearchInput, options);
+}
+
+function focusClientSearch(options = {}) {
+  if (!posDom || !posDom.clientSearchInput) return;
+  focusInputSafely(posDom.clientSearchInput, options);
 }
 
 function clearProductSearch() {
@@ -948,13 +1073,16 @@ function updateActionStates() {
   if (!posDom) return;
   const hasCart = posState.cart.length > 0;
   const hasClearable = hasCart || Boolean(posState.cliente) || (posState.descuento || 0) > 0;
+  const requiereTipoCambio = posState.moneda === 'USD';
+  const tipoCambioValido = Number(posState.tipoCambio) > 0;
+  const canConfirm = hasCart && (!requiereTipoCambio || tipoCambioValido);
 
   if (posDom.confirmButton) {
     if (!posDom.confirmButton.dataset.defaultLabel) {
       posDom.confirmButton.dataset.defaultLabel = posDom.confirmButton.textContent || 'Confirmar venta';
     }
     if (!posState.loading) {
-      posDom.confirmButton.disabled = !hasCart;
+      posDom.confirmButton.disabled = !canConfirm;
       posDom.confirmButton.textContent = posDom.confirmButton.dataset.defaultLabel;
     }
   }
@@ -988,7 +1116,14 @@ function setPosLoading(isLoading, loadingLabel) {
     }
   }
 
-  [posDom.productSearchInput, posDom.clientSearchInput, posDom.discountInput, posDom.ivaSelect].forEach((control) => {
+  [
+    posDom.productSearchInput,
+    posDom.clientSearchInput,
+    posDom.discountInput,
+    posDom.ivaSelect,
+    posDom.currencySelect,
+    posDom.exchangeInput
+  ].forEach((control) => {
     if (control) {
       control.disabled = posState.loading;
     }

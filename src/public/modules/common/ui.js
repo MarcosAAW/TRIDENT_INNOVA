@@ -33,7 +33,7 @@ export function initDashboard(modules) {
   dom.filterForm.addEventListener('submit', (event) => {
     event.preventDefault();
     state.page = 1;
-    loadList();
+    loadList({ preserveScroll: false });
   });
 
   if (dom.listActions) {
@@ -60,7 +60,7 @@ export function initDashboard(modules) {
 
   dom.includeDeleted.addEventListener('change', () => {
     state.page = 1;
-    loadList();
+    loadList({ preserveScroll: false });
   });
 
   dom.cancelButton.addEventListener('click', () => {
@@ -108,7 +108,7 @@ export function initDashboard(modules) {
     const nextPage = Number(button.dataset.page);
     if (Number.isNaN(nextPage) || nextPage === state.page) return;
     state.page = nextPage;
-    loadList();
+    loadList({ preserveScroll: false });
   });
 
   if (dom.toggleFormCardButton) {
@@ -179,13 +179,15 @@ export function initDashboard(modules) {
       mod.hooks.afterModuleChange({ form: dom.form, module: mod });
     }
 
-    loadList();
+    loadList({ preserveScroll: false });
   }
 
-  async function loadList() {
+  async function loadList(options = {}) {
+    const { preserveScroll = true } = options;
     const mod = getCurrentModule();
     if (!mod) return;
 
+    const scrollSnapshot = captureScrollSnapshot(preserveScroll);
     const filters = collectFilters(mod);
 
     try {
@@ -199,9 +201,46 @@ export function initDashboard(modules) {
 
       renderTable(state.items, mod);
       renderPagination(mod);
+      restoreScrollPosition(preserveScroll, scrollSnapshot);
     } catch (error) {
       console.error(`[Dashboard] No se pudo cargar ${mod.key}`, error);
       showMessage(error.message || 'No se pudo cargar los registros.', 'error');
+    }
+  }
+
+  function captureScrollSnapshot(shouldPreserve) {
+    if (!shouldPreserve || typeof window === 'undefined') {
+      return null;
+    }
+    return {
+      windowY: window.scrollY || 0,
+      listCardY: dom.listCard ? dom.listCard.scrollTop : null
+    };
+  }
+
+  function restoreScrollPosition(shouldPreserve, snapshot) {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const applyScroll = () => {
+      if (shouldPreserve && snapshot) {
+        window.scrollTo({ top: snapshot.windowY ?? 0, behavior: 'auto' });
+        if (dom.listCard && typeof snapshot.listCardY === 'number') {
+          dom.listCard.scrollTop = snapshot.listCardY;
+        }
+        return;
+      }
+      if (!shouldPreserve) {
+        window.scrollTo({ top: 0, behavior: 'auto' });
+        if (dom.listCard) {
+          dom.listCard.scrollTop = 0;
+        }
+      }
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(applyScroll);
+    } else {
+      applyScroll();
     }
   }
 
