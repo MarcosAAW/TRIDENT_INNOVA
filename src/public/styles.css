@@ -42,6 +42,9 @@ body {
 
 body {
   margin: 0;
+  .muted {
+    color: var(--color-text-muted);
+  }
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -469,6 +472,57 @@ button {
   list-style: disc;
 }
 
+.ventas-resumen-card {
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(12, 20, 38, 0.6);
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.ventas-resumen-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.ventas-resumen-card__header span {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.ventas-resumen-card__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.ventas-resumen-card__grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.85rem;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.ventas-resumen-card__grid span {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.ventas-resumen-card__grid strong {
+  font-size: 1.05rem;
+}
+
 .form-field.checkbox {
   flex-direction: row;
   align-items: center;
@@ -777,6 +831,17 @@ tbody tr.low-stock .stock-cell strong {
 .stock-cell small {
   color: var(--color-text-muted);
   font-weight: 600;
+}
+
+.table-amount {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.table-sub {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
 }
 
 tbody button {

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<factura>
+  <cabecera>
+    <numero>001-001-AE3ED2F</numero>
+    <fecha_emision>2025-11-26T14:07:24.498Z</fecha_emision>
+    <estado>PAGADA</estado>
+    <ruc_emisor>80132959-0</ruc_emisor>
+    <nombre_emisor>TRIDENT INNOVA E.A.S</nombre_emisor>
+    <cliente>
+      <nombre>Cliente Uno</nombre>
+      <ruc>11111101-0</ruc>
+      <telefono></telefono>
+      <correo></correo>
+    </cliente>
+  </cabecera>
+  <detalles>
+    <detalle numero="1">
+      <producto>Dron Profesional</producto>
+      <sku>DRON-001</sku>
+      <cantidad>1</cantidad>
+      <precio_unitario>2500000.00</precio_unitario>
+      <subtotal>2500000.00</subtotal>
+    </detalle>
+  </detalles>
+  <totales>
+    <subtotal>2500000.00</subtotal>
+    <descuento>0.00</descuento>
+    <iva porcentaje="10">227272.73</iva>
+    <total>2500000.00</total>
+  </totales>
+</factura>

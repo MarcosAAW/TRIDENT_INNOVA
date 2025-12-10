@@ -147,10 +147,12 @@ model Venta {
   descuento_total      Decimal?  @db.Decimal(12,2)
   impuesto_total       Decimal?  @db.Decimal(12,2)
   total                Decimal   @db.Decimal(12,2)
+  total_moneda         Decimal?  @db.Decimal(12,2)
   iva_porcentaje       Int       @default(10)
   estado               String
   factura_electronica  FacturaElectronica?
   factura_electronicaId String?  @map("factura_electronica_id")
+  factura_digital      FacturaDigital?
   moneda               String?   @default("PYG")
   tipo_cambio          Decimal?  @db.Decimal(12,4)
   created_at           DateTime  @default(now())
@@ -225,6 +227,42 @@ model FacturaElectronica {
   @@map("factura_electronica")
 }
 
+model FacturaDigital {
+  id                String    @id @default(uuid())
+  venta             Venta?    @relation(fields: [ventaId], references: [id])
+  ventaId           String?   @map("venta_id") @unique
+  nro_factura       String    @unique
+  timbrado          String
+  establecimiento   String
+  punto_expedicion  String
+  secuencia         Int
+  condicion_venta   String    @default("CONTADO")
+  fecha_emision     DateTime  @default(now())
+  moneda            String    @default("PYG")
+  total_exentas     Decimal?  @db.Decimal(12,2)
+  total_gravada_5   Decimal?  @db.Decimal(12,2)
+  total_gravada_10  Decimal?  @db.Decimal(12,2)
+  total_iva_5       Decimal?  @db.Decimal(12,2)
+  total_iva_10      Decimal?  @db.Decimal(12,2)
+  total             Decimal    @db.Decimal(12,2)
+  total_iva         Decimal?   @db.Decimal(12,2)
+  total_letras      String?
+  pdf_path          String?
+  hash_pdf          String?
+  qr_data           String?
+  numero_control    String?
+  estado_envio      String    @default("PENDIENTE")
+  enviado_a         String?
+  enviado_en        DateTime?
+  intentos          Int        @default(0)
+  created_at        DateTime   @default(now())
+  updated_at        DateTime   @updatedAt
+  deleted_at        DateTime?
+
+  @@map("factura_digital")
+  @@unique([timbrado, establecimiento, punto_expedicion, secuencia], name: "factura_digital_secuencia_unica")
+}
+
 model MovimientoStock {
   id            String        @id @default(uuid())
   producto      Producto      @relation(fields: [productoId], references: [id])
@@ -263,7 +301,9 @@ model CierreCaja {
   fecha_apertura      DateTime?   @map("fecha_apertura")
   fecha_cierre        DateTime    @default(now()) @map("fecha_cierre")
   total_ventas        Decimal     @db.Decimal(12,2)
+  total_ventas_usd    Decimal     @db.Decimal(12,2) @default(0)
   total_efectivo      Decimal     @db.Decimal(12,2)
+  efectivo_usd        Decimal?    @db.Decimal(12,2)
   total_tarjeta       Decimal     @default(0) @db.Decimal(12,2)
   total_transferencia Decimal     @default(0) @db.Decimal(12,2)
   total_salidas       Decimal     @default(0) @db.Decimal(12,2)

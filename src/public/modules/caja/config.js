@@ -97,6 +97,29 @@ function renderResumen(estado, error) {
     ? `${formatDate(periodo.desde)} -> ${formatDate(periodo.hasta)}`
     : 'Periodo no disponible';
 
+  const totalCards = [
+    { label: 'Saldo inicial', value: formatCurrency(totales.saldoInicial, 'PYG') },
+    { label: 'Ventas', value: formatCurrency(totales.ventas, 'PYG') },
+    { label: 'Salidas pendientes', value: formatCurrency(totales.salidas, 'PYG') },
+    { label: 'Efectivo esperado', value: formatCurrency(totales.efectivoEsperado, 'PYG') }
+  ];
+
+  if (Number(totales.ventasUsd) > 0) {
+    totalCards.splice(2, 0, { label: 'Ventas USD', value: formatCurrency(totales.ventasUsd, 'USD') });
+  }
+
+  if (Number(totales.efectivoUsd) > 0) {
+    totalCards.push({ label: 'Efectivo USD', value: formatCurrency(totales.efectivoUsd, 'USD') });
+  }
+
+  if (Number(totales.efectivoEsperadoUsd) > 0) {
+    totalCards.push({ label: 'Efectivo esperado USD', value: formatCurrency(totales.efectivoEsperadoUsd, 'USD') });
+  }
+
+  const totalesHtml = totalCards
+    .map((card) => `<div><span>${escapeHtml(card.label)}</span><strong>${card.value}</strong></div>`)
+    .join('');
+
   const salidasHtml = salidas.length
     ? `<ul class="caja-resumen__salidas">${salidas
         .map(
@@ -114,12 +137,7 @@ function renderResumen(estado, error) {
       <h3>Estado de caja</h3>
       <p>${escapeHtml(periodoTexto)}</p>
     </div>
-    <div class="caja-resumen__totales">
-      <div><span>Saldo inicial</span><strong>${formatCurrency(totales.saldoInicial, 'PYG')}</strong></div>
-      <div><span>Ventas</span><strong>${formatCurrency(totales.ventas, 'PYG')}</strong></div>
-      <div><span>Salidas pendientes</span><strong>${formatCurrency(totales.salidas, 'PYG')}</strong></div>
-      <div><span>Efectivo esperado</span><strong>${formatCurrency(totales.efectivoEsperado, 'PYG')}</strong></div>
-    </div>
+    <div class="caja-resumen__totales">${totalesHtml}</div>
     ${salidasHtml}
   `;
 }
@@ -144,24 +162,63 @@ async function actualizarResumen({ showMessage } = {}) {
   }
 }
 
+async function assertAperturaActiva() {
+  if (estadoActual) return true;
+  await actualizarResumen();
+  if (estadoActual) return true;
+  throw new Error('No hay una apertura activa.');
+}
+
+async function ensureAperturaActivaParaAccion({ showMessage } = {}) {
+  try {
+    await assertAperturaActiva();
+    return true;
+  } catch (error) {
+    if (showMessage) {
+      showMessage('No hay una apertura activa.', 'info');
+    }
+    return false;
+  }
+}
+
 function resumenEnTexto(estado) {
   if (!estado) {
     return 'No hay una apertura activa en este momento.';
   }
   const { totales = {}, periodo = {} } = estado;
   const salidas = Array.isArray(estado.salidasPendientes) ? estado.salidasPendientes : [];
-  return [
+  const lineas = [
     `Periodo: ${formatDate(periodo.desde)} -> ${formatDate(periodo.hasta)}`,
     `Saldo inicial: ${formatCurrency(totales.saldoInicial, 'PYG')}`,
     `Ventas registradas: ${formatCurrency(totales.ventas, 'PYG')}`,
     `Salidas pendientes: ${formatCurrency(totales.salidas, 'PYG')} (${salidas.length})`,
     `Efectivo esperado: ${formatCurrency(totales.efectivoEsperado, 'PYG')}`
-  ].join('\n');
+  ];
+
+  if (Number(totales.ventasUsd) > 0) {
+    lineas.splice(3, 0, `Ventas USD: ${formatCurrency(totales.ventasUsd, 'USD')}`);
+  }
+  if (Number(totales.efectivoUsd) > 0) {
+    lineas.push(`Efectivo USD: ${formatCurrency(totales.efectivoUsd, 'USD')}`);
+  }
+  if (Number(totales.efectivoEsperadoUsd) > 0) {
+    lineas.push(`Efectivo esperado USD: ${formatCurrency(totales.efectivoEsperadoUsd, 'USD')}`);
+  }
+
+  return lineas.join('\n');
 }
 
-function formatBadge(value) {
+function formatBadge(value, currency = 'PYG') {
   if (value === null || value === undefined || value === '') return '-';
-  return formatCurrency(value, 'PYG');
+  return formatCurrency(value, currency);
+}
+
+function renderDualCurrency(primary, secondary) {
+  const base = formatCurrency(primary, 'PYG');
+  if (Number(secondary) > 0) {
+    return `${base}<div class="table-sub">${formatCurrency(secondary, 'USD')}</div>`;
+  }
+  return base;
 }
 
 export const cajaModule = {
@@ -238,6 +295,8 @@ export const cajaModule = {
     },
     'registrar-salida': async ({ showMessage, reload }) => {
       try {
+        const aperturaDisponible = await ensureAperturaActivaParaAccion({ showMessage });
+        if (!aperturaDisponible) return;
         await crearSalidaCaja();
         showMessage('Salida registrada correctamente.', 'success');
         await actualizarResumen({ showMessage });
@@ -312,8 +371,8 @@ export const cajaModule = {
       render: (item) => item.usuario?.nombre || item.usuario?.usuario || item.usuarioId || '-'
     },
     { header: 'Saldo inicial', render: (item) => formatCurrency(item.saldo_inicial, 'PYG') },
-    { header: 'Ventas', render: (item) => formatCurrency(item.total_ventas, 'PYG') },
-    { header: 'Efectivo', render: (item) => formatCurrency(item.total_efectivo, 'PYG') },
+    { header: 'Ventas', render: (item) => renderDualCurrency(item.total_ventas, item.total_ventas_usd) },
+    { header: 'Efectivo', render: (item) => renderDualCurrency(item.total_efectivo, item.efectivo_usd) },
     { header: 'Salidas', render: (item) => formatBadge(item.total_salidas) },
     {
       header: 'Declarado',
@@ -357,7 +416,10 @@ export const cajaModule = {
   },
   actions: {
     nuevo: {
-      submit: createCierreCaja,
+      submit: async (payload) => {
+        await assertAperturaActiva();
+        return createCierreCaja(payload);
+      },
       transform: prepareCierrePayload,
       successMessage: 'Cierre de caja registrado.'
     }

@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS venta (
   descuento_total numeric(12,2),
   impuesto_total numeric(12,2),
   total numeric(12,2) NOT NULL,
+  total_moneda numeric(12,2),
   iva_porcentaje integer DEFAULT 10,
   estado varchar(50) NOT NULL,
   factura_electronica_id uuid,
@@ -188,6 +189,41 @@ CREATE TABLE IF NOT EXISTS factura_electronica (
   CONSTRAINT fk_factura_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE SET NULL
 );
 
+-- Tabla: factura_digital
+CREATE TABLE IF NOT EXISTS factura_digital (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  venta_id text UNIQUE,
+  nro_factura varchar(100) NOT NULL UNIQUE,
+  timbrado varchar(30) NOT NULL,
+  establecimiento varchar(5) NOT NULL,
+  punto_expedicion varchar(5) NOT NULL,
+  secuencia integer NOT NULL,
+  condicion_venta varchar(20) NOT NULL DEFAULT 'CONTADO',
+  fecha_emision timestamptz NOT NULL DEFAULT now(),
+  moneda varchar(10) NOT NULL DEFAULT 'PYG',
+  total_exentas numeric(12,2),
+  total_gravada_5 numeric(12,2),
+  total_gravada_10 numeric(12,2),
+  total_iva_5 numeric(12,2),
+  total_iva_10 numeric(12,2),
+  total numeric(12,2) NOT NULL,
+  total_iva numeric(12,2),
+  total_letras text,
+  pdf_path text,
+  hash_pdf varchar(128),
+  qr_data text,
+  numero_control varchar(64),
+  estado_envio varchar(30) NOT NULL DEFAULT 'PENDIENTE',
+  enviado_a text,
+  enviado_en timestamptz,
+  intentos integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz,
+  CONSTRAINT fk_factura_digital_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE SET NULL,
+  CONSTRAINT uq_factura_digital_secuencia UNIQUE (timbrado, establecimiento, punto_expedicion, secuencia)
+);
+
 -- Tabla: movimiento_stock
 CREATE TABLE IF NOT EXISTS movimiento_stock (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -236,7 +272,9 @@ CREATE TABLE IF NOT EXISTS cierre_caja (
   fecha_apertura timestamptz,
   fecha_cierre timestamptz DEFAULT now(),
   total_ventas numeric(12,2) NOT NULL,
+  total_ventas_usd numeric(12,2) NOT NULL DEFAULT 0,
   total_efectivo numeric(12,2) NOT NULL,
+  efectivo_usd numeric(12,2),
   total_tarjeta numeric(12,2) DEFAULT 0,
   total_transferencia numeric(12,2) DEFAULT 0,
   total_salidas numeric(12,2) DEFAULT 0,

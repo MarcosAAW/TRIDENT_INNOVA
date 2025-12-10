@@ -6,6 +6,7 @@ const { serialize } = require('../utils/serialize');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
 const { TipoProducto } = require('@prisma/client');
+const { requireAuth, authorizeRoles } = require('../middleware/authContext');
 
 const MONEDAS_PERMITIDAS = new Set(['PYG', 'USD']);
 const MAX_DECIMAL_VALUE = 10_000_000_000; // límite por definición Decimal(12,2)
@@ -63,6 +64,8 @@ const createProductoSchema = z.object({
 });
 
 const updateProductoSchema = createProductoSchema.partial();
+
+router.use(requireAuth);
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -272,7 +275,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/reporte/inventario', async (req, res) => {
+router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
   const includeDeleted = String(req.query.include_deleted).toLowerCase() === 'true';
 
   try {
@@ -308,7 +311,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', validate(createProductoSchema), async (req, res) => {
+router.post('/', authorizeRoles('ADMIN'), validate(createProductoSchema), async (req, res) => {
   try {
     const data = normalizePrecioFields(req.validatedBody);
     const created = await prisma.producto.create({ data });
@@ -321,7 +324,7 @@ router.post('/', validate(createProductoSchema), async (req, res) => {
   }
 });
 
-router.put('/:id', validate(updateProductoSchema), async (req, res) => {
+router.put('/:id', authorizeRoles('ADMIN'), validate(updateProductoSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const data = normalizePrecioFields(req.validatedBody, { partial: true });
@@ -338,7 +341,7 @@ router.put('/:id', validate(updateProductoSchema), async (req, res) => {
 });
 
 // Soft-delete: marcar deleted_at
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorizeRoles('ADMIN'), async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await prisma.producto.update({ where: { id }, data: { deleted_at: new Date() } });

@@ -1,3 +1,5 @@
+import { loadSession } from '../auth/session.js';
+
 export async function request(url, options = {}) {
   const config = {
     headers: {
@@ -6,6 +8,8 @@ export async function request(url, options = {}) {
     },
     ...options
   };
+
+  attachSessionHeaders(config.headers);
 
   if (config.body && typeof config.body === 'object' && !(config.body instanceof FormData)) {
     config.headers['Content-Type'] = config.headers['Content-Type'] || 'application/json';
@@ -43,4 +47,18 @@ export function buildQuery(params) {
     searchParams.set(key, value);
   });
   return searchParams.toString();
+}
+
+function attachSessionHeaders(headers = {}) {
+  try {
+    const session = loadSession();
+    if (session?.id) {
+      headers['x-user-id'] = session.id;
+    }
+    if (session?.rol) {
+      headers['x-user-role'] = session.rol;
+    }
+  } catch (error) {
+    console.warn('[API] No se pudo adjuntar la sesión al request.', error);
+  }
 }

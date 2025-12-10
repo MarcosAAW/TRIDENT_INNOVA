@@ -1,5 +1,12 @@
 import { request } from '../common/api.js';
-import { loadSession, saveSession, clearSession } from './session.js';
+import {
+  loadSession,
+  saveSession,
+  clearSession,
+  refreshSessionActivity,
+  startSessionWatcher,
+  stopSessionWatcher
+} from './session.js';
 
 export function initAuth({ onAuthenticated, onLogout } = {}) {
   const overlay = document.getElementById('auth-overlay');
@@ -13,6 +20,9 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
   const submitButton = form?.querySelector('button[type="submit"]');
 
   let authDispatched = false;
+  let detachActivityListeners = null;
+  let lastActivitySync = 0;
+  const ACTIVITY_THROTTLE_MS = 30 * 1000;
 
   function setFeedback(message, variant) {
     if (!feedback) return;
@@ -39,6 +49,47 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
     overlay.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('auth-pending');
     setFeedback('');
+  }
+
+  function enableSessionGuards() {
+    attachActivityListeners();
+    startSessionWatcher(handleSessionExpired);
+  }
+
+  function disableSessionGuards() {
+    if (typeof detachActivityListeners === 'function') {
+      detachActivityListeners();
+      detachActivityListeners = null;
+    }
+    stopSessionWatcher();
+  }
+
+  function attachActivityListeners() {
+    if (detachActivityListeners) {
+      return;
+    }
+    const events = ['click', 'keydown', 'mousemove', 'touchstart'];
+    const handler = () => {
+      const now = Date.now();
+      if (now - lastActivitySync < ACTIVITY_THROTTLE_MS) {
+        return;
+      }
+      lastActivitySync = now;
+      refreshSessionActivity();
+    };
+    events.forEach((evt) => window.addEventListener(evt, handler, { passive: true }));
+    detachActivityListeners = () => {
+      events.forEach((evt) => window.removeEventListener(evt, handler));
+    };
+  }
+
+  function handleSessionExpired() {
+    disableSessionGuards();
+    clearSession();
+    renderSessionInfo(null);
+    resetDispatchFlag();
+    showOverlay();
+    setFeedback('Tu sesión expiró por inactividad. Iniciá sesión nuevamente.', 'info');
   }
 
   function renderSessionInfo(usuario) {
@@ -92,6 +143,7 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
         throw new Error('Respuesta inválida del servidor.');
       }
       saveSession(usuarioAutenticado);
+      enableSessionGuards();
       renderSessionInfo(usuarioAutenticado);
       hideOverlay();
       form?.reset();
@@ -119,6 +171,7 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
       clearSession();
       renderSessionInfo(null);
       resetDispatchFlag();
+      disableSessionGuards();
       if (typeof onLogout === 'function') {
         onLogout();
       }
@@ -131,6 +184,7 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
     renderSessionInfo(storedSession);
     hideOverlay();
     dispatchAuthenticated(storedSession);
+    enableSessionGuards();
   } else {
     showOverlay();
   }

@@ -1,6 +1,8 @@
 const request = require('supertest');
 const { app, prisma } = require('../src/app');
 
+let adminUser;
+
 const basePayload = {
   sku: 'DRON-TEST',
   nombre: 'Dron de prueba',
@@ -20,6 +22,13 @@ function binaryParser(res, callback) {
   });
 }
 
+function auth(req, user = adminUser) {
+  if (!user) {
+    throw new Error('No hay usuario autenticado configurado para el test.');
+  }
+  return req.set('x-user-id', user.id).set('x-user-role', user.rol);
+}
+
 describe('Productos API', () => {
   beforeAll(async () => {
     await prisma.$connect();
@@ -30,6 +39,19 @@ describe('Productos API', () => {
     await prisma.movimientoStock.deleteMany();
     await prisma.venta.deleteMany();
     await prisma.producto.deleteMany();
+    await prisma.salidaCaja.deleteMany();
+    await prisma.cierreCaja.deleteMany();
+    await prisma.aperturaCaja.deleteMany();
+    await prisma.usuario.deleteMany();
+
+    adminUser = await prisma.usuario.create({
+      data: {
+        nombre: 'Admin pruebas',
+        usuario: 'admin.pruebas',
+        password_hash: 'hash',
+        rol: 'ADMIN'
+      }
+    });
   });
 
   afterAll(async () => {
@@ -37,8 +59,7 @@ describe('Productos API', () => {
   });
 
   test('rechaza tipo inválido', async () => {
-    const response = await request(app)
-      .post('/productos')
+    const response = await auth(request(app).post('/productos'))
       .send({ ...basePayload, tipo: 'INVALIDO' })
       .expect(400);
 
@@ -46,10 +67,9 @@ describe('Productos API', () => {
   });
 
   test('crea producto y evita duplicados de sku', async () => {
-    await request(app).post('/productos').send(basePayload).expect(201);
+    await auth(request(app).post('/productos')).send(basePayload).expect(201);
 
-    const dup = await request(app)
-      .post('/productos')
+    const dup = await auth(request(app).post('/productos'))
       .send({ ...basePayload, nombre: 'Otro nombre' })
       .expect(409);
 
@@ -65,14 +85,14 @@ describe('Productos API', () => {
 
     const created = [];
     for (const payload of productos) {
-      const res = await request(app).post('/productos').send(payload).expect(201);
+      const res = await auth(request(app).post('/productos')).send(payload).expect(201);
       created.push(res.body);
     }
 
     // Soft delete uno
-    await request(app).delete(`/productos/${created[2].id}`).expect(200);
+    await auth(request(app).delete(`/productos/${created[2].id}`)).expect(200);
 
-    const list = await request(app).get('/productos?search=dron&pageSize=1').expect(200);
+    const list = await auth(request(app).get('/productos?search=dron&pageSize=1')).expect(200);
     expect(list.body).toEqual(
       expect.objectContaining({
         data: expect.any(Array),
@@ -81,19 +101,15 @@ describe('Productos API', () => {
     );
     expect(list.body.data[0].sku).toBe('DRON-001');
 
-    const listadoGeneral = await request(app).get('/productos').expect(200);
+    const listadoGeneral = await auth(request(app).get('/productos')).expect(200);
     expect(listadoGeneral.body.data.some((p) => p.id === created[2].id)).toBe(false);
 
-    const incluyeEliminados = await request(app)
-      .get('/productos?include_deleted=true')
-      .expect(200);
+    const incluyeEliminados = await auth(request(app).get('/productos?include_deleted=true')).expect(200);
 
     const deletedItems = incluyeEliminados.body.data.filter((p) => p.deleted_at !== null);
     expect(deletedItems.length).toBeGreaterThanOrEqual(1);
 
-    const activos = await request(app)
-      .get('/productos?activo=true&pageSize=10')
-      .expect(200);
+    const activos = await auth(request(app).get('/productos?activo=true&pageSize=10')).expect(200);
 
     expect(activos.body.data.every((p) => p.activo)).toBe(true);
   });
@@ -109,7 +125,7 @@ describe('Productos API', () => {
       stock_actual: 2
     };
 
-    const response = await request(app).post('/productos').send(payload).expect(201);
+    const response = await auth(request(app).post('/productos')).send(payload).expect(201);
     expect(response.body).toHaveProperty('id');
 
     const stored = await prisma.producto.findUnique({ where: { id: response.body.id } });
@@ -121,14 +137,12 @@ describe('Productos API', () => {
   });
 
   test('genera un PDF con el reporte de inventario', async () => {
-    await request(app).post('/productos').send(basePayload).expect(201);
-    await request(app)
-      .post('/productos')
+    await auth(request(app).post('/productos')).send(basePayload).expect(201);
+    await auth(request(app).post('/productos'))
       .send({ ...basePayload, sku: 'CRITICO-1', nombre: 'Bajo stock', stock_actual: 1, minimo_stock: 5 })
       .expect(201);
 
-    const response = await request(app)
-      .get('/productos/reporte/inventario')
+    const response = await auth(request(app).get('/productos/reporte/inventario'))
       .buffer()
       .parse(binaryParser)
       .expect(200);

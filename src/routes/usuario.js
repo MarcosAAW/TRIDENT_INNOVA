@@ -4,6 +4,7 @@ const { z } = require('zod');
 const { RolUsuario } = require('@prisma/client');
 const prisma = require('../prismaClient');
 const validate = require('../middleware/validate');
+const { requireAuth, authorizeRoles } = require('../middleware/authContext');
 
 const router = express.Router();
 
@@ -36,6 +37,9 @@ const listQuerySchema = z.object({
   include_deleted: z.coerce.boolean().optional(),
   search: z.string().trim().min(1).optional()
 }).partial();
+
+router.use(requireAuth);
+router.use(authorizeRoles('ADMIN'));
 
 function sanitizeUsuario(usuario) {
   if (!usuario) return null;

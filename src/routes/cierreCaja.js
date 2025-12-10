@@ -37,9 +37,14 @@ function ensureDate(input, fallback = new Date()) {
 }
 
 const currencyFormatter = new Intl.NumberFormat('es-PY', { style: 'currency', currency: 'PYG' });
+const currencyFormatterUsd = new Intl.NumberFormat('es-PY', { style: 'currency', currency: 'USD' });
 
 function formatCurrency(value) {
   return currencyFormatter.format(Number(value || 0));
+}
+
+function formatCurrencyUsd(value) {
+  return currencyFormatterUsd.format(Number(value || 0));
 }
 
 const listQuerySchema = z.object({
@@ -113,16 +118,34 @@ async function calcularResumen(client, { usuarioId, fechaHasta }) {
     },
     select: {
       total: true,
+      total_moneda: true,
+      moneda: true,
       estado: true
     }
   });
 
-  const totalVentas = ventas
+  const totalesVentas = ventas
     .filter((venta) => {
       if (!venta.estado) return true;
       return venta.estado.toUpperCase() !== 'ANULADA';
     })
-    .reduce((acc, venta) => acc + Number(venta.total || 0), 0);
+    .reduce(
+      (acc, venta) => {
+        acc.gs += Number(venta.total || 0);
+        if ((venta.moneda || 'PYG').toUpperCase() === 'USD') {
+          const usdAmount = Number(venta.total_moneda || 0);
+          if (Number.isFinite(usdAmount)) {
+            acc.usd += usdAmount;
+          }
+        }
+        return acc;
+      },
+      { gs: 0, usd: 0 }
+    );
+
+  const totalVentasGs = totalesVentas.gs;
+  const totalVentasUsd = totalesVentas.usd;
+  const totalEfectivoUsd = totalVentasUsd; // por ahora todas las ventas USD se consideran efectivo
 
   const salidasPendientes = await client.salidaCaja.findMany({
     where: {
@@ -140,17 +163,23 @@ async function calcularResumen(client, { usuarioId, fechaHasta }) {
   const totalSalidas = salidasPendientes.reduce((acc, salida) => acc + Number(salida.monto || 0), 0);
   const saldoInicial = Number(apertura.saldo_inicial || 0);
 
+  const efectivoEsperadoGs = round(saldoInicial + totalVentasGs - totalSalidas);
+  const efectivoEsperadoUsd = round(totalEfectivoUsd);
+
   return {
     apertura,
     periodo: { desde: fechaInicio, hasta: fechaFin },
     totales: {
-      ventas: round(totalVentas),
-      efectivo: round(totalVentas),
+      ventas: round(totalVentasGs),
+      ventasUsd: round(totalVentasUsd),
+      efectivoUsd: round(totalEfectivoUsd),
+      efectivo: round(totalVentasGs),
       tarjeta: 0,
       transferencia: 0,
       saldoInicial: round(saldoInicial),
       salidas: round(totalSalidas),
-      efectivoEsperado: round(saldoInicial + totalVentas - totalSalidas)
+      efectivoEsperado: efectivoEsperadoGs,
+      efectivoEsperadoUsd
     },
     salidasPendientes
   };
@@ -200,7 +229,9 @@ router.get('/', async (req, res) => {
     });
 
     const totalVentas = cierres.reduce((acc, cierre) => acc + Number(cierre.total_ventas || 0), 0);
+    const totalVentasUsd = cierres.reduce((acc, cierre) => acc + Number(cierre.total_ventas_usd || 0), 0);
     const totalEfectivo = cierres.reduce((acc, cierre) => acc + Number(cierre.total_efectivo || 0), 0);
+    const totalEfectivoUsd = cierres.reduce((acc, cierre) => acc + Number(cierre.efectivo_usd || 0), 0);
     const totalSalidas = cierres.reduce((acc, cierre) => acc + Number(cierre.total_salidas || 0), 0);
 
     res.json({
@@ -208,7 +239,9 @@ router.get('/', async (req, res) => {
       meta: {
         total: cierres.length,
         totalVentas: round(totalVentas),
+        totalVentasUsd: round(totalVentasUsd),
         totalEfectivo: round(totalEfectivo),
+        totalEfectivoUsd: round(totalEfectivoUsd),
         totalSalidas: round(totalSalidas)
       }
     });
@@ -290,6 +323,9 @@ router.post('/', validate(createCierreSchema), async (req, res) => {
         ? round(payload.total_transferencia)
         : resumen.totales.transferencia;
 
+    const totalVentasUsd = resumen.totales.ventasUsd || 0;
+    const totalEfectivoUsd = resumen.totales.efectivoUsd || 0;
+
     const totalEfectivoVentas = round(Math.max(resumen.totales.ventas - totalTarjeta - totalTransferencia, 0));
     const efectivoEsperado = round(
       resumen.totales.saldoInicial + totalEfectivoVentas - resumen.totales.salidas
@@ -309,7 +345,9 @@ router.post('/', validate(createCierreSchema), async (req, res) => {
           fecha_apertura: resumen.periodo.desde,
           fecha_cierre: resumen.periodo.hasta,
           total_ventas: resumen.totales.ventas,
+          total_ventas_usd: resumen.totales.ventasUsd,
           total_efectivo: totalEfectivoVentas,
+          efectivo_usd: totalEfectivoUsd,
           total_tarjeta: totalTarjeta,
           total_transferencia: totalTransferencia,
           total_salidas: resumen.totales.salidas,
@@ -610,7 +648,9 @@ function renderMetricGrid(doc, metrics, startX, width) {
   const cards = [
     { label: 'Saldo inicial', value: formatCurrency(metrics.saldoInicial) },
     { label: 'Ventas registradas', value: formatCurrency(metrics.totalVentas) },
+    { label: 'Ventas USD', value: formatCurrencyUsd(metrics.totalVentasUsd) },
     { label: 'Ingresos en efectivo', value: formatCurrency(metrics.totalEfectivo) },
+    { label: 'Efectivo USD', value: formatCurrencyUsd(metrics.efectivoUsd) },
     { label: 'Salidas', value: formatCurrency(metrics.totalSalidas) },
     { label: 'Efectivo esperado', value: formatCurrency(metrics.efectivoEsperado) },
     {
@@ -667,21 +707,39 @@ function renderIncomeAndBalance(doc, metrics, startX, width) {
     }
   ];
 
+  if (metrics.efectivoUsd > 0) {
+    ingresosRows.splice(1, 0, {
+      label: 'Efectivo USD',
+      value: formatCurrencyUsd(metrics.efectivoUsd)
+    });
+  }
+
   const balanceRows = [
     { label: 'Saldo inicial', value: formatCurrency(metrics.saldoInicial) },
-    { label: '+ Ventas', value: formatCurrency(metrics.totalVentas) },
-    { label: '- Salidas', value: formatCurrency(metrics.totalSalidas) },
-    { label: 'Efectivo esperado', value: formatCurrency(metrics.efectivoEsperado), bold: true },
-    {
-      label: 'Efectivo contado',
-      value: metrics.efectivoDeclarado != null ? formatCurrency(metrics.efectivoDeclarado) : '—'
-    },
-    {
-      label: 'Diferencia',
-      value: metrics.diferencia != null ? formatCurrency(metrics.diferencia) : '—',
-      highlight: true
-    }
+    { label: '+ Ventas', value: formatCurrency(metrics.totalVentas) }
   ];
+
+  if (metrics.totalVentasUsd > 0) {
+    balanceRows.push({ label: '+ Ventas USD', value: formatCurrencyUsd(metrics.totalVentasUsd) });
+  }
+
+  balanceRows.push({ label: '- Salidas', value: formatCurrency(metrics.totalSalidas) });
+  balanceRows.push({ label: 'Efectivo esperado', value: formatCurrency(metrics.efectivoEsperado), bold: true });
+
+  if (metrics.efectivoEsperadoUsd > 0) {
+    balanceRows.push({ label: 'Efectivo esperado USD', value: formatCurrencyUsd(metrics.efectivoEsperadoUsd) });
+  }
+
+  balanceRows.push({
+    label: 'Efectivo contado',
+    value: metrics.efectivoDeclarado != null ? formatCurrency(metrics.efectivoDeclarado) : '—'
+  });
+
+  balanceRows.push({
+    label: 'Diferencia',
+    value: metrics.diferencia != null ? formatCurrency(metrics.diferencia) : '—',
+    highlight: true
+  });
 
   const leftEnd = drawKeyValueTable(doc, 'Ingresos por medio', ingresosRows, startX, topY, tableWidth);
   const rightEnd = drawKeyValueTable(
@@ -789,12 +847,15 @@ function buildCierreMetrics(cierre) {
     cierre.saldo_inicial != null ? cierre.saldo_inicial : cierre.apertura?.saldo_inicial || 0
   );
   const totalVentas = Number(cierre.total_ventas || 0);
+  const totalVentasUsd = Number(cierre.total_ventas_usd || 0);
   const totalEfectivo = Number(cierre.total_efectivo || 0);
+  const efectivoUsd = Number(cierre.efectivo_usd || 0);
   const totalTarjeta = Number(cierre.total_tarjeta || 0);
   const totalTransferencia = Number(cierre.total_transferencia || 0);
   const totalSalidas = Number(cierre.total_salidas || 0);
   const totalIngresos = totalEfectivo + totalTarjeta + totalTransferencia;
   const efectivoEsperado = saldoInicial + totalEfectivo - totalSalidas;
+  const efectivoEsperadoUsd = efectivoUsd;
   const efectivoDeclarado = cierre.efectivo_declarado != null ? Number(cierre.efectivo_declarado) : null;
   const diferencia =
     cierre.diferencia != null
@@ -806,12 +867,15 @@ function buildCierreMetrics(cierre) {
   return {
     saldoInicial,
     totalVentas,
+    totalVentasUsd,
     totalEfectivo,
+    efectivoUsd,
     totalTarjeta,
     totalTransferencia,
     totalSalidas,
     totalIngresos,
     efectivoEsperado,
+    efectivoEsperadoUsd,
     efectivoDeclarado,
     diferencia
   };

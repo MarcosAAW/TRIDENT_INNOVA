@@ -103,6 +103,10 @@ const MONEDA_OPTIONS = [
   { value: 'USD', label: 'Dólares (USD)' }
 ];
 
+const UNIDAD_OPTIONS = [
+  { value: 'Unidad', label: 'Unidad' }
+];
+
 export const productosModule = {
   key: 'productos',
   label: 'Productos',
@@ -186,7 +190,7 @@ export const productosModule = {
     },
     { name: 'stock_actual', label: 'Stock actual', type: 'number', step: '1', min: 0, cast: 'int', defaultValue: 0 },
     { name: 'minimo_stock', label: 'Stock mínimo', type: 'number', step: '1', min: 0, cast: 'int' },
-    { name: 'unidad', label: 'Unidad', type: 'text', placeholder: 'Unidad de medida' },
+    { name: 'unidad', label: 'Unidad', type: 'select', defaultValue: 'Unidad', options: UNIDAD_OPTIONS },
     { name: 'descripcion', label: 'Descripción', type: 'textarea', rows: 3 },
     { name: 'activo', label: 'Producto activo', type: 'checkbox', defaultValue: true }
   ],
@@ -265,6 +269,7 @@ export const productosModule = {
     return {
       ...item,
       activo: Boolean(item.activo),
+      unidad: item.unidad || 'Unidad',
       moneda_precio_venta: (item.moneda_precio_venta || 'PYG').toUpperCase(),
       precio_venta:
         item.moneda_precio_venta && item.moneda_precio_venta !== 'PYG' && item.precio_venta_original

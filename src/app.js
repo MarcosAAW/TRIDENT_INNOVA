@@ -11,7 +11,9 @@ const usuarioRoutes = require('./routes/usuario');
 const authRoutes = require('./routes/auth');
 const cierreCajaRoutes = require('./routes/cierreCaja');
 const salidaCajaRoutes = require('./routes/salidaCaja');
+const facturaDigitalRoutes = require('./routes/facturaDigital');
 const errorHandler = require('./middleware/errorHandler');
+const { attachUser } = require('./middleware/authContext');
 
 const app = express();
 app.use(morgan('dev'));
@@ -21,6 +23,8 @@ app.use('/storage', express.static(path.join(__dirname, '..', 'storage')));
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'Trident Innova API' }));
 
+app.use(attachUser);
+
 app.use('/productos', productoRoutes);
 app.use('/ventas', ventaRoutes);
 app.use('/clientes', clienteRoutes);
@@ -28,6 +32,7 @@ app.use('/usuarios', usuarioRoutes);
 app.use('/auth', authRoutes);
 app.use('/cierres-caja', cierreCajaRoutes);
 app.use('/salidas-caja', salidaCajaRoutes);
+app.use('/facturas-digitales', facturaDigitalRoutes);
 
 // Error handler (último middleware)
 app.use(errorHandler);

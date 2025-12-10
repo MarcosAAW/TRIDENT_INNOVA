@@ -15,6 +15,7 @@ class FakePrisma {
       detalleVenta: [],
       movimientoStock: [],
       facturaElectronica: [],
+      facturaDigital: [],
       aperturaCaja: [],
       cierreCaja: [],
       salidaCaja: []
@@ -67,6 +68,14 @@ class FakePrisma {
       findUnique: async ({ where }) => this._facturaFindUnique(where),
       findMany: async ({ where } = {}) => this._facturaFindMany(where),
       deleteMany: async () => this._facturaDeleteMany()
+    };
+
+    this.facturaDigital = {
+      create: async ({ data }) => this._facturaDigitalCreate(data),
+      update: async ({ where, data }) => this._facturaDigitalUpdate(where, data),
+      findUnique: async ({ where }) => this._facturaDigitalFindUnique(where),
+      findFirst: async (args = {}) => this._facturaDigitalFindFirst(args),
+      deleteMany: async () => this._facturaDigitalDeleteMany()
     };
 
     this.aperturaCaja = {
@@ -327,6 +336,7 @@ class FakePrisma {
       descuento_total: data.descuento_total != null ? this._toNumber(data.descuento_total) : null,
       impuesto_total: data.impuesto_total != null ? this._toNumber(data.impuesto_total) : null,
       total: this._toNumber(data.total),
+      total_moneda: data.total_moneda != null ? this._toNumber(data.total_moneda) : null,
       estado: data.estado ?? 'PENDIENTE',
       moneda: data.moneda ?? 'PYG',
       tipo_cambio: data.tipo_cambio != null ? this._toNumber(data.tipo_cambio) : null,
@@ -370,6 +380,10 @@ class FakePrisma {
             (factura) => factura.id === record.factura_electronicaId || factura.ventaId === record.id
           )
         ) || null;
+    }
+    if (include.factura_digital) {
+      cloned.factura_digital =
+        this._clone(this.state.facturaDigital.find((factura) => factura.ventaId === record.id)) || null;
     }
     return cloned;
   }
@@ -425,6 +439,10 @@ class FakePrisma {
               (factura) => factura.id === record.factura_electronicaId || factura.ventaId === record.id
             )
           ) || null;
+      }
+      if (include.factura_digital) {
+        cloned.factura_digital =
+          this._clone(this.state.facturaDigital.find((factura) => factura.ventaId === record.id)) || null;
       }
       return cloned;
     });
@@ -617,7 +635,9 @@ class FakePrisma {
       fecha_apertura: data.fecha_apertura ? new Date(data.fecha_apertura).toISOString() : null,
       fecha_cierre: data.fecha_cierre ? new Date(data.fecha_cierre).toISOString() : now,
       total_ventas: this._toNumber(data.total_ventas),
+      total_ventas_usd: data.total_ventas_usd != null ? this._toNumber(data.total_ventas_usd) : 0,
       total_efectivo: this._toNumber(data.total_efectivo),
+      efectivo_usd: data.efectivo_usd != null ? this._toNumber(data.efectivo_usd) : null,
       total_tarjeta: this._toNumber(data.total_tarjeta ?? 0),
       total_transferencia: this._toNumber(data.total_transferencia ?? 0),
       total_salidas: this._toNumber(data.total_salidas ?? 0),
@@ -644,7 +664,9 @@ class FakePrisma {
         [
           'saldo_inicial',
           'total_ventas',
+          'total_ventas_usd',
           'total_efectivo',
+          'efectivo_usd',
           'total_tarjeta',
           'total_transferencia',
           'total_salidas',
@@ -906,6 +928,101 @@ class FakePrisma {
   _facturaDeleteMany() {
     const count = this.state.facturaElectronica.length;
     this.state.facturaElectronica = [];
+    return { count };
+  }
+
+  // FacturaDigital --------------------------------------------------------
+
+  _facturaDigitalCreate(data) {
+    const now = this._nowISO();
+    const record = {
+      id: data.id || randomUUID(),
+      ventaId: data.ventaId ?? null,
+      nro_factura: data.nro_factura,
+      timbrado: data.timbrado,
+      establecimiento: data.establecimiento || '001',
+      punto_expedicion: data.punto_expedicion || '001',
+      secuencia: data.secuencia != null ? this._toNumber(data.secuencia) : 1,
+      condicion_venta: data.condicion_venta || 'CONTADO',
+      fecha_emision: data.fecha_emision ? new Date(data.fecha_emision).toISOString() : now,
+      moneda: data.moneda || 'PYG',
+      total_exentas: this._toNumber(data.total_exentas) || 0,
+      total_gravada_5: this._toNumber(data.total_gravada_5) || 0,
+      total_gravada_10: this._toNumber(data.total_gravada_10) || 0,
+      total_iva_5: this._toNumber(data.total_iva_5) || 0,
+      total_iva_10: this._toNumber(data.total_iva_10) || 0,
+      total: this._toNumber(data.total) || 0,
+      total_iva: this._toNumber(data.total_iva) || 0,
+      total_letras: data.total_letras ?? null,
+      pdf_path: data.pdf_path ?? null,
+      hash_pdf: data.hash_pdf ?? null,
+      qr_data: data.qr_data ?? null,
+      numero_control: data.numero_control ?? null,
+      estado_envio: data.estado_envio || 'PENDIENTE',
+      enviado_a: data.enviado_a ?? null,
+      enviado_en: data.enviado_en ? new Date(data.enviado_en).toISOString() : null,
+      intentos: data.intentos != null ? this._toNumber(data.intentos) : 0,
+      created_at: data.created_at ?? now,
+      updated_at: data.updated_at ?? now,
+      deleted_at: data.deleted_at ?? null
+    };
+    this.state.facturaDigital.push(record);
+    return this._clone(record);
+  }
+
+  _facturaDigitalUpdate(where = {}, data = {}) {
+    const record = this.state.facturaDigital.find((item) => item.id === where.id);
+    if (!record) {
+      throw new Error('FACTURA_DIGITAL_NO_ENCONTRADA');
+    }
+
+    Object.entries(data).forEach(([key, value]) => {
+      if (value && typeof value === 'object' && 'set' in value) {
+        record[key] = value.set;
+      } else if (value && typeof value === 'object' && 'increment' in value) {
+        record[key] = (record[key] ?? 0) + this._toNumber(value.increment);
+      } else if (value && typeof value === 'object' && 'decrement' in value) {
+        record[key] = (record[key] ?? 0) - this._toNumber(value.decrement);
+      } else if (value instanceof Date) {
+        record[key] = value.toISOString();
+      } else if (value && typeof value === 'object') {
+        record[key] = this._clone(value);
+      } else {
+        record[key] = value;
+      }
+    });
+
+    record.updated_at = this._nowISO();
+    return this._clone(record);
+  }
+
+  _facturaDigitalFindUnique(where = {}) {
+    const keys = Object.keys(where || {});
+    const record = this.state.facturaDigital.find((item) => keys.some((key) => item[key] === where[key]));
+    return record ? this._clone(record) : null;
+  }
+
+  _facturaDigitalFindFirst({ where = {}, orderBy } = {}) {
+    let results = this.state.facturaDigital;
+    if (where.timbrado) {
+      results = results.filter((item) => item.timbrado === where.timbrado);
+    }
+    if (where.establecimiento) {
+      results = results.filter((item) => item.establecimiento === where.establecimiento);
+    }
+    if (where.punto_expedicion) {
+      results = results.filter((item) => item.punto_expedicion === where.punto_expedicion);
+    }
+    if (orderBy && orderBy.secuencia) {
+      const direction = orderBy.secuencia.toLowerCase() === 'desc' ? -1 : 1;
+      results = [...results].sort((a, b) => (a.secuencia - b.secuencia) * direction);
+    }
+    return results.length ? this._clone(results[0]) : null;
+  }
+
+  _facturaDigitalDeleteMany() {
+    const count = this.state.facturaDigital.length;
+    this.state.facturaDigital = [];
     return { count };
   }
 }

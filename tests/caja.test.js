@@ -42,16 +42,24 @@ describe('Cierre de Caja API', () => {
     return new Date(inicioJornada.getTime() + minutos * 60000).toISOString();
   }
 
-  async function crearVenta(total, { estado = 'COMPLETADA', minuto = 60 } = {}) {
-    return prisma.venta.create({
-      data: {
-        usuarioId: usuario.id,
-        subtotal: total,
-        total,
-        estado,
-        fecha: fechaRelativa(minuto)
-      }
-    });
+  async function crearVenta(total, { estado = 'COMPLETADA', minuto = 60, moneda = 'PYG', totalMoneda, tipo_cambio } = {}) {
+    const data = {
+      usuarioId: usuario.id,
+      subtotal: total,
+      total,
+      estado,
+      fecha: fechaRelativa(minuto),
+      moneda
+    };
+
+    if (totalMoneda !== undefined) {
+      data.total_moneda = totalMoneda;
+    }
+    if (tipo_cambio !== undefined) {
+      data.tipo_cambio = tipo_cambio;
+    }
+
+    return prisma.venta.create({ data });
   }
 
   async function crearSalidaPendiente(monto, overrides = {}) {
@@ -90,6 +98,14 @@ describe('Cierre de Caja API', () => {
   test('estado de caja resume ventas y salidas pendientes', async () => {
     await crearApertura({ saldo: 1000000, minuto: 0 });
     await crearVenta(900000, { minuto: 120 });
+    const usdTipoCambio = 7200;
+    const usdMonto = 150;
+    await crearVenta(usdTipoCambio * usdMonto, {
+      minuto: 150,
+      moneda: 'USD',
+      totalMoneda: usdMonto,
+      tipo_cambio: usdTipoCambio
+    });
     await crearVenta(500000, { estado: 'ANULADA', minuto: 180 });
     await crearSalidaPendiente(150000, { descripcion: 'Reposición insumos' });
 
@@ -97,7 +113,12 @@ describe('Cierre de Caja API', () => {
     const res = await request(app).get(`/cierres-caja/estado?${query}`).expect(200);
 
     expect(res.body.totales).toBeDefined();
-    expect(res.body.totales.ventas).toBeCloseTo(900000, 2);
+    const totalVentasGs = 900000 + usdTipoCambio * usdMonto;
+    expect(res.body.totales.ventas).toBeCloseTo(totalVentasGs, 2);
+    expect(res.body.totales.efectivo).toBeCloseTo(totalVentasGs, 2);
+    expect(res.body.totales.ventasUsd).toBeCloseTo(usdMonto, 2);
+    expect(res.body.totales.efectivoUsd).toBeCloseTo(usdMonto, 2);
+    expect(res.body.totales.efectivoEsperadoUsd).toBeCloseTo(usdMonto, 2);
     expect(res.body.totales.saldoInicial).toBeCloseTo(1000000, 2);
     expect(res.body.totales.salidas).toBeCloseTo(150000, 2);
     expect(res.body.salidasPendientes).toHaveLength(1);
@@ -106,6 +127,14 @@ describe('Cierre de Caja API', () => {
   test('cerrar caja consume el estado y asigna salidas pendientes', async () => {
     await crearApertura({ saldo: 500000, minuto: 0 });
     await crearVenta(800000, { minuto: 90 });
+    const usdTipoCambio = 7300;
+    const usdMonto = 200;
+    await crearVenta(usdTipoCambio * usdMonto, {
+      minuto: 120,
+      moneda: 'USD',
+      totalMoneda: usdMonto,
+      tipo_cambio: usdTipoCambio
+    });
     await crearSalidaPendiente(120000, { descripcion: 'Pago delivery' });
 
     const cierreRes = await request(app)
@@ -120,16 +149,20 @@ describe('Cierre de Caja API', () => {
       })
       .expect(201);
 
-    expect(cierreRes.body.total_ventas).toBeCloseTo(800000, 2);
+    const totalVentasGs = 800000 + usdTipoCambio * usdMonto;
+    expect(cierreRes.body.total_ventas).toBeCloseTo(totalVentasGs, 2);
+    expect(cierreRes.body.total_ventas_usd).toBeCloseTo(usdMonto, 2);
     expect(cierreRes.body.saldo_inicial).toBeCloseTo(500000, 2);
     expect(cierreRes.body.total_salidas).toBeCloseTo(120000, 2);
     expect(cierreRes.body.total_tarjeta).toBeCloseTo(250000, 2);
     expect(cierreRes.body.total_transferencia).toBeCloseTo(150000, 2);
-    expect(cierreRes.body.total_efectivo).toBeCloseTo(800000 - 250000 - 150000, 2);
+    const totalEfectivo = totalVentasGs - 250000 - 150000;
+    expect(cierreRes.body.total_efectivo).toBeCloseTo(totalEfectivo, 2);
+    expect(cierreRes.body.efectivo_usd).toBeCloseTo(usdMonto, 2);
     expect(Array.isArray(cierreRes.body.salidas)).toBe(true);
     expect(cierreRes.body.salidas.length).toBe(1);
 
-    const esperado = 500000 + (800000 - 250000 - 150000) - 120000;
+    const esperado = 500000 + totalEfectivo - 120000;
     expect(Number(cierreRes.body.diferencia)).toBeCloseTo(900000 - esperado, 2);
 
     const sinCierre = await prisma.salidaCaja.findMany({ where: { cierreId: null } });

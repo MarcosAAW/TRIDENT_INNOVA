@@ -4,6 +4,7 @@ const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
+const { requireAuth } = require('../middleware/authContext');
 
 const baseClienteSchema = {
   nombre_razon_social: z.string().min(1, 'El nombre o razón social es obligatorio'),
@@ -16,6 +17,8 @@ const baseClienteSchema = {
 
 const createClienteSchema = z.object(baseClienteSchema);
 const updateClienteSchema = createClienteSchema.partial();
+
+router.use(requireAuth);
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),

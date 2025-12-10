@@ -10,6 +10,41 @@ const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
+const { procesarFacturaElectronica } = require('../services/sifen/facturaProcessor');
+const empresaConfig = require('../config/empresa');
+const { generarFacturaDigital, FacturaDigitalError, validateTimbradoConfig } = require('../services/facturaDigital');
+const { requireAuth, authorizeRoles } = require('../middleware/authContext');
+const {
+  enviarFacturaDigitalPorCorreo,
+  EmailNotConfiguredError,
+  DestinatarioInvalidoError,
+  isEmailEnabled
+} = require('../services/email/facturaDigitalMailer');
+
+const MONEDAS_PERMITIDAS = new Set(['PYG', 'USD']);
+
+const VENTAS_REPORT_INCLUDE = {
+  cliente: true,
+  usuario: true,
+  factura_electronica: {
+    select: {
+      id: true,
+      nro_factura: true
+    }
+  },
+  factura_digital: {
+    select: {
+      id: true,
+      nro_factura: true,
+      pdf_path: true
+    }
+  },
+  detalles: {
+    include: {
+      producto: true
+    }
+  }
+};
 
 const detalleSchema = z.object({
   productoId: z.string().uuid(),
@@ -26,6 +61,14 @@ const ivaSchema = z
     return Number(value);
   });
 
+const monedaFilterSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .transform((value) => value.toUpperCase())
+  .refine((value) => MONEDAS_PERMITIDAS.has(value), { message: 'Moneda no soportada (usa PYG o USD).' })
+  .optional();
+
 const createVentaSchema = z.object({
   usuarioId: z.string().uuid(),
   clienteId: z.string().uuid().optional(),
@@ -34,7 +77,20 @@ const createVentaSchema = z.object({
   estado: z.string().optional(),
   motivo: z.string().optional(),
   almacenId: z.string().uuid().optional(),
-  iva_porcentaje: ivaSchema
+  iva_porcentaje: ivaSchema,
+  moneda: z
+    .string()
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => MONEDAS_PERMITIDAS.has(value), {
+      message: 'Moneda no soportada (usa PYG o USD).'
+    })
+    .optional(),
+  tipo_cambio: z
+    .coerce.number({ invalid_type_error: 'El tipo de cambio debe ser numérico.' })
+    .positive('El tipo de cambio debe ser mayor a cero.')
+    .max(20000, 'El tipo de cambio es demasiado alto.')
+    .optional()
 });
 
 class VentaValidationError extends Error {}
@@ -58,6 +114,7 @@ const listQuerySchema = z.object({
   fecha_desde: dateParam.optional(),
   fecha_hasta: dateParam.optional(),
   mes: monthParam.optional(),
+  moneda: monedaFilterSchema,
   include_deleted: z.coerce.boolean().optional()
 });
 
@@ -70,22 +127,24 @@ const cancelVentaSchema = z.object({
 });
 
 const EMPRESA_INFO = {
-  nombre: 'TRIDENT INNOVA E.A.S',
-  ruc: '80132959-0',
-  direccion: 'Ruta 01, Casi Mcal. López. San Ignacio-Misiones',
-  telefono: '+595 983 784444',
-  email: 'info@tridentinnova.com'
+  nombre: empresaConfig?.nombre || 'TRIDENT INNOVA E.A.S',
+  ruc: empresaConfig?.ruc || '0000000-0',
+  direccion: empresaConfig?.direccion || 'San Ignacio - Misiones',
+  telefono: empresaConfig?.telefono || '',
+  email: empresaConfig?.email || ''
 };
+
+const REPORT_LOGO_PATH = path.join(__dirname, '..', 'public', 'img', 'logotridentgrande.png');
 
 function startOfDay(input) {
   const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
-  date.setHours(0, 0, 0, 0);
+  date.setUTCHours(0, 0, 0, 0);
   return date;
 }
 
 function endOfDay(input) {
   const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
-  date.setHours(23, 59, 59, 999);
+  date.setUTCHours(23, 59, 59, 999);
   return date;
 }
 
@@ -109,6 +168,10 @@ function buildVentaWhere(filters) {
 
   if (filters.estado) {
     where.estado = { contains: filters.estado, mode: 'insensitive' };
+  }
+
+  if (filters.moneda) {
+    where.moneda = filters.moneda;
   }
 
   if (filters.iva_porcentaje !== undefined && filters.iva_porcentaje !== null) {
@@ -156,6 +219,15 @@ function normalizeIvaPorcentaje(value) {
   return parsed === 5 ? 5 : 10;
 }
 
+function normalizeCurrency(value) {
+  if (!value) return 'PYG';
+  const upper = String(value).trim().toUpperCase();
+  if (MONEDAS_PERMITIDAS.has(upper)) {
+    return upper;
+  }
+  return 'PYG';
+}
+
 function round(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round(Number(value) * factor + Number.EPSILON) / factor;
@@ -169,6 +241,8 @@ function ensureWithinLimit(value, label) {
     throw new VentaValidationError(`${label} supera el máximo permitido.`);
   }
 }
+
+router.use(requireAuth);
 
 router.get('/', async (req, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
@@ -191,6 +265,14 @@ router.get('/', async (req, res) => {
             nro_factura: true
           }
         },
+        factura_digital: {
+          select: {
+            id: true,
+            nro_factura: true,
+            pdf_path: true,
+            estado_envio: true
+          }
+        },
         detalles: {
           include: {
             producto: true
@@ -201,13 +283,33 @@ router.get('/', async (req, res) => {
     });
 
     const data = serialize(ventas);
+    const resumen = data.reduce(
+      (acc, venta) => {
+        const estado = (venta.estado || '').toUpperCase();
+        const anulada = estado === 'ANULADA' || Boolean(venta.deleted_at);
+        if (!anulada) {
+          acc.total_pyg += Number(venta.total || 0);
+          const currency = (venta.moneda || 'PYG').toUpperCase();
+          if (currency === 'USD') {
+            const usdAmount = Number(venta.total_moneda || 0);
+            if (Number.isFinite(usdAmount)) {
+              acc.total_usd += usdAmount;
+            }
+          }
+        }
+        return acc;
+      },
+      { total_pyg: 0, total_usd: 0 }
+    );
+
     res.json({
       data,
       meta: {
         page: 1,
         pageSize: data.length,
         total: data.length,
-        totalPages: 1
+        totalPages: 1,
+        resumen
       }
     });
   } catch (err) {
@@ -302,6 +404,25 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       ensureWithinLimit(impuestoTotal, 'Impuesto total');
 
       const total = baseGravada;
+      const monedaSeleccionada = normalizeCurrency(payload.moneda);
+      let tipoCambioSeleccionado = null;
+      if (monedaSeleccionada === 'USD') {
+        const parsedTipoCambio = Number(payload.tipo_cambio);
+        if (!Number.isFinite(parsedTipoCambio) || parsedTipoCambio <= 0) {
+          throw new VentaValidationError('Ingresá un tipo de cambio válido para ventas en USD.');
+        }
+        tipoCambioSeleccionado = round(parsedTipoCambio, 4);
+      }
+
+      let totalEnMonedaSeleccionada = null;
+      if (tipoCambioSeleccionado) {
+        if (total === 0) {
+          totalEnMonedaSeleccionada = 0;
+        } else {
+          totalEnMonedaSeleccionada = round(total / tipoCambioSeleccionado, 2);
+        }
+        ensureWithinLimit(totalEnMonedaSeleccionada, 'Total en moneda seleccionada');
+      }
 
       const venta = await tx.venta.create({
         data: {
@@ -312,8 +433,9 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
           impuesto_total: impuestoTotal,
           total,
           estado: payload.estado || 'PENDIENTE',
-          moneda: 'PYG',
-          tipo_cambio: null,
+          moneda: monedaSeleccionada,
+          tipo_cambio: tipoCambioSeleccionado,
+          total_moneda: totalEnMonedaSeleccionada,
           iva_porcentaje: ivaPorcentaje
         }
       });
@@ -393,13 +515,23 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
 
 // Nota: no implementamos update/delete complejos por ahora
 
-router.post('/:id/facturar', async (req, res) => {
+router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
   const parsedParams = ventaIdParams.safeParse(req.params);
   if (!parsedParams.success) {
     return res.status(400).json({ error: 'Identificador de venta inválido.' });
   }
 
   const { id } = parsedParams.data;
+
+  try {
+    validateTimbradoConfig(empresaConfig.timbrado || {});
+  } catch (timbradoError) {
+    if (timbradoError instanceof FacturaDigitalError) {
+      return res.status(412).json({ error: timbradoError.message, code: timbradoError.code });
+    }
+    console.error('[FacturaDigital] Error al validar el timbrado.', timbradoError);
+    return res.status(500).json({ error: 'No se pudo validar la configuración del timbrado.' });
+  }
 
   try {
     const { venta, factura } = await prisma.$transaction(async (tx) => {
@@ -409,7 +541,8 @@ router.post('/:id/facturar', async (req, res) => {
           cliente: true,
           usuario: true,
           detalles: { include: { producto: true } },
-          factura_electronica: true
+          factura_electronica: true,
+          factura_digital: true
         }
       });
 
@@ -478,7 +611,8 @@ router.post('/:id/facturar', async (req, res) => {
           cliente: true,
           usuario: true,
           detalles: { include: { producto: true } },
-          factura_electronica: true
+          factura_electronica: true,
+          factura_digital: true
         }
       });
 
@@ -502,6 +636,38 @@ router.post('/:id/facturar', async (req, res) => {
       console.error('[Factura] No se pudo generar el PDF.', assetError);
     }
 
+    try {
+      const facturaDigital = await generarFacturaDigital(venta);
+      if (facturaDigital) {
+        venta.factura_digital = facturaDigital;
+      }
+    } catch (digitalError) {
+      console.error('[FacturaDigital] No se pudo generar la factura digital.', digitalError);
+    }
+
+    if (isEmailEnabled() && venta?.cliente?.correo && venta?.factura_digital?.pdf_path) {
+      try {
+        const updatedDigital = await enviarFacturaDigitalPorCorreo(venta.factura_digital, venta);
+        venta.factura_digital = updatedDigital;
+      } catch (mailError) {
+        if (mailError instanceof EmailNotConfiguredError || mailError instanceof DestinatarioInvalidoError) {
+          console.warn('[FacturaDigital] Aviso al enviar correo:', mailError.message);
+        } else {
+          console.error('[FacturaDigital] Error al enviar el correo con la factura.', mailError);
+        }
+      }
+    }
+
+    try {
+      const resultadoSifen = await procesarFacturaElectronica(venta);
+      if (resultadoSifen?.factura) {
+        facturaActualizada = resultadoSifen.factura;
+        venta.factura_electronica = facturaActualizada;
+      }
+    } catch (sifenError) {
+      console.error('[SIFEN] Error al procesar el documento electrónico.', sifenError);
+    }
+
     res.json({ venta: serialize(venta), factura: serialize(facturaActualizada) });
   } catch (err) {
     if (err instanceof VentaValidationError) {
@@ -512,7 +678,7 @@ router.post('/:id/facturar', async (req, res) => {
   }
 });
 
-router.post('/:id/anular', async (req, res) => {
+router.post('/:id/anular', authorizeRoles('ADMIN'), async (req, res) => {
   const parsedParams = ventaIdParams.safeParse(req.params);
   if (!parsedParams.success) {
     return res.status(400).json({ error: 'Identificador de venta inválido.' });
@@ -576,12 +742,24 @@ router.post('/:id/anular', async (req, res) => {
             include: {
               producto: true
             }
-          }
+          },
+          factura_digital: true
         }
       });
 
       return updated;
     });
+
+    if (result?.factura_digital) {
+      try {
+        const facturaActualizada = await generarFacturaDigital(result);
+        if (facturaActualizada) {
+          result.factura_digital = facturaActualizada;
+        }
+      } catch (regenError) {
+        console.error('[FacturaDigital] No se pudo regenerar la factura anulada.', regenError);
+      }
+    }
 
     res.json(serialize(result));
   } catch (err) {
@@ -593,7 +771,688 @@ router.post('/:id/anular', async (req, res) => {
   }
 });
 
+router.get('/reporte/diario', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parámetros inválidos', detalles: parsed.error.flatten() });
+  }
+
+  try {
+    const { filters, range, filterChips } = prepareReportFilters(parsed.data);
+    const where = buildVentaWhere(filters);
+    const ventas = await prisma.venta.findMany({
+      where,
+      include: VENTAS_REPORT_INCLUDE,
+      orderBy: { fecha: 'asc' }
+    });
+
+    const data = serialize(ventas);
+    if (!data.length) {
+      return res.status(404).json({ error: 'No se encontraron ventas para el rango seleccionado.' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="reporte-ventas-diario-${range.fileLabel}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'LEGAL', margin: 32, bufferPages: true, layout: 'landscape' });
+    doc.pipe(res);
+    renderDailySalesReport(doc, data, { range, filterChips });
+    doc.end();
+  } catch (error) {
+    if (error instanceof VentaValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('[ventas] reporte diario', error);
+    res.status(500).json({ error: 'No se pudo generar el reporte diario.' });
+  }
+});
+
+router.get('/reporte/margen', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parámetros inválidos', detalles: parsed.error.flatten() });
+  }
+
+  try {
+    const { filters, range, filterChips } = prepareReportFilters(parsed.data);
+    const where = buildVentaWhere(filters);
+    const ventas = await prisma.venta.findMany({
+      where,
+      include: VENTAS_REPORT_INCLUDE,
+      orderBy: { fecha: 'asc' }
+    });
+
+    const data = serialize(ventas);
+    if (!data.length) {
+      return res.status(404).json({ error: 'No se encontraron ventas para el rango seleccionado.' });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="reporte-ventas-margen-${range.fileLabel}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'LEGAL', margin: 32, bufferPages: true, layout: 'landscape' });
+    doc.pipe(res);
+    renderMarginSalesReport(doc, data, { range, filterChips });
+    doc.end();
+  } catch (error) {
+    if (error instanceof VentaValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('[ventas] reporte margen', error);
+    res.status(500).json({ error: 'No se pudo generar el reporte de margen.' });
+  }
+});
+
 module.exports = router;
+
+function prepareReportFilters(filtersInput = {}) {
+  const filters = { ...filtersInput };
+  const range = resolveReportRange(filters);
+  filters.fecha_desde = range.startDate;
+  filters.fecha_hasta = range.endDate;
+  delete filters.mes;
+  return {
+    filters,
+    range,
+    filterChips: describeReportFilters(filtersInput)
+  };
+}
+
+function resolveReportRange(filters) {
+  let startDate = filters?.fecha_desde ? startOfDay(filters.fecha_desde) : null;
+  let endDate = filters?.fecha_hasta ? endOfDay(filters.fecha_hasta) : null;
+
+  if (!startDate && !endDate) {
+    const today = new Date();
+    startDate = startOfDay(today);
+    endDate = endOfDay(today);
+  } else if (startDate && !endDate) {
+    endDate = endOfDay(startDate);
+  } else if (!startDate && endDate) {
+    startDate = startOfDay(endDate);
+  }
+
+  if (startDate > endDate) {
+    throw new VentaValidationError('La fecha inicial no puede ser posterior a la fecha final.');
+  }
+
+  const sameDay = startDate.getTime() === endDate.getTime();
+  return {
+    startDate,
+    endDate,
+    startLabel: formatIsoDateOnly(startDate),
+    endLabel: formatIsoDateOnly(endDate),
+    fileLabel: sameDay
+      ? formatIsoDateOnly(startDate)
+      : `${formatIsoDateOnly(startDate)}_${formatIsoDateOnly(endDate)}`
+  };
+}
+
+function describeReportFilters(filters = {}) {
+  const chips = [];
+  if (filters.search) chips.push(`Búsqueda: ${filters.search}`);
+  if (filters.estado) chips.push(`Estado contiene: ${filters.estado}`);
+  if (filters.iva_porcentaje) chips.push(`IVA: ${filters.iva_porcentaje}%`);
+  if (filters.moneda) chips.push(`Moneda: ${(filters.moneda || '').toUpperCase()}`);
+  if (filters.include_deleted) chips.push('Incluye registros eliminados');
+  return chips;
+}
+
+function renderDailySalesReport(doc, ventas, { range, filterChips }) {
+  const startX = doc.page.margins.left;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const totals = calculateDailyTotals(ventas);
+  const rows = buildDailyReportRows(ventas, totals);
+  renderReportHeader(doc, 'Reporte diario de ventas', range, startX, usableWidth);
+  drawReportFilterTags(doc, filterChips, startX, usableWidth);
+  drawReportSummaryChips(
+    doc,
+    [
+      { label: 'Ventas registradas', value: formatIntegerValue(ventas.length) },
+      { label: 'Subtotal', value: formatCurrencyPyG(totals.subtotal) },
+      { label: 'IVA calculado', value: formatCurrencyPyG(totals.impuesto) },
+      { label: 'Total periodo', value: formatCurrencyPyG(totals.total) }
+    ],
+    startX,
+    usableWidth
+  );
+  if (totals.totalUsd > 0) {
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor('#475569')
+      .text(`Equivalente en USD: ${formatCurrencyUsd(totals.totalUsd)}`, startX, doc.y + 4);
+    doc.moveDown(0.4);
+  }
+  ensureMinimumSpacing(doc, 10);
+  drawReportTable(
+    doc,
+    rows,
+    buildDailyReportColumns(usableWidth),
+    startX,
+    usableWidth,
+    {
+      resolveRowFill: (row, index) => {
+        if (row.isSummary) return '#0f172a';
+        if (row.isCancelled) return '#fee2e2';
+        return index % 2 === 0 ? '#ffffff' : '#f8fafc';
+      },
+      resolveFontColor: (row) => (row.isSummary ? '#ffffff' : '#0f172a')
+    }
+  );
+
+  doc.moveDown(0.6);
+  doc
+    .font('Helvetica')
+    .fontSize(8)
+    .fillColor('#94a3b8')
+    .text('Documento generado automáticamente por Trident Innova.', startX, doc.y, {
+      width: usableWidth,
+      align: 'center'
+    });
+}
+
+function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
+  const startX = doc.page.margins.left;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const totals = calculateMarginTotals(ventas);
+  const rows = buildMarginReportRows(ventas, totals);
+  renderReportHeader(doc, 'Reporte de margen de ventas', range, startX, usableWidth);
+  drawReportFilterTags(doc, filterChips, startX, usableWidth);
+  drawReportSummaryChips(
+    doc,
+    [
+      { label: 'Ventas analizadas', value: formatIntegerValue(ventas.length) },
+      { label: 'Total ventas', value: formatCurrencyPyG(totals.totalVenta) },
+      { label: 'Costo estimado', value: formatCurrencyPyG(totals.costo) },
+      { label: 'Margen promedio', value: formatPercentValue(totals.margenPercent) }
+    ],
+    startX,
+    usableWidth
+  );
+  ensureMinimumSpacing(doc, 10);
+  drawReportTable(
+    doc,
+    rows,
+    buildMarginReportColumns(usableWidth),
+    startX,
+    usableWidth,
+    {
+      resolveRowFill: (row, index) => (row.isSummary ? '#0f172a' : index % 2 === 0 ? '#ffffff' : '#f8fafc'),
+      resolveFontColor: (row) => (row.isSummary ? '#ffffff' : '#0f172a')
+    }
+  );
+
+  doc.moveDown(0.6);
+  doc
+    .font('Helvetica')
+    .fontSize(8)
+    .fillColor('#94a3b8')
+    .text('Documento generado automáticamente por Trident Innova.', startX, doc.y, {
+      width: usableWidth,
+      align: 'center'
+    });
+}
+
+function renderReportHeader(doc, title, range, startX, usableWidth) {
+  const startLabel = formatRangeDateLabel(range.startDate);
+  const endLabel = formatRangeDateLabel(range.endDate);
+  const subtitle = startLabel === endLabel ? `Fecha: ${startLabel}` : `Rango: ${startLabel} – ${endLabel}`;
+
+  const hasLogo = fs.existsSync(REPORT_LOGO_PATH);
+  const logoHeight = 84;
+  let cursorY = doc.page.margins.top;
+
+  if (hasLogo) {
+    try {
+      doc.image(REPORT_LOGO_PATH, startX, cursorY - 6, { fit: [180, logoHeight], align: 'left' });
+    } catch (logoError) {
+      console.warn('[Reportes] No se pudo incrustar el logo.', logoError);
+    }
+  }
+
+  const textBlockOffset = hasLogo ? 190 : 0;
+  const textStartX = startX + textBlockOffset;
+  const textWidth = usableWidth - textBlockOffset * 2;
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(20)
+    .fillColor('#0f172a')
+    .text(title, textStartX, cursorY, { width: textWidth, align: 'center' });
+
+  doc
+    .font('Helvetica')
+    .fontSize(11)
+    .fillColor('#475569')
+    .text(`${EMPRESA_INFO.nombre} · RUC ${EMPRESA_INFO.ruc}`, textStartX, doc.y + 6, {
+      width: textWidth,
+      align: 'center'
+    });
+
+  doc
+    .font('Helvetica')
+    .fontSize(10)
+    .fillColor('#475569')
+    .text(subtitle, textStartX, doc.y + 4, { width: textWidth, align: 'center' });
+
+  doc
+    .font('Helvetica')
+    .fontSize(9)
+    .fillColor('#94a3b8')
+    .text(`Generado: ${formatDateTimeLabel(new Date())}`, textStartX, doc.y + 6, {
+      width: textWidth,
+      align: 'center'
+    });
+
+  doc.moveDown(2);
+}
+
+function drawReportFilterTags(doc, filterChips, startX, usableWidth) {
+  if (!Array.isArray(filterChips) || !filterChips.length) {
+    return;
+  }
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(10)
+    .fillColor('#0f172a')
+    .text('Filtros aplicados', startX, doc.y, { width: usableWidth });
+  doc.moveDown(0.2);
+  filterChips.forEach((chip) => {
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor('#475569')
+      .text(`• ${chip}`, startX, doc.y, { width: usableWidth });
+  });
+  doc.moveDown(0.5);
+}
+
+function drawReportSummaryChips(doc, items, startX, usableWidth) {
+  if (!Array.isArray(items) || !items.length) {
+    return;
+  }
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(11)
+    .fillColor('#0f172a')
+    .text('Resumen del periodo', startX, doc.y, { width: usableWidth });
+  doc.moveDown(0.3);
+
+  const visibleItems = items.slice(0, 4);
+  const gap = 12;
+  const chipWidth = (usableWidth - gap * (visibleItems.length - 1)) / visibleItems.length;
+  const chipHeight = 56;
+  const baseY = doc.y;
+
+  visibleItems.forEach((item, index) => {
+    const x = startX + index * (chipWidth + gap);
+    doc.save();
+    doc.roundedRect(x, baseY, chipWidth, chipHeight, 8).fill('#f8fafc');
+    doc.restore();
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor('#475569')
+      .text(item.label, x + 10, baseY + 10, { width: chipWidth - 20 });
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(14)
+      .fillColor('#0f172a')
+      .text(String(item.value ?? '—'), x + 10, baseY + 26, { width: chipWidth - 20 });
+  });
+
+  doc.y = baseY + chipHeight + 8;
+
+  if (items.length > visibleItems.length) {
+    const remaining = items.slice(visibleItems.length);
+    remaining.forEach((item) => {
+      doc
+        .font('Helvetica')
+        .fontSize(9)
+        .fillColor('#475569')
+        .text(`${item.label}: ${item.value}`, startX, doc.y, { width: usableWidth });
+    });
+    doc.moveDown(0.4);
+  }
+}
+
+function ensureMinimumSpacing(doc, amount) {
+  const desired = Math.max(0, amount);
+  if (doc.y - doc.page.margins.top < desired) {
+    doc.moveDown(0.1);
+  }
+  doc.y = Math.max(doc.y, doc.page.margins.top + desired);
+}
+
+function drawReportTable(doc, rows, columns, startX, usableWidth, options = {}) {
+  if (!Array.isArray(rows) || !rows.length) {
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#475569')
+      .text('No se encontraron registros para el rango indicado.', startX, doc.y, { width: usableWidth });
+    return;
+  }
+
+  const headerHeight = 24;
+  const maxY = () => doc.page.height - doc.page.margins.bottom;
+
+  const drawHeader = () => {
+    const headerY = doc.y;
+    doc.save();
+    doc.rect(startX, headerY, usableWidth, headerHeight).fill('#f97316');
+    doc.restore();
+    let cursorX = startX;
+    columns.forEach((col, columnIndex) => {
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(9)
+        .fillColor('#ffffff')
+        .text(col.label, cursorX + 6, headerY + 6, { width: col.width - 12, align: col.align || 'left' });
+      cursorX += col.width;
+      if (columnIndex < columns.length - 1) {
+        doc
+          .moveTo(cursorX, headerY)
+          .lineTo(cursorX, headerY + headerHeight)
+          .stroke('#1e293b');
+      }
+    });
+    doc.y += headerHeight - 2;
+  };
+
+  drawHeader();
+
+  rows.forEach((row, index) => {
+    const rowHeight = measureReportRowHeight(doc, row, columns);
+    if (doc.y + rowHeight > maxY()) {
+      doc.addPage();
+      drawHeader();
+    }
+
+    const fillColor = options.resolveRowFill ? options.resolveRowFill(row, index) : index % 2 === 0 ? '#ffffff' : '#f8fafc';
+    const fontColor = options.resolveFontColor ? options.resolveFontColor(row, index) : '#0f172a';
+    const fontName = row.isSummary ? 'Helvetica-Bold' : 'Helvetica';
+    const rowY = doc.y;
+
+    doc.save();
+    doc.rect(startX, rowY, usableWidth, rowHeight).fill(fillColor);
+    doc.restore();
+    doc.rect(startX, rowY, usableWidth, rowHeight).stroke('#e2e8f0');
+
+    let cursorX = startX;
+    columns.forEach((col, columnIndex) => {
+      const value = row[col.key] ?? '—';
+      doc
+        .font(fontName)
+        .fontSize(col.key === 'estado' ? 8 : 9)
+        .fillColor(fontColor)
+        .text(value, cursorX + 6, rowY + 6, { width: col.width - 12, align: col.align || 'left' });
+      cursorX += col.width;
+      if (columnIndex < columns.length - 1) {
+        doc
+          .moveTo(cursorX, rowY)
+          .lineTo(cursorX, rowY + rowHeight)
+          .stroke('#e2e8f0');
+      }
+    });
+
+    doc.y = rowY + rowHeight;
+  });
+}
+
+function measureReportRowHeight(doc, row, columns) {
+  let height = 20;
+  doc.font('Helvetica').fontSize(9);
+  columns.forEach((col) => {
+    const value = row[col.key] ?? '—';
+    const textHeight = doc.heightOfString(String(value), {
+      width: Math.max(col.width - 12, 18),
+      align: col.align || 'left'
+    });
+    height = Math.max(height, textHeight + 10);
+  });
+  return height;
+}
+
+function buildDailyReportColumns(usableWidth) {
+  const definitions = [
+    { key: 'fecha', label: 'Fecha', ratio: 0.075 },
+    { key: 'factura', label: 'N° factura', ratio: 0.11 },
+    { key: 'cliente', label: 'Cliente', ratio: 0.21 },
+    { key: 'usuario', label: 'Usuario', ratio: 0.09 },
+    { key: 'estado', label: 'Estado', ratio: 0.065 },
+    { key: 'subtotal', label: 'Subtotal', ratio: 0.14, align: 'right' },
+    { key: 'descuento', label: 'Descuento', ratio: 0.085, align: 'right' },
+    { key: 'iva', label: 'IVA', ratio: 0.095, align: 'right' },
+    { key: 'total', label: 'Total', ratio: 0.11, align: 'right' },
+    { key: 'items', label: 'Items', ratio: 0.02, align: 'center' }
+  ];
+
+  return definitions.map((column) => ({
+    ...column,
+    width: usableWidth * column.ratio
+  }));
+}
+
+function buildDailyReportRows(ventas, totals) {
+  const rows = ventas.map((venta) => {
+    const estadoBase = (venta.estado || '').toUpperCase();
+    const anulada = estadoBase === 'ANULADA' || Boolean(venta.deleted_at);
+    return {
+      fecha: formatDateForDisplay(venta.fecha || venta.created_at),
+      factura: resolveInvoiceNumberForReport(venta),
+      cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
+      usuario: venta.usuario?.nombre || venta.usuario?.usuario || '—',
+      estado: anulada ? 'Anulada' : venta.estado || '—',
+      subtotal: formatCurrencyPyG(venta.subtotal),
+      descuento: formatCurrencyPyG(venta.descuento_total),
+      iva: formatCurrencyPyG(venta.impuesto_total),
+      total: formatCurrencyPyG(venta.total ?? venta.subtotal),
+      items: formatIntegerValue(countVentaItems(venta)),
+      isCancelled: anulada
+    };
+  });
+
+  rows.push({
+    fecha: 'Totales',
+    factura: `(${ventas.length} ventas)`,
+    cliente: '',
+    usuario: '',
+    estado: '',
+    subtotal: formatCurrencyPyG(totals.subtotal),
+    descuento: formatCurrencyPyG(totals.descuento),
+    iva: formatCurrencyPyG(totals.impuesto),
+    total: formatCurrencyPyG(totals.total),
+    items: formatIntegerValue(totals.items),
+    isSummary: true
+  });
+
+  return rows;
+}
+
+function calculateDailyTotals(ventas) {
+  return ventas.reduce(
+    (acc, venta) => {
+      acc.subtotal += Number(venta.subtotal) || 0;
+      acc.descuento += Number(venta.descuento_total) || 0;
+      acc.impuesto += Number(venta.impuesto_total) || 0;
+      acc.total += Number(venta.total ?? venta.subtotal) || 0;
+      acc.items += countVentaItems(venta);
+      const currency = (venta.moneda || 'PYG').toUpperCase();
+      if (currency === 'USD') {
+        const usdAmount = Number(venta.total_moneda) || 0;
+        if (usdAmount > 0) {
+          acc.totalUsd += usdAmount;
+        }
+      }
+      return acc;
+    },
+    { subtotal: 0, descuento: 0, impuesto: 0, total: 0, items: 0, totalUsd: 0 }
+  );
+}
+
+function buildMarginReportColumns(usableWidth) {
+  const definitions = [
+    { key: 'fecha', label: 'Fecha', ratio: 0.12 },
+    { key: 'factura', label: 'N° factura', ratio: 0.18 },
+    { key: 'cliente', label: 'Cliente', ratio: 0.24 },
+    { key: 'total', label: 'Total venta', ratio: 0.15, align: 'right' },
+    { key: 'costo', label: 'Costo estimado', ratio: 0.15, align: 'right' },
+    { key: 'margen', label: 'Margen', ratio: 0.1, align: 'right' },
+    { key: 'margenPorcentaje', label: 'Margen %', ratio: 0.06, align: 'right' }
+  ];
+
+  return definitions.map((column) => ({
+    ...column,
+    width: usableWidth * column.ratio
+  }));
+}
+
+function buildMarginReportRows(ventas, totals) {
+  const rows = ventas.map((venta) => {
+    const totalVenta = Number(venta.total ?? venta.subtotal) || 0;
+    const costo = computeCostoVenta(venta);
+    const margen = totalVenta - costo;
+    const porcentaje = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
+    return {
+      fecha: formatDateForDisplay(venta.fecha || venta.created_at),
+      factura: resolveInvoiceNumberForReport(venta),
+      cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
+      total: formatCurrencyPyG(totalVenta),
+      costo: formatCurrencyPyG(costo),
+      margen: formatCurrencyPyG(margen),
+      margenPorcentaje: formatPercentValue(porcentaje)
+    };
+  });
+
+  rows.push({
+    fecha: 'Totales',
+    factura: `(${ventas.length} ventas)`,
+    cliente: '',
+    total: formatCurrencyPyG(totals.totalVenta),
+    costo: formatCurrencyPyG(totals.costo),
+    margen: formatCurrencyPyG(totals.margen),
+    margenPorcentaje: formatPercentValue(totals.margenPercent),
+    isSummary: true
+  });
+
+  return rows;
+}
+
+function calculateMarginTotals(ventas) {
+  const result = ventas.reduce(
+    (acc, venta) => {
+      const totalVenta = Number(venta.total ?? venta.subtotal) || 0;
+      const costo = computeCostoVenta(venta);
+      const margen = totalVenta - costo;
+      acc.totalVenta += totalVenta;
+      acc.costo += costo;
+      acc.margen += margen;
+      return acc;
+    },
+    { totalVenta: 0, costo: 0, margen: 0 }
+  );
+
+  result.margenPercent = result.totalVenta > 0 ? (result.margen / result.totalVenta) * 100 : 0;
+  return result;
+}
+
+function computeCostoVenta(venta) {
+  if (!Array.isArray(venta?.detalles)) return 0;
+  return venta.detalles.reduce((acc, detalle) => acc + computeCostoDetalle(detalle), 0);
+}
+
+function computeCostoDetalle(detalle) {
+  const cantidad = Number(detalle?.cantidad) || 0;
+  if (!cantidad) return 0;
+  const producto = detalle?.producto || {};
+  let costoUnitario = Number(producto.precio_compra) || 0;
+  if (!costoUnitario && producto.precio_compra_original && producto.tipo_cambio_precio_compra) {
+    const original = Number(producto.precio_compra_original) || 0;
+    const tipoCambio = Number(producto.tipo_cambio_precio_compra) || 0;
+    if (original && tipoCambio) {
+      costoUnitario = original * tipoCambio;
+    }
+  }
+  return cantidad * costoUnitario;
+}
+
+function resolveInvoiceNumberForReport(venta) {
+  if (venta?.factura_digital?.nro_factura) return venta.factura_digital.nro_factura;
+  if (venta?.factura_electronica?.nro_factura) return venta.factura_electronica.nro_factura;
+  if (venta?.numero_factura) return venta.numero_factura;
+  return venta?.id ? venta.id.slice(0, 8).toUpperCase() : '-';
+}
+
+function countVentaItems(venta) {
+  if (!Array.isArray(venta?.detalles)) return 0;
+  return venta.detalles.length;
+}
+
+function formatCurrencyPyG(value) {
+  return new Intl.NumberFormat('es-PY', {
+    style: 'currency',
+    currency: 'PYG',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  }).format(Number(value) || 0);
+}
+
+function formatCurrencyUsd(value) {
+  return new Intl.NumberFormat('es-PY', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(Number(value) || 0);
+}
+
+function formatPercentValue(value) {
+  const numeric = Number(value) || 0;
+  return `${numeric.toLocaleString('es-PY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+}
+
+function formatIntegerValue(value) {
+  return new Intl.NumberFormat('es-PY').format(Number(value) || 0);
+}
+
+function formatIsoDateOnly(date) {
+  const value = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(value.getTime())) return '';
+  return value.toISOString().slice(0, 10);
+}
+
+function formatDateForDisplay(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return new Intl.DateTimeFormat('es-PY', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(date);
+}
+
+function formatRangeDateLabel(value) {
+  const adjusted = adjustDateForRangeLabel(value);
+  if (!adjusted) return '-';
+  return formatDateForDisplay(adjusted);
+}
+
+function adjustDateForRangeLabel(value) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCHours(12, 0, 0, 0);
+  return date;
+}
+
+function formatDateTimeLabel(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return new Intl.DateTimeFormat('es-PY', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
 
 function generarNumeroFactura(ventaId) {
   const cleaned = (ventaId || '').replace(/-/g, '').toUpperCase();
