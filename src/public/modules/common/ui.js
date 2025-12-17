@@ -132,12 +132,13 @@ export function initDashboard(modules) {
       tab.addEventListener('click', () => {
         const key = tab.dataset.module;
         if (key === state.moduleKey) return;
-        switchModule(key);
+        switchModule(key, { preserveScroll: true });
       });
     });
   }
 
-  function switchModule(key) {
+  function switchModule(key, options = {}) {
+    const { preserveScroll = false } = options;
     const mod = moduleMap.get(key);
     if (!mod) return;
 
@@ -179,7 +180,7 @@ export function initDashboard(modules) {
       mod.hooks.afterModuleChange({ form: dom.form, module: mod });
     }
 
-    loadList({ preserveScroll: false });
+    loadList({ preserveScroll });
   }
 
   async function loadList(options = {}) {
@@ -832,12 +833,15 @@ export function initDashboard(modules) {
     }
     if (dom.toggleFormCardButton) {
       dom.toggleFormCardButton.hidden = !hasForm;
+      dom.toggleFormCardButton.style.display = hasForm ? '' : 'none';
       if (hasForm) {
         const singular = getModuleSingular(mod);
         dom.toggleFormCardButton.textContent = shouldHide ? `Nuevo ${singular}` : 'Ocultar formulario';
         dom.toggleFormCardButton.setAttribute('aria-expanded', (!shouldHide).toString());
         dom.toggleFormCardButton.classList.toggle('primary', shouldHide);
         dom.toggleFormCardButton.classList.toggle('ghost', !shouldHide);
+      } else {
+        dom.toggleFormCardButton.setAttribute('aria-expanded', 'false');
       }
     }
   }

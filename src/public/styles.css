@@ -195,8 +195,45 @@ button {
 .panel-controls {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: var(--gap-sm);
+  align-items: stretch;
+  gap: var(--gap-md);
+  width: 100%;
+}
+
+.panel-controls .btn.primary {
+  align-self: flex-start;
+  border-radius: 999px;
+  padding: 0.7rem 1.35rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.module-tabs-card {
+  width: 100%;
+  padding: 1.1rem 1.25rem 1.35rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: linear-gradient(135deg, rgba(8, 15, 28, 0.9), rgba(15, 23, 42, 0.82));
+  box-shadow: var(--shadow-md);
+}
+
+.module-tabs-card__header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+}
+
+.module-tabs-card__header span {
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.module-tabs-card__header small {
+  color: var(--color-text-muted);
 }
 
 .session-info {
@@ -212,18 +249,21 @@ button {
 }
 
 .entity-tabs {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: var(--gap-sm);
+  width: 100%;
 }
 
 .tab-button {
-  padding: 0.55rem 1.25rem;
-  border-radius: 999px;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: rgba(148, 163, 184, 0.12);
   color: var(--color-text);
   font-weight: 600;
+  text-align: center;
+  min-height: 48px;
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
@@ -241,6 +281,7 @@ button {
   border-color: var(--color-primary);
   color: #0b1120;
   box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .btn {
@@ -990,6 +1031,23 @@ tbody button:disabled {
   border: 1px solid rgba(148, 163, 184, 0.28);
   background: rgba(8, 16, 32, 0.7);
   min-height: 64px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.pos-client-selected.has-client {
+  border-color: var(--color-border-strong);
+  background: rgba(249, 115, 22, 0.08);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
+}
+
+.pos-client-selected strong {
+  font-size: 1rem;
+  color: var(--color-text);
+}
+
+.pos-client-selected small {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
 }
 
 .pos-client-selected .placeholder {
@@ -998,8 +1056,10 @@ tbody button:disabled {
 
 .pos-client-selector {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: var(--gap-sm);
+  margin-bottom: var(--gap-sm);
 }
 
 .pos-client-search input,

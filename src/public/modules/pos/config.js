@@ -534,9 +534,11 @@ function renderClientSection() {
       <strong>${escapeHtml(posState.cliente.nombre_razon_social || 'Cliente sin nombre')}</strong>
       <small>${escapeHtml(posState.cliente.ruc || 'Sin RUC')}</small>
     `;
+    wrapper.classList.add('has-client');
     posDom.clientClearButton.hidden = false;
   } else {
     wrapper.innerHTML = '<span class="placeholder">Cliente eventual</span>';
+    wrapper.classList.remove('has-client');
     posDom.clientClearButton.hidden = true;
   }
   updateActionStates();
