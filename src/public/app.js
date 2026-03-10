@@ -38,6 +38,14 @@ function adaptModuleForRole(module, role) {
     return module;
   }
 
+  if (role === 'VENDEDOR') {
+    if (module.key === 'sucursales' || module.key === 'usuarios') {
+      return null;
+    }
+    // Vendedor mantiene permisos completos en productos; el resto sigue reglas generales
+    return module.key === 'productos' ? module : cloneModule(module, module.key === 'ventas' ? { moduleActions: [], rowActions: [] } : {});
+  }
+
   if (module.key === 'sucursales') {
     return null;
   }
