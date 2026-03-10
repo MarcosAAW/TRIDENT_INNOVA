@@ -157,6 +157,7 @@ function wireSkuAutoFill(form) {
     tipoControl.addEventListener('change', () => {
       skuTouched = false;
       lastSuggestedSku = null;
+      skuControl.value = '';
       suggestSku(form, { force: true });
     });
 
@@ -168,7 +169,8 @@ function wireSkuAutoFill(form) {
     form.dataset.skuAutoFill = '1';
   }
 
-  suggestSku(form, { force: true });
+  // Forzar sugerencia inicial una vez que el DOM está listo
+  setTimeout(() => suggestSku(form, { force: true }), 0);
 }
 
 export const productosModule = {
