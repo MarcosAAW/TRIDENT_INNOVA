@@ -348,7 +348,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/next-sku', authorizeRoles('ADMIN'), async (req, res) => {
+router.get('/next-sku', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
   const parsed = z.object({ tipo: z.nativeEnum(TipoProducto) }).safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Tipo de producto inválido' });
@@ -363,7 +363,7 @@ router.get('/next-sku', authorizeRoles('ADMIN'), async (req, res) => {
   }
 });
 
-router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
+router.get('/reporte/inventario', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
   const includeDeleted = String(req.query.include_deleted).toLowerCase() === 'true';
 
   try {
@@ -387,7 +387,7 @@ router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
   }
 });
 
-router.get('/reporte/inventario.xlsx', authorizeRoles('ADMIN'), async (req, res) => {
+router.get('/reporte/inventario.xlsx', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
   const includeDeleted = String(req.query.include_deleted).toLowerCase() === 'true';
 
   try {
@@ -435,7 +435,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', authorizeRoles('ADMIN'), validate(createProductoSchema), async (req, res) => {
+router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createProductoSchema), async (req, res) => {
   try {
     const data = normalizePrecioFields(req.validatedBody);
     const created = await prisma.producto.create({ data: { ...data, sucursalId: req.sucursalId } });
@@ -448,7 +448,7 @@ router.post('/', authorizeRoles('ADMIN'), validate(createProductoSchema), async 
   }
 });
 
-router.put('/:id', authorizeRoles('ADMIN'), validate(updateProductoSchema), async (req, res) => {
+router.put('/:id', authorizeRoles('ADMIN', 'VENDEDOR'), validate(updateProductoSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const data = normalizePrecioFields(req.validatedBody, { partial: true });
@@ -468,7 +468,7 @@ router.put('/:id', authorizeRoles('ADMIN'), validate(updateProductoSchema), asyn
   }
 });
 
-router.post('/:id/imagen', authorizeRoles('ADMIN'), upload.single('file'), async (req, res) => {
+router.post('/:id/imagen', authorizeRoles('ADMIN', 'VENDEDOR'), upload.single('file'), async (req, res) => {
   try {
     const { id } = req.params;
     const producto = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
@@ -502,7 +502,7 @@ router.post('/:id/imagen', authorizeRoles('ADMIN'), upload.single('file'), async
 });
 
 // Soft-delete: marcar deleted_at
-router.delete('/:id', authorizeRoles('ADMIN'), async (req, res) => {
+router.delete('/:id', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
