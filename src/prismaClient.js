@@ -1,8 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 
-// Prisma 7: inyectamos la URL al constructor
-const prisma = new PrismaClient({
-	datasourceUrl: process.env.DATABASE_URL,
-});
+// Usa configuración por defecto; DATABASE_URL se toma del entorno
+const prisma = new PrismaClient();
 
 module.exports = prisma;
