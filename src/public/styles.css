@@ -156,6 +156,32 @@ button {
   transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, color 0.2s ease;
 }
 
+/* Logout icon button (small red icon) */
+#logout-button {
+  background: transparent;
+  border: none;
+  padding: 0.25rem;
+  color: var(--color-danger);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#logout-button:hover,
+#logout-button:focus {
+  background: rgba(239, 68, 68, 0.06);
+  outline: none;
+  border-radius: 8px;
+}
+
+.logout-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  vertical-align: middle;
+  fill: currentColor;
+}
+
 .actions button:hover,
 .actions button:focus-visible {
   background: rgba(249, 115, 22, 0.2);
@@ -246,6 +272,23 @@ button {
   border: 1px solid rgba(249, 115, 22, 0.35);
   color: var(--color-text);
   font-weight: 600;
+}
+
+.sucursal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-primary);
+  color: var(--color-primary);
+  background: rgba(249, 115, 22, 0.08);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.sucursal-picker {
+  display: none;
 }
 
 .entity-tabs {

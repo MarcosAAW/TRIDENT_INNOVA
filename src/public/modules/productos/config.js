@@ -1,6 +1,6 @@
 import { formatCurrency } from '../common/format.js';
-import { request, buildQuery } from '../common/api.js';
-import { createProducto } from './nuevo.js';
+import { request, buildQuery, urlWithSession } from '../common/api.js';
+import { createProducto, fetchNextSku } from './nuevo.js';
 import { updateProducto } from './editar.js';
 import { deleteProducto } from './eliminar.js';
 
@@ -107,6 +107,70 @@ const UNIDAD_OPTIONS = [
   { value: 'Unidad', label: 'Unidad' }
 ];
 
+let skuTouched = false;
+let lastSuggestedSku = null;
+
+function resetSkuState() {
+  skuTouched = false;
+  lastSuggestedSku = null;
+}
+
+async function suggestSku(form, { force = false } = {}) {
+  if (!form) return;
+  const tipoControl = form.elements?.tipo;
+  const skuControl = form.elements?.sku;
+  if (!tipoControl || !skuControl) return;
+
+  const tipo = tipoControl.value;
+  if (!tipo) return;
+
+  const currentValue = (skuControl.value || '').trim();
+  if (!force && skuTouched && currentValue && currentValue !== lastSuggestedSku) {
+    return;
+  }
+
+  try {
+    const nextSku = await fetchNextSku(tipo);
+    if (!nextSku) return;
+
+    const latestValue = (skuControl.value || '').trim();
+    if (!force && skuTouched && latestValue && latestValue !== lastSuggestedSku) {
+      return;
+    }
+
+    skuControl.value = nextSku;
+    lastSuggestedSku = nextSku;
+    skuTouched = false;
+  } catch (error) {
+    console.error('[Productos] No se pudo sugerir SKU', error);
+  }
+}
+
+function wireSkuAutoFill(form) {
+  const tipoControl = form?.elements?.tipo;
+  const skuControl = form?.elements?.sku;
+  if (!tipoControl || !skuControl) return;
+
+  const alreadyWired = form.dataset?.skuAutoFill === '1';
+
+  if (!alreadyWired) {
+    tipoControl.addEventListener('change', () => {
+      skuTouched = false;
+      lastSuggestedSku = null;
+      suggestSku(form, { force: true });
+    });
+
+    skuControl.addEventListener('input', () => {
+      const current = (skuControl.value || '').trim();
+      skuTouched = current !== lastSuggestedSku;
+    });
+
+    form.dataset.skuAutoFill = '1';
+  }
+
+  suggestSku(form, { force: true });
+}
+
 export const productosModule = {
   key: 'productos',
   label: 'Productos',
@@ -117,11 +181,17 @@ export const productosModule = {
   pageSize: 10,
   searchPlaceholder: 'Buscar por nombre o SKU',
   moduleActions: [
-    { action: 'inventory-report', label: 'Reporte de inventario', className: 'btn ghost' }
+    { action: 'inventory-report', label: 'Reporte PDF inventario', className: 'btn ghost' },
+    { action: 'inventory-report-xlsx', label: 'Exportar inventario XLSX', className: 'btn ghost' }
   ],
   moduleActionHandlers: {
     'inventory-report': () => {
-      window.open('/productos/reporte/inventario', '_blank', 'noopener');
+      const url = urlWithSession('/productos/reporte/inventario');
+      window.open(url, '_blank', 'noopener');
+    },
+    'inventory-report-xlsx': () => {
+      const url = urlWithSession('/productos/reporte/inventario.xlsx');
+      window.open(url, '_blank', 'noopener');
     }
   },
   rowActions: [
@@ -150,9 +220,9 @@ export const productosModule = {
     }
   ],
   fields: [
+    { name: 'tipo', label: 'Tipo', type: 'select', required: true, defaultValue: 'DRON', options: TIPO_OPTIONS },
     { name: 'sku', label: 'SKU', type: 'text', required: true, placeholder: 'DRON-001' },
     { name: 'nombre', label: 'Nombre', type: 'text', required: true, placeholder: 'Drone de inspección' },
-    { name: 'tipo', label: 'Tipo', type: 'select', required: true, defaultValue: 'DRON', options: TIPO_OPTIONS },
     { name: 'moneda_precio_venta', label: 'Moneda del precio de venta', type: 'select', required: true, defaultValue: 'PYG', options: MONEDA_OPTIONS },
     {
       name: 'precio_venta',
@@ -192,6 +262,7 @@ export const productosModule = {
     { name: 'minimo_stock', label: 'Stock mínimo', type: 'number', step: '1', min: 0, cast: 'int' },
     { name: 'unidad', label: 'Unidad', type: 'select', defaultValue: 'Unidad', options: UNIDAD_OPTIONS },
     { name: 'descripcion', label: 'Descripción', type: 'textarea', rows: 3 },
+    { name: 'imagen_archivo', label: 'Foto (opcional)', type: 'file', accept: 'image/*' },
     { name: 'activo', label: 'Producto activo', type: 'checkbox', defaultValue: true }
   ],
   columns: [
@@ -241,6 +312,14 @@ export const productosModule = {
         if (item.deleted_at) return '<span class="badge error">Eliminado</span>';
         if (item.activo === false) return '<span class="badge warn">Inactivo</span>';
         return '<span class="badge ok">Activo</span>';
+      }
+    },
+    {
+      header: 'Foto',
+      render: (item) => {
+        if (!item.imagen_url) return '-';
+        const safe = escapeText(item.imagen_url);
+        return `<a class="btn ghost small" href="${safe}" target="_blank" rel="noopener">Ver foto</a>`;
       }
     }
   ],
@@ -298,6 +377,8 @@ export const productosModule = {
       const tipoCambioVenta = form?.elements.tipo_cambio_precio_venta;
       const monedaCompra = form?.elements.moneda_precio_compra;
       const tipoCambioCompra = form?.elements.tipo_cambio_precio_compra;
+      resetSkuState();
+      wireSkuAutoFill(form);
 
       const toggleVenta = () => {
         const isUsd = monedaVenta?.value?.toUpperCase() === 'USD';
@@ -330,6 +411,8 @@ export const productosModule = {
       monedaVenta?.dispatchEvent(new Event('change'));
       const monedaCompra = form?.elements.moneda_precio_compra;
       monedaCompra?.dispatchEvent(new Event('change'));
+      skuTouched = true;
+      lastSuggestedSku = null;
     },
     onResetForm({ form }) {
       const monedaVenta = form?.elements.moneda_precio_venta;
@@ -342,6 +425,8 @@ export const productosModule = {
         monedaCompra.value = 'PYG';
         monedaCompra.dispatchEvent(new Event('change'));
       }
+      resetSkuState();
+      wireSkuAutoFill(form);
     }
   },
   actions: {

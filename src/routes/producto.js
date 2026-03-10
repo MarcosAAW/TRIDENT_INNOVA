@@ -1,5 +1,9 @@
 const express = require('express');
 const PDFDocument = require('pdfkit');
+const XLSX = require('xlsx');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const router = express.Router();
 const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
@@ -7,6 +11,39 @@ const { z } = require('zod');
 const validate = require('../middleware/validate');
 const { TipoProducto } = require('@prisma/client');
 const { requireAuth, authorizeRoles } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
+
+const REPORT_LOGO_PATH = path.join(__dirname, '..', 'public', 'img', 'logotridentgrande.png');
+const PRODUCT_IMAGES_DIR = path.join(__dirname, '..', '..', 'storage', 'productos');
+if (!fs.existsSync(PRODUCT_IMAGES_DIR)) {
+  fs.mkdirSync(PRODUCT_IMAGES_DIR, { recursive: true });
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, PRODUCT_IMAGES_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.jpg';
+      const safeExt = ext.length <= 6 ? ext : '.jpg';
+      const name = `${req.params.id || 'producto'}-${Date.now()}${safeExt}`;
+      cb(null, name);
+    }
+  }),
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+      return cb(new Error('Solo se permiten imágenes'));
+    }
+    cb(null, true);
+  },
+  limits: { fileSize: 3 * 1024 * 1024 }
+});
+
+const SKU_PREFIX_BY_TIPO = {
+  DRON: 'DRON',
+  REPUESTO: 'REP',
+  SERVICIO: 'SERV',
+  OTRO: 'OTR'
+};
 
 const MONEDAS_PERMITIDAS = new Set(['PYG', 'USD']);
 const MAX_DECIMAL_VALUE = 10_000_000_000; // límite por definición Decimal(12,2)
@@ -65,7 +102,7 @@ const createProductoSchema = z.object({
 
 const updateProductoSchema = createProductoSchema.partial();
 
-router.use(requireAuth);
+router.use(requireAuth, requireSucursal);
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -141,6 +178,41 @@ function decorateProducto(producto) {
     ...producto,
     stock_bajo: isStockBajo(producto)
   };
+}
+
+function parseSkuSuffix(prefix, skuValue) {
+  if (!skuValue || !prefix) return null;
+  const regex = new RegExp(`^${prefix}-([0-9]+)$`, 'i');
+  const match = skuValue.match(regex);
+  if (!match) return null;
+  const num = parseInt(match[1], 10);
+  return Number.isFinite(num) ? num : null;
+}
+
+async function computeNextSku(tipoProducto) {
+  const prefix = SKU_PREFIX_BY_TIPO[tipoProducto] || 'PROD';
+
+  const candidates = await prisma.producto.findMany({
+    where: {
+      sku: {
+        startsWith: `${prefix}-`
+      }
+    },
+    select: { sku: true },
+    orderBy: { sku: 'desc' },
+    take: 50 // muestra pequeña para encontrar el máximo sufijo
+  });
+
+  let maxSuffix = 0;
+  for (const item of candidates) {
+    const suffix = parseSkuSuffix(prefix, item.sku);
+    if (suffix !== null && suffix > maxSuffix) {
+      maxSuffix = suffix;
+    }
+  }
+
+  const nextSuffix = String(maxSuffix + 1).padStart(3, '0');
+  return `${prefix}-${nextSuffix}`;
 }
 
 function round(value, decimals = 2) {
@@ -233,6 +305,7 @@ router.get('/', async (req, res) => {
 
   const { page = 1, pageSize = 20, critico, ...filters } = parseResult.data;
   const where = buildWhere(filters);
+  where.sucursalId = req.sucursalId;
   const offset = (page - 1) * pageSize;
 
   try {
@@ -275,12 +348,27 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/next-sku', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsed = z.object({ tipo: z.nativeEnum(TipoProducto) }).safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Tipo de producto inválido' });
+  }
+
+  try {
+    const sku = await computeNextSku(parsed.data.tipo);
+    res.json({ sku });
+  } catch (error) {
+    console.error('[productos] next-sku', error);
+    res.status(500).json({ error: 'No se pudo sugerir un SKU.' });
+  }
+});
+
 router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
   const includeDeleted = String(req.query.include_deleted).toLowerCase() === 'true';
 
   try {
     const productos = await prisma.producto.findMany({
-      where: includeDeleted ? {} : { deleted_at: null },
+      where: includeDeleted ? { sucursalId: req.sucursalId } : { sucursalId: req.sucursalId, deleted_at: null },
       orderBy: { nombre: 'asc' }
     });
 
@@ -289,7 +377,7 @@ router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="reporte-inventario.pdf"');
 
-    const doc = new PDFDocument({ size: 'A4', margin: 32 });
+    const doc = new PDFDocument({ size: 'A4', margin: 32, layout: 'landscape' });
     doc.pipe(res);
     renderInventoryReport(doc, data);
     doc.end();
@@ -299,10 +387,46 @@ router.get('/reporte/inventario', authorizeRoles('ADMIN'), async (req, res) => {
   }
 });
 
+router.get('/reporte/inventario.xlsx', authorizeRoles('ADMIN'), async (req, res) => {
+  const includeDeleted = String(req.query.include_deleted).toLowerCase() === 'true';
+
+  try {
+    const productos = await prisma.producto.findMany({
+      where: includeDeleted ? { sucursalId: req.sucursalId } : { sucursalId: req.sucursalId, deleted_at: null },
+      orderBy: { nombre: 'asc' }
+    });
+
+    const data = sortForInventoryReport(serialize(productos).map(decorateProducto));
+    const rows = data.map((p) => ({
+      SKU: p.sku || '',
+      Nombre: p.nombre || '',
+      Descripcion: p.descripcion || '',
+      Tipo: p.tipo || '',
+      'Stock actual': Number(p.stock_actual ?? 0),
+      'Stock mínimo': Number(p.minimo_stock ?? 0),
+      'Precio venta (Gs)': Number(p.precio_venta ?? 0),
+      'Precio compra (Gs)': p.precio_compra != null ? Number(p.precio_compra) : null,
+      Estado: p.deleted_at ? 'Eliminado' : p.activo === false ? 'Inactivo' : 'Activo'
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Inventario');
+
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="reporte-inventario.xlsx"');
+    res.send(buffer);
+  } catch (error) {
+    console.error('[productos] reporte inventario xlsx', error);
+    res.status(500).json({ error: 'No se pudo generar el Excel de inventario.' });
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const producto = await prisma.producto.findUnique({ where: { id } });
+    const producto = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
     if (!producto || producto.deleted_at) return res.status(404).json({ error: 'Producto no encontrado' });
     res.json(decorateProducto(serialize(producto)));
   } catch (err) {
@@ -314,7 +438,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', authorizeRoles('ADMIN'), validate(createProductoSchema), async (req, res) => {
   try {
     const data = normalizePrecioFields(req.validatedBody);
-    const created = await prisma.producto.create({ data });
+    const created = await prisma.producto.create({ data: { ...data, sucursalId: req.sucursalId } });
     res.status(201).json(decorateProducto(serialize(created)));
   } catch (err) {
     if (err instanceof ProductoValidationError) {
@@ -330,6 +454,10 @@ router.put('/:id', authorizeRoles('ADMIN'), validate(updateProductoSchema), asyn
     const data = normalizePrecioFields(req.validatedBody, { partial: true });
     // No permitir actualizar el id
     delete data.id;
+    const existing = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    if (!existing || existing.deleted_at) {
+      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+    }
     const updated = await prisma.producto.update({ where: { id }, data });
     res.json(decorateProducto(serialize(updated)));
   } catch (err) {
@@ -340,10 +468,47 @@ router.put('/:id', authorizeRoles('ADMIN'), validate(updateProductoSchema), asyn
   }
 });
 
+router.post('/:id/imagen', authorizeRoles('ADMIN'), upload.single('file'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const producto = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    if (!producto || producto.deleted_at) {
+      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
+    }
+
+    // Eliminar imagen previa si existía
+    if (producto.imagen_url) {
+      const prevPath = path.join(__dirname, '..', '..', producto.imagen_url.replace(/^\//, ''));
+      if (fs.existsSync(prevPath)) {
+        try {
+          fs.unlinkSync(prevPath);
+        } catch (unlinkErr) {
+          console.warn('[productos] No se pudo eliminar la imagen previa', unlinkErr);
+        }
+      }
+    }
+
+    const relativePath = `/storage/productos/${req.file.filename}`;
+    const updated = await prisma.producto.update({ where: { id }, data: { imagen_url: relativePath } });
+    res.json({ imagen_url: relativePath, producto: decorateProducto(serialize(updated)) });
+  } catch (error) {
+    console.error('[productos] upload imagen', error);
+    res.status(500).json({ error: 'No se pudo guardar la imagen.' });
+  }
+});
+
 // Soft-delete: marcar deleted_at
 router.delete('/:id', authorizeRoles('ADMIN'), async (req, res) => {
   try {
     const { id } = req.params;
+    const existing = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    if (!existing || existing.deleted_at) {
+      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+    }
     const deleted = await prisma.producto.update({ where: { id }, data: { deleted_at: new Date() } });
   res.json({ ok: true, producto: decorateProducto(serialize(deleted)) });
   } catch (err) {
@@ -358,6 +523,18 @@ function formatCurrencyPyG(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return '—';
   return currencyFormatter.format(numeric);
+}
+
+function formatCurrencyCompactPyG(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '—';
+  const compact = new Intl.NumberFormat('es-PY', {
+    style: 'currency',
+    currency: 'PYG',
+    notation: 'compact',
+    maximumFractionDigits: 1
+  });
+  return compact.format(numeric);
 }
 
 function formatNumberValue(value) {
@@ -400,28 +577,30 @@ function renderInventoryReport(doc, productos) {
   const startX = doc.page.margins.left;
   const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const generatedAt = new Date();
-  const lowStockCount = productos.filter((item) => item.stock_bajo).length;
-  const inactiveCount = productos.filter((item) => item.deleted_at || item.activo === false).length;
+  const metrics = computeInventoryMetrics(productos);
 
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(18)
-    .fillColor('#0f172a')
-    .text('Reporte de inventario', startX, doc.page.margins.top, { width: usableWidth, align: 'center' });
-  doc
-    .font('Helvetica')
-    .fontSize(10)
-    .fillColor('#475569')
-    .text(`Generado: ${formatDateTime(generatedAt)}`, startX, doc.y + 4, { width: usableWidth, align: 'center' });
+  renderInventoryHeader(doc, startX, usableWidth, generatedAt);
 
-  doc.moveDown(1.5);
+  doc.moveDown(1.2);
   const summary = [
-    { label: 'Productos totales', value: productos.length },
-    { label: 'Con stock bajo', value: lowStockCount },
-    { label: 'Inactivos o eliminados', value: inactiveCount }
+    { label: 'Productos totales', value: metrics.totalProductos },
+    { label: 'Con stock bajo', value: metrics.stockBajo },
+    { label: 'Inactivos o eliminados', value: metrics.inactivos },
+    {
+      label: 'Valor inventario venta',
+      value: formatCurrencyPyG(metrics.valorInventarioVenta),
+      display: formatCurrencyCompactPyG(metrics.valorInventarioVenta),
+      full: formatCurrencyPyG(metrics.valorInventarioVenta)
+    },
+    {
+      label: 'Valor inventario compra',
+      value: formatCurrencyPyG(metrics.valorInventarioCompra),
+      display: formatCurrencyCompactPyG(metrics.valorInventarioCompra),
+      full: formatCurrencyPyG(metrics.valorInventarioCompra)
+    }
   ];
   drawSummaryChips(doc, summary, startX, usableWidth);
-  doc.moveDown(1);
+  doc.moveDown(0.6);
 
   drawInventoryTable(doc, productos, startX, usableWidth);
 
@@ -436,28 +615,134 @@ function renderInventoryReport(doc, productos) {
     });
 }
 
+function renderInventoryHeader(doc, startX, usableWidth, generatedAt) {
+  const headerHeight = 92;
+  const bgY = doc.page.margins.top;
+  const padding = 16;
+  const accentColor = '#f97316';
+
+  doc.save();
+  doc.roundedRect(startX, bgY, usableWidth, headerHeight, 14).fill('#0f172a');
+  doc.restore();
+
+  const logoSize = 64;
+  let cursorX = startX + padding;
+  let contentWidth = usableWidth - padding * 2;
+
+  const hasLogo = fs.existsSync(REPORT_LOGO_PATH);
+  if (hasLogo) {
+    try {
+      doc.image(REPORT_LOGO_PATH, cursorX, bgY + 12, { fit: [logoSize, logoSize], align: 'left' });
+      cursorX += logoSize + 12;
+      contentWidth -= logoSize + 12;
+    } catch (logoError) {
+      console.warn('[Reportes] No se pudo incrustar el logo.', logoError);
+    }
+  }
+
+  const textWidth = contentWidth * 0.7;
+  const rightWidth = contentWidth - textWidth;
+  const baseY = bgY + padding;
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(18)
+    .fillColor(accentColor)
+    .text('Reporte de inventario', cursorX, baseY, { width: textWidth, align: 'left' });
+
+  doc
+    .font('Helvetica')
+    .fontSize(10)
+    .fillColor('#e2e8f0')
+    .text('TRIDENT INNOVA E.A.S · RUC 80132959-0', cursorX, doc.y + 6, {
+      width: textWidth,
+      align: 'left'
+    });
+
+  doc
+    .font('Helvetica')
+    .fontSize(10)
+    .fillColor('#e2e8f0')
+    .text(`Generado: ${formatDateTime(generatedAt)}`, cursorX + textWidth, baseY + 2, {
+      width: rightWidth,
+      align: 'right'
+    });
+
+  doc.y = bgY + headerHeight + 12;
+}
+
+function computeInventoryMetrics(productos) {
+  let valorInventarioVenta = 0;
+  let valorInventarioCompra = 0;
+  let stockBajo = 0;
+  let inactivos = 0;
+
+  productos.forEach((p) => {
+    const stock = Number(p.stock_actual ?? 0);
+    const precioVenta = Number(p.precio_venta ?? 0);
+    const precioCompra = Number(p.precio_compra ?? 0);
+    if (Number.isFinite(stock) && stock > 0 && Number.isFinite(precioVenta)) {
+      valorInventarioVenta += stock * precioVenta;
+    }
+    if (Number.isFinite(stock) && stock > 0 && Number.isFinite(precioCompra)) {
+      valorInventarioCompra += stock * precioCompra;
+    }
+    if (p.stock_bajo) stockBajo += 1;
+    if (p.deleted_at || p.activo === false) inactivos += 1;
+  });
+
+  return {
+    totalProductos: productos.length,
+    stockBajo,
+    inactivos,
+    valorInventarioVenta,
+    valorInventarioCompra
+  };
+}
+
 function drawSummaryChips(doc, items, startX, usableWidth) {
   if (!items.length) return;
   const gap = 12;
   const chipWidth = (usableWidth - gap * (items.length - 1)) / items.length;
-  const chipHeight = 54;
+  const chipHeight = 72;
   const baseY = doc.y;
 
   items.forEach((item, index) => {
     const x = startX + index * (chipWidth + gap);
     doc.save();
-    doc.roundedRect(x, baseY, chipWidth, chipHeight, 10).fill('#f8fafc');
+    doc.roundedRect(x, baseY, chipWidth, chipHeight, 10).fill('#fff7ed');
     doc.restore();
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor('#475569')
-      .text(item.label, x + 12, baseY + 10, { width: chipWidth - 24 });
+    const textWidth = chipWidth - 24;
+    const labelY = baseY + 10;
+    doc.font('Helvetica').fontSize(9).fillColor('#ea580c');
+    const labelHeight = doc.heightOfString(item.label, { width: textWidth, align: 'left' });
+    doc.text(item.label, x + 12, labelY, { width: textWidth });
+
+    const valueY = labelY + labelHeight + 6;
+    const valueText = String(item.display ?? item.value ?? '—');
     doc
       .font('Helvetica-Bold')
-      .fontSize(16)
+      .fontSize(12)
       .fillColor('#0f172a')
-      .text(String(item.value ?? '—'), x + 12, baseY + 26, { width: chipWidth - 24 });
+      .text(valueText, x + 12, valueY, {
+        width: textWidth,
+        align: 'left',
+        lineBreak: false
+      });
+
+    if (item.full && item.display && item.full !== item.display) {
+      const valueHeight = doc.heightOfString(valueText, { width: textWidth, align: 'left' });
+      const fullY = valueY + valueHeight + 2;
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor('#475569')
+        .text(`(${item.full})`, x + 12, fullY, {
+          width: textWidth,
+          align: 'left',
+          lineBreak: false
+        });
+    }
   });
 
   doc.y = baseY + chipHeight + 8;
@@ -536,13 +821,14 @@ function drawInventoryTable(doc, productos, startX, usableWidth) {
 
 function buildInventoryColumns(usableWidth) {
   const definitions = [
-    { key: 'sku', label: 'SKU', ratio: 0.12, align: 'left' },
-    { key: 'nombre', label: 'Nombre', ratio: 0.28, align: 'left' },
-    { key: 'tipo', label: 'Tipo', ratio: 0.1, align: 'left' },
+    { key: 'sku', label: 'SKU', ratio: 0.10, align: 'left' },
+    { key: 'nombre', label: 'Nombre', ratio: 0.18, align: 'left' },
+    { key: 'descripcion', label: 'Descripción', ratio: 0.22, align: 'left' },
+    { key: 'tipo', label: 'Tipo', ratio: 0.08, align: 'left' },
     { key: 'stockResumen', label: 'Stock (act/min)', ratio: 0.12, align: 'center' },
-    { key: 'precioVenta', label: 'Precio venta', ratio: 0.18, align: 'right' },
-    { key: 'precioCompra', label: 'Precio compra', ratio: 0.15, align: 'right' },
-    { key: 'estado', label: 'Estado', ratio: 0.05, align: 'center' }
+    { key: 'precioVenta', label: 'Precio venta', ratio: 0.12, align: 'right' },
+    { key: 'precioCompra', label: 'Precio compra', ratio: 0.10, align: 'right' },
+    { key: 'estado', label: 'Estado', ratio: 0.08, align: 'center' }
   ];
 
   return definitions.map((column) => ({
@@ -561,6 +847,7 @@ function buildInventoryRow(producto, index) {
   return {
     sku: producto.sku || '—',
     nombre: producto.nombre || '—',
+    descripcion: producto.descripcion || '—',
     tipo: producto.tipo || '—',
     stockResumen: `${formatNumberValue(producto.stock_actual)} / ${formatNumberValue(producto.minimo_stock)}`,
     precioVenta: formatCurrencyPyG(producto.precio_venta),

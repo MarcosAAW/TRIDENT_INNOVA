@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'trident_innova_usuario_activo';
+const SUCURSAL_KEY = 'sucursalId';
 const STORAGE_VERSION = 1;
 const MAX_AGE_MINUTES = 12 * 60; // 12 horas máx.
 const IDLE_TIMEOUT_MINUTES = 30; // 30 minutos sin actividad.
@@ -24,9 +25,26 @@ export function saveSession(usuario) {
 export function clearSession() {
   try {
     window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(SUCURSAL_KEY);
   } catch (error) {
     console.error('No se pudo limpiar la sesión.', error);
   }
+}
+
+export function setActiveSucursal(sucursalId) {
+  const envelope = readActiveEnvelope();
+  if (!envelope) return null;
+  const nextUser = { ...envelope.usuario, sucursalId };
+  envelope.usuario = nextUser;
+  persistEnvelope(envelope);
+  try {
+    if (sucursalId) {
+      window.localStorage.setItem(SUCURSAL_KEY, sucursalId);
+    }
+  } catch (error) {
+    console.error('No se pudo guardar sucursalId.', error);
+  }
+  return nextUser;
 }
 
 export function refreshSessionActivity() {

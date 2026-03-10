@@ -25,7 +25,9 @@ async function generarFacturaDigital(venta, options = {}) {
     throw new Error('Venta no encontrada para factura digital');
   }
 
-  const timbrado = empresaConfig.timbrado || {};
+  const facturaElectronica = ventaCompleta.factura_electronica;
+
+  const timbrado = selectTimbradoParaVenta(ventaCompleta, empresaConfig);
   validateTimbradoConfig(timbrado);
 
   const totals = computeTotals(ventaCompleta);
@@ -33,13 +35,19 @@ async function generarFacturaDigital(venta, options = {}) {
   const condicionVenta = options.condicion || inferCondicionVenta(ventaCompleta);
 
   const baseRecord = await prisma.$transaction(async (tx) => {
+    const sucursalId = ventaCompleta.sucursalId || ventaCompleta.sucursal?.id || null;
     const existente = await tx.facturaDigital.findUnique({ where: { ventaId: ventaCompleta.id } });
-    const secuencia = await resolveSecuencia(tx, existente, timbrado);
-    const numeroFactura = existente?.nro_factura || buildNumeroFactura(timbrado, secuencia);
+    let secuencia = await resolveSecuencia(tx, existente, timbrado, sucursalId);
+    const secuenciaDesdeFactura = parseSecuenciaFromNumero(facturaElectronica?.nro_factura);
+    if (typeof secuenciaDesdeFactura === 'number') {
+      secuencia = secuenciaDesdeFactura;
+    }
+
+    const numeroFactura = facturaElectronica?.nro_factura || existente?.nro_factura || buildNumeroFactura(timbrado, secuencia);
     const now = new Date();
-    const qrPayload = buildQrPayload(numeroFactura, ventaCompleta, totals, timbrado);
-    const qrData = JSON.stringify(qrPayload);
-    const numeroControl = buildControlCode(numeroFactura, timbrado.numero, totals.total, now);
+    const qrPayload = facturaElectronica?.qr_data || buildQrPayload(numeroFactura, ventaCompleta, totals, timbrado);
+    const qrData = typeof qrPayload === 'string' ? qrPayload : JSON.stringify(qrPayload);
+    const numeroControl = facturaElectronica?.qr_data || buildControlCode(numeroFactura, timbrado.numero, totals.total, now);
     const data = {
       ventaId: ventaCompleta.id,
       nro_factura: numeroFactura,
@@ -65,13 +73,26 @@ async function generarFacturaDigital(venta, options = {}) {
       estado_envio: existente?.estado_envio || 'PENDIENTE',
       enviado_a: existente?.enviado_a || null,
       enviado_en: existente?.enviado_en || null,
-      intentos: existente?.intentos || 0
+      intentos: existente?.intentos || 0,
+      sucursalId
     };
 
     if (existente) {
       return tx.facturaDigital.update({ where: { id: existente.id }, data });
     }
-    return tx.facturaDigital.create({ data });
+
+    try {
+      return await tx.facturaDigital.create({ data });
+    } catch (err) {
+      if (err?.code === 'P2002' && Array.isArray(err.meta?.target) && err.meta.target.includes('nro_factura')) {
+        // En conflicto por nro_factura, actualizamos el existente en una nueva transacción para evitar el estado abortado 25P02
+        const choque = await prisma.facturaDigital.findUnique({ where: { nro_factura: numeroFactura } });
+        if (choque) {
+          return prisma.facturaDigital.update({ where: { id: choque.id }, data });
+        }
+      }
+      throw err;
+    }
   });
 
   const qrBuffer = await QRCode.toBuffer(baseRecord.qr_data || baseRecord.nro_factura, {
@@ -79,7 +100,7 @@ async function generarFacturaDigital(venta, options = {}) {
     margin: 0,
     errorCorrectionLevel: 'M'
   });
-  const fileInfo = await generarPdf(baseRecord, ventaCompleta, totals, breakdown, qrBuffer, timbrado);
+  const fileInfo = await generarPdf(baseRecord, ventaCompleta, totals, breakdown, qrBuffer, timbrado, facturaElectronica);
   const hash = await hashFile(fileInfo.absolutePath);
   const actualizado = await prisma.facturaDigital.update({
     where: { id: baseRecord.id },
@@ -102,28 +123,32 @@ async function ensureVentaCompleta(venta) {
     include: {
       cliente: true,
       usuario: true,
+      factura_electronica: true,
+      sucursal: true,
       detalles: { include: { producto: true } }
     }
   });
 }
 
-async function resolveSecuencia(tx, existente, timbrado) {
+async function resolveSecuencia(tx, existente, timbrado, sucursalId) {
   if (existente && typeof existente.secuencia === 'number') {
     return existente.secuencia;
   }
+  const where = {
+    timbrado: timbrado.numero,
+    establecimiento: timbrado.establecimiento || '001',
+    punto_expedicion: timbrado.punto_expedicion || '001',
+    ...(sucursalId ? { sucursalId } : {})
+  };
   const ultimo = await tx.facturaDigital.findFirst({
-    where: {
-      timbrado: timbrado.numero,
-      establecimiento: timbrado.establecimiento || '001',
-      punto_expedicion: timbrado.punto_expedicion || '001'
-    },
+    where,
     orderBy: { secuencia: 'desc' },
     select: { secuencia: true }
   });
   return (ultimo?.secuencia || 0) + 1;
 }
 
-async function generarPdf(registro, venta, totals, breakdown, qrBuffer, timbrado) {
+async function generarPdf(registro, venta, totals, breakdown, qrBuffer, timbrado, facturaElectronica) {
   await fsPromises.mkdir(FACTURA_DIGITAL_DIR, { recursive: true });
   const safeName = registro.nro_factura.replace(/[^0-9A-Za-z-_]/gu, '_');
   const filename = `${safeName}.pdf`;
@@ -138,11 +163,17 @@ async function generarPdf(registro, venta, totals, breakdown, qrBuffer, timbrado
     empresa: empresaConfig,
     timbrado,
     factura: {
-      numero: registro.nro_factura,
+      numero: facturaElectronica?.nro_factura || registro.nro_factura,
       fecha_emision: registro.fecha_emision,
       condicion: registro.condicion_venta,
       nota_remision: null,
-      numero_control: registro.numero_control
+      numero_control: registro.numero_control,
+      moneda: (venta.moneda || 'PYG').toUpperCase(),
+      tipo_cambio: venta.tipo_cambio,
+      total_moneda: venta.total_moneda,
+      tipo_transaccion: 'Venta de mercadería',
+      correo_emisor: empresaConfig.email || '',
+      cdc: deriveCdc(facturaElectronica, registro)
     },
     venta,
     detalles: venta.detalles,
@@ -162,22 +193,36 @@ async function generarPdf(registro, venta, totals, breakdown, qrBuffer, timbrado
 
 function computeTotals(venta) {
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
-  const subtotal = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
-  const descuento = Number(venta?.descuento_total) || 0;
-  const total = Number(venta?.total) || Math.max(subtotal - descuento, 0);
+  const tipoCambio = Number(venta?.tipo_cambio) || 0;
+  const factor = venta?.moneda?.toUpperCase() === 'USD' && tipoCambio > 0 ? 1 / tipoCambio : 1;
+
+  const subtotalGs = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
+  const descuentoGs = Number(venta?.descuento_total) || 0;
+  const subtotal = subtotalGs * factor;
+  const descuento = descuentoGs * factor;
+  const total = Math.max(subtotal - descuento, 0);
+
   const ivaPorcentaje = Number(venta?.iva_porcentaje) || 10;
   const divisor = ivaPorcentaje === 5 ? 21 : 11;
   const iva = total > 0 ? total / divisor : 0;
-  return { subtotal, descuento, total, iva };
+
+  return { subtotal, descuento, total, iva, factor };
 }
 
 function computeBreakdown(venta) {
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
+  const descuentoGlobal = Number(venta?.descuento_total) || 0;
+  const subtotalBruto = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
+  const factorDescuento = subtotalBruto > 0 ? Math.max(subtotalBruto - descuentoGlobal, 0) / subtotalBruto : 1;
+  const tipoCambio = Number(venta?.tipo_cambio) || 0;
+  const factorMoneda = venta?.moneda?.toUpperCase() === 'USD' && tipoCambio > 0 ? 1 / tipoCambio : 1;
+
   return detalles.reduce(
     (acc, detalle) => {
       const cantidad = Number(detalle.cantidad) || 0;
       const precio = Number(detalle.precio_unitario) || 0;
-      const subtotal = Number(detalle.subtotal) || cantidad * precio;
+      const subtotalBrutoItem = Number(detalle.subtotal) || cantidad * precio;
+      const subtotal = Number((subtotalBrutoItem * factorDescuento * factorMoneda).toFixed(2));
       const iva = resolveDetalleIva(detalle, venta);
       if (iva === 5) {
         acc.gravado5 += subtotal;
@@ -200,11 +245,46 @@ function resolveDetalleIva(detalle, venta) {
   return Number(venta?.iva_porcentaje) || 10;
 }
 
+function selectTimbradoParaVenta(venta, config) {
+  const baseTimbrado = config.timbrado || {};
+  const overrides = Array.isArray(config.timbradosPorSucursal) ? config.timbradosPorSucursal : [];
+  if (!venta) return baseTimbrado;
+  const sucursalId = venta.sucursalId || venta.sucursal?.id;
+  const sucursalNombre = (venta.sucursal?.nombre || '').trim().toLowerCase();
+  const match = overrides.find((item) => {
+    if (item.sucursalId && sucursalId && item.sucursalId === sucursalId) return true;
+    if (item.nombre && sucursalNombre && sucursalNombre === String(item.nombre).trim().toLowerCase()) return true;
+    return false;
+  });
+  if (match) {
+    return { ...baseTimbrado, ...match };
+  }
+  return baseTimbrado;
+}
+
 function buildNumeroFactura(timbrado, secuencia) {
   const establecimiento = (timbrado.establecimiento || '001').padStart(3, '0');
   const punto = (timbrado.punto_expedicion || '001').padStart(3, '0');
   const correlativo = String(secuencia || 1).padStart(7, '0');
   return `${establecimiento}-${punto}-${correlativo}`;
+}
+
+function deriveCdc(facturaElectronica, registro) {
+  const raw = facturaElectronica?.qr_data || facturaElectronica?.cdc || registro?.numero_control;
+  if (typeof raw !== 'string') return raw || null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed?.cdc) return parsed.cdc;
+      if (parsed?.control) return parsed.control;
+      if (parsed?.factura) return parsed.factura;
+    } catch (_err) {
+      // ignore
+    }
+  }
+  return trimmed;
 }
 
 function buildQrPayload(nroFactura, venta, totals, timbrado) {
@@ -239,6 +319,7 @@ function toDecimal(value) {
 
 function inferCondicionVenta(venta) {
   if (!venta) return 'CONTADO';
+  if (venta.condicion_venta && venta.condicion_venta.toUpperCase().includes('CREDITO')) return 'CRÉDITO';
   const estado = (venta.estado || '').toUpperCase();
   if (estado.includes('CREDITO')) return 'CRÉDITO';
   return 'CONTADO';
@@ -250,6 +331,16 @@ module.exports = {
   FacturaDigitalError,
   validateTimbradoConfig
 };
+
+function parseSecuenciaFromNumero(nroFactura) {
+  if (!nroFactura || typeof nroFactura !== 'string') return null;
+  const parts = nroFactura.split('-');
+  if (parts.length !== 3) return null;
+  const correlativo = parts[2].replace(/[^0-9]/g, '');
+  if (!correlativo) return null;
+  const parsed = Number(correlativo);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 function validateTimbradoConfig(timbrado) {
   if (!timbrado || !timbrado.numero) {

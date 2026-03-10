@@ -5,7 +5,8 @@ import {
   clearSession,
   refreshSessionActivity,
   startSessionWatcher,
-  stopSessionWatcher
+  stopSessionWatcher,
+  setActiveSucursal
 } from './session.js';
 
 export function initAuth({ onAuthenticated, onLogout } = {}) {
@@ -15,6 +16,9 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
   const logoutButton = document.getElementById('logout-button');
   const sessionInfo = document.getElementById('session-info');
   const sessionUser = document.getElementById('session-user');
+  const sucursalActive = document.getElementById('sucursal-active');
+  const sucursalPicker = document.getElementById('sucursal-picker');
+  const sucursalSelector = document.getElementById('sucursal-selector');
   const usuarioInput = form?.elements.usuario;
   const passwordInput = form?.elements.password;
   const submitButton = form?.querySelector('button[type="submit"]');
@@ -97,10 +101,39 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
     if (!usuario) {
       sessionInfo.hidden = true;
       sessionUser.textContent = '';
+      toggleSucursalPicker(null);
+      updateSucursalBadge('');
       return;
     }
     sessionInfo.hidden = false;
     sessionUser.textContent = usuario.rol ? `${usuario.nombre} · ${usuario.rol}` : usuario.nombre;
+    renderSucursalSelector(usuario);
+  }
+
+  function toggleSucursalPicker(visible) {
+    if (!sucursalPicker) return;
+    sucursalPicker.hidden = !visible;
+  }
+
+  function renderSucursalSelector(usuario) {
+    // Selector oculto: solo mostramos el badge con la sucursal activa
+    const sucursales = Array.isArray(usuario?.sucursales) ? usuario.sucursales : [];
+    const stored = safeGetLocalSucursal();
+    const selectedId = stored || usuario.sucursalId || sucursales[0]?.sucursalId || '';
+    const selectedLabel = sucursales.find((s) => s.sucursalId === selectedId)?.nombre || selectedId;
+
+    // Mantener opciones internas (aunque el picker esté oculto) para no romper la lógica existente
+    if (sucursalSelector) {
+      sucursalSelector.innerHTML = sucursales
+        .map((suc) => `<option value="${suc.sucursalId}">${suc.nombre || suc.sucursalId}</option>`)
+        .join('');
+      if (selectedId) {
+        sucursalSelector.value = selectedId;
+      }
+    }
+
+    setSucursal(selectedId, selectedLabel);
+    toggleSucursalPicker(false);
   }
 
   function dispatchAuthenticated(usuario) {
@@ -142,6 +175,7 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
       if (!usuarioAutenticado) {
         throw new Error('Respuesta inválida del servidor.');
       }
+      setSucursal(usuarioAutenticado.sucursalId);
       saveSession(usuarioAutenticado);
       enableSessionGuards();
       renderSessionInfo(usuarioAutenticado);
@@ -169,6 +203,7 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
   if (logoutButton) {
     logoutButton.addEventListener('click', () => {
       clearSession();
+      safeSetLocalSucursal(null);
       renderSessionInfo(null);
       resetDispatchFlag();
       disableSessionGuards();
@@ -181,11 +216,73 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
 
   const storedSession = loadSession();
   if (storedSession) {
+    const defaultSucursal = safeGetLocalSucursal() || storedSession.sucursalId || null;
+    if (defaultSucursal) {
+      setSucursal(defaultSucursal);
+    }
     renderSessionInfo(storedSession);
     hideOverlay();
     dispatchAuthenticated(storedSession);
     enableSessionGuards();
   } else {
     showOverlay();
+  }
+
+  function setSucursal(sucursalId, label) {
+    if (!sucursalId) return;
+    setActiveSucursal(sucursalId);
+    safeSetLocalSucursal(sucursalId);
+    updateSucursalBadgeFromSelector(label);
+  }
+
+  function safeSetLocalSucursal(value) {
+    try {
+      if (!value) {
+        window.localStorage.removeItem('sucursalId');
+        return;
+      }
+      window.localStorage.setItem('sucursalId', value);
+    } catch (error) {
+      console.warn('No se pudo persistir sucursalId.', error);
+    }
+  }
+
+  function safeGetLocalSucursal() {
+    try {
+      return window.localStorage.getItem('sucursalId');
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  if (sucursalSelector) {
+    sucursalSelector.addEventListener('change', (event) => {
+      const next = event.target.value;
+      if (!next) return;
+      setSucursal(next);
+      updateSucursalBadgeFromSelector();
+      window.location.reload();
+    });
+  }
+
+  function updateSucursalBadge(label) {
+    if (!sucursalActive) return;
+    if (!label) {
+      sucursalActive.hidden = true;
+      sucursalActive.textContent = '';
+      return;
+    }
+    sucursalActive.hidden = false;
+    sucursalActive.textContent = label;
+  }
+
+  function updateSucursalBadgeFromSelector(label) {
+    if (label) {
+      updateSucursalBadge(label);
+      return;
+    }
+    if (!sucursalSelector) return;
+    const selectorLabel = sucursalSelector.options?.[sucursalSelector.selectedIndex]?.textContent || '';
+    updateSucursalBadge(selectorLabel);
   }
 }

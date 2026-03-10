@@ -33,7 +33,7 @@ export function initDashboard(modules) {
   dom.filterForm.addEventListener('submit', (event) => {
     event.preventDefault();
     state.page = 1;
-    loadList({ preserveScroll: false });
+    loadList({ preserveScroll: true });
   });
 
   if (dom.listActions) {
@@ -60,7 +60,7 @@ export function initDashboard(modules) {
 
   dom.includeDeleted.addEventListener('change', () => {
     state.page = 1;
-    loadList({ preserveScroll: false });
+    loadList({ preserveScroll: true });
   });
 
   dom.cancelButton.addEventListener('click', () => {
@@ -365,7 +365,9 @@ export function initDashboard(modules) {
       max,
       step,
       defaultValue,
-      helperText
+      helperText,
+      multiple,
+      size
     } = field;
 
     if (!name) return '';
@@ -374,9 +376,11 @@ export function initDashboard(modules) {
     const requiredAttr = required ? 'required' : '';
     const placeholderAttr = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : '';
     const minAttr = min !== undefined ? `min="${min}"` : '';
-    const maxAttr = max !== undefined ? `max="${max}` : '';
+    const maxAttr = max !== undefined ? `max="${max}"` : '';
     const stepAttr = step !== undefined ? `step="${step}"` : '';
     const defaultAttr = defaultValue !== undefined && type !== 'checkbox' ? `value="${escapeHtml(defaultValue)}"` : '';
+    const multipleAttr = multiple ? 'multiple' : '';
+    const sizeAttr = multiple && size ? `size="${size}"` : '';
 
     if (type === 'textarea') {
       return `
@@ -391,16 +395,24 @@ export function initDashboard(modules) {
     }
 
     if (type === 'select') {
+      const selectedValues = new Set(
+        multiple && Array.isArray(defaultValue)
+          ? defaultValue.map((v) => String(v))
+          : defaultValue !== undefined
+            ? [String(defaultValue)]
+            : []
+      );
       const opts = options
         .map((opt) => {
-          const selected = defaultValue !== undefined && defaultValue === opt.value ? 'selected' : '';
+          const isSelected = selectedValues.has(String(opt.value));
+          const selected = isSelected ? 'selected' : '';
           return `<option value="${escapeHtml(opt.value)}" ${selected}>${escapeHtml(opt.label)}</option>`;
         })
         .join('');
       return `
         <label class="form-field" for="${id}">
           <span>${label}${required ? ' *' : ''}</span>
-          <select id="${id}" name="${name}" ${requiredAttr}>
+          <select id="${id}" name="${name}" ${requiredAttr} ${multipleAttr} ${sizeAttr}>
             ${opts}
           </select>
           ${helperText ? `<small>${escapeHtml(helperText)}</small>` : ''}
@@ -482,7 +494,11 @@ export function initDashboard(modules) {
       if (!control) continue;
 
       let value = null;
-      if (field.type === 'checkbox') {
+      if (control.multiple) {
+        value = Array.from(control.selectedOptions || [])
+          .map((opt) => opt.value)
+          .filter((v) => v !== undefined && v !== null && v !== '');
+      } else if (field.type === 'checkbox') {
         value = control.checked;
       } else {
         const raw = formData.get(field.name);
@@ -490,13 +506,20 @@ export function initDashboard(modules) {
         value = typeof raw === 'string' ? raw.trim() : raw;
       }
 
-      if ((value === '' || value === null) && field.required) {
+      const isEmpty = Array.isArray(value) ? value.length === 0 : value === '' || value === null;
+
+      if (isEmpty && field.required) {
         showMessage(`Completa el campo ${field.label}.`, 'error');
         control.focus();
         return null;
       }
 
-      if ((value === '' || value === null) && !field.required) {
+      if (isEmpty && !field.required) {
+        continue;
+      }
+
+      if (Array.isArray(value)) {
+        payload[field.name] = value;
         continue;
       }
 
@@ -718,7 +741,16 @@ export function initDashboard(modules) {
       const control = dom.form.elements[field.name];
       if (!control) return;
       const value = values[field.name];
-      if (field.type === 'checkbox') {
+      if (control.multiple) {
+        const selection = Array.isArray(value)
+          ? value.map((v) => String(v))
+          : value !== undefined && value !== null
+            ? [String(value)]
+            : [];
+        Array.from(control.options || []).forEach((opt) => {
+          opt.selected = selection.includes(opt.value);
+        });
+      } else if (field.type === 'checkbox') {
         control.checked = Boolean(value);
       } else if (value !== undefined && value !== null) {
         control.value = value;
@@ -797,7 +829,16 @@ export function initDashboard(modules) {
       mod.fields.forEach((field) => {
         const control = dom.form.elements[field.name];
         if (!control) return;
-        if (field.type === 'checkbox') {
+        if (control.multiple) {
+          const selection = Array.isArray(field.defaultValue)
+            ? field.defaultValue.map((v) => String(v))
+            : field.defaultValue !== undefined && field.defaultValue !== null
+              ? [String(field.defaultValue)]
+              : [];
+          Array.from(control.options || []).forEach((opt) => {
+            opt.selected = selection.includes(opt.value);
+          });
+        } else if (field.type === 'checkbox') {
           control.checked = Boolean(field.defaultValue);
         } else if (field.defaultValue !== undefined) {
           control.value = field.defaultValue;

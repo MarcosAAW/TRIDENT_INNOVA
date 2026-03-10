@@ -12,7 +12,8 @@ const baseUsuarioSchema = {
   nombre: z.string().min(1, 'El nombre es obligatorio'),
   usuario: z.string().min(3, 'El usuario debe tener al menos 3 caracteres'),
   rol: z.nativeEnum(RolUsuario).default('VENDEDOR'),
-  activo: z.coerce.boolean().optional()
+  activo: z.coerce.boolean().optional(),
+  sucursalIds: z.array(z.string().uuid()).optional()
 };
 
 const createUsuarioSchema = z.object({
@@ -102,7 +103,12 @@ router.get('/', async (req, res) => {
         where,
         skip: (page - 1) * pageSize,
         take: pageSize,
-        orderBy: { created_at: 'desc' }
+        orderBy: { created_at: 'desc' },
+        include: {
+          sucursales: {
+            include: { sucursal: true }
+          }
+        }
       }),
       prisma.usuario.count({ where })
     ]);
@@ -124,7 +130,14 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const usuario = await prisma.usuario.findUnique({ where: { id: req.params.id } });
+    const usuario = await prisma.usuario.findUnique({
+      where: { id: req.params.id },
+      include: {
+        sucursales: {
+          include: { sucursal: true }
+        }
+      }
+    });
     if (!usuario || usuario.deleted_at) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
@@ -139,15 +152,45 @@ router.post('/', validate(createUsuarioSchema), async (req, res) => {
   try {
     const data = req.validatedBody;
     const hashed = await bcrypt.hash(data.password, 10);
-    const created = await prisma.usuario.create({
-      data: {
-        nombre: data.nombre,
-        usuario: data.usuario,
-        password_hash: hashed,
-        rol: data.rol,
-        activo: data.activo ?? true
+    const created = await prisma.$transaction(async (tx) => {
+      const usuario = await tx.usuario.create({
+        data: {
+          nombre: data.nombre,
+          usuario: data.usuario,
+          password_hash: hashed,
+          rol: data.rol,
+          activo: data.activo ?? true
+        }
+      });
+
+      const sucursalIds = Array.isArray(data.sucursalIds) ? Array.from(new Set(data.sucursalIds)) : [];
+      if (sucursalIds.length) {
+        for (const sucursalId of sucursalIds) {
+          await tx.usuarioSucursal.upsert({
+            where: {
+              usuarioId_sucursalId: {
+                usuarioId: usuario.id,
+                sucursalId
+              }
+            },
+            update: {},
+            create: {
+              usuarioId: usuario.id,
+              sucursalId,
+              rol: data.rol || 'VENDEDOR'
+            }
+          });
+        }
       }
+
+      return tx.usuario.findUnique({
+        where: { id: usuario.id },
+        include: {
+          sucursales: { include: { sucursal: true } }
+        }
+      });
     });
+
     res.status(201).json(sanitizeUsuario(created));
   } catch (err) {
     handlePrismaError(err, res, 'Error al crear usuario');
@@ -159,15 +202,55 @@ router.put('/:id', validate(updateUsuarioSchema), async (req, res) => {
   const data = req.validatedBody;
 
   try {
-    const updateData = { ...data };
-    delete updateData.password;
+    const usuario = await prisma.$transaction(async (tx) => {
+      const updateData = { ...data };
+      delete updateData.password;
+      delete updateData.sucursalIds;
 
-    if (data.password) {
-      updateData.password_hash = await bcrypt.hash(data.password, 10);
-    }
+      if (data.password) {
+        updateData.password_hash = await bcrypt.hash(data.password, 10);
+      }
 
-    const updated = await prisma.usuario.update({ where: { id }, data: updateData });
-    res.json(sanitizeUsuario(updated));
+      const updated = await tx.usuario.update({ where: { id }, data: updateData });
+
+      if (Array.isArray(data.sucursalIds)) {
+        const desired = new Set(data.sucursalIds);
+
+        if (desired.size === 0) {
+          await tx.usuarioSucursal.deleteMany({ where: { usuarioId: id } });
+        } else {
+          await tx.usuarioSucursal.deleteMany({
+            where: {
+              usuarioId: id,
+              sucursalId: { notIn: Array.from(desired) }
+            }
+          });
+
+          for (const sucursalId of desired) {
+            await tx.usuarioSucursal.upsert({
+              where: {
+                usuarioId_sucursalId: { usuarioId: id, sucursalId }
+              },
+              update: {},
+              create: {
+                usuarioId: id,
+                sucursalId,
+                rol: data.rol || 'VENDEDOR'
+              }
+            });
+          }
+        }
+      }
+
+      return tx.usuario.findUnique({
+        where: { id },
+        include: {
+          sucursales: { include: { sucursal: true } }
+        }
+      });
+    });
+
+    res.json(sanitizeUsuario(usuario));
   } catch (err) {
     handlePrismaError(err, res, 'Error al actualizar usuario');
   }

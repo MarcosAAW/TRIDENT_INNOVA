@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
+const XLSX = require('xlsx');
 const router = express.Router();
 const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
@@ -12,8 +13,11 @@ const { z } = require('zod');
 const validate = require('../middleware/validate');
 const { procesarFacturaElectronica } = require('../services/sifen/facturaProcessor');
 const empresaConfig = require('../config/empresa');
-const { generarFacturaDigital, FacturaDigitalError, validateTimbradoConfig } = require('../services/facturaDigital');
+const factpyConfig = require('../config/factpy');
+const { emitirFactura } = require('../services/factpy/client');
+const { generarFacturaDigital, FacturaDigitalError, validateTimbradoConfig, buildNumeroFactura } = require('../services/facturaDigital');
 const { requireAuth, authorizeRoles } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
 const {
   enviarFacturaDigitalPorCorreo,
   EmailNotConfiguredError,
@@ -22,6 +26,17 @@ const {
 } = require('../services/email/facturaDigitalMailer');
 
 const MONEDAS_PERMITIDAS = new Set(['PYG', 'USD']);
+const SIFEN_ENABLED = !['false', '0', 'off'].includes(String(process.env.SIFEN_ENABLE || 'true').toLowerCase());
+
+function hasSifenCert() {
+  const certPath = process.env.SIFEN_CERT_PATH;
+  if (!certPath) return false;
+  try {
+    return fs.existsSync(certPath);
+  } catch (_err) {
+    return false;
+  }
+}
 
 const VENTAS_REPORT_INCLUDE = {
   cliente: true,
@@ -69,6 +84,29 @@ const monedaFilterSchema = z
   .refine((value) => MONEDAS_PERMITIDAS.has(value), { message: 'Moneda no soportada (usa PYG o USD).' })
   .optional();
 
+const creditoCuotaSchema = z.object({
+  numero: z.coerce.number().int().min(1),
+  monto: z.coerce.number().positive(),
+  fecha_vencimiento: z.union([z.coerce.date(), z.string().trim().min(1)])
+});
+
+const creditoConfigSchema = z.object({
+  tipo: z.enum(['PLAZO', 'CUOTAS']).default('PLAZO'),
+  descripcion: z.string().trim().min(1).max(10).optional(),
+  cantidad_cuotas: z.coerce.number().int().min(1).optional(),
+  cuotas: z.array(creditoCuotaSchema).min(1).optional(),
+  fecha_vencimiento: z.coerce.date().optional()
+});
+
+const facturarRequestSchema = z
+  .object({
+    condicion_pago: z.string().trim().optional(),
+    fecha_vencimiento: z.coerce.date().optional(),
+    credito: creditoConfigSchema.optional()
+  })
+  .optional()
+  .transform((value) => value || {});
+
 const createVentaSchema = z.object({
   usuarioId: z.string().uuid(),
   clienteId: z.string().uuid().optional(),
@@ -78,6 +116,7 @@ const createVentaSchema = z.object({
   motivo: z.string().optional(),
   almacenId: z.string().uuid().optional(),
   iva_porcentaje: ivaSchema,
+  condicion_venta: z.string().trim().optional(),
   moneda: z
     .string()
     .trim()
@@ -90,7 +129,9 @@ const createVentaSchema = z.object({
     .coerce.number({ invalid_type_error: 'El tipo de cambio debe ser numérico.' })
     .positive('El tipo de cambio debe ser mayor a cero.')
     .max(20000, 'El tipo de cambio es demasiado alto.')
-    .optional()
+    .optional(),
+  fecha_vencimiento: z.coerce.date().optional(),
+  credito: creditoConfigSchema.optional()
 });
 
 class VentaValidationError extends Error {}
@@ -100,6 +141,16 @@ const IVA_DIVISOR = {
   5: 21,
   10: 11
 };
+
+const MAX_FACTURA_REINTENTOS = 5;
+
+function isUniqueNroFacturaError(error) {
+  return (
+    error?.code === 'P2002' &&
+    Array.isArray(error?.meta?.target) &&
+    error.meta.target.some((target) => typeof target === 'string' && target.includes('nro_factura'))
+  );
+}
 
 const dateParam = z.coerce.date({ invalid_type_error: 'Fecha inválida' });
 const monthParam = z
@@ -159,7 +210,7 @@ function getMonthRange(month) {
   return { start, end };
 }
 
-function buildVentaWhere(filters) {
+function buildVentaWhere(filters, sucursalId) {
   const where = {};
 
   if (!filters.include_deleted) {
@@ -208,6 +259,10 @@ function buildVentaWhere(filters) {
     ];
   }
 
+  if (sucursalId) {
+    where.sucursalId = sucursalId;
+  }
+
   return where;
 }
 
@@ -228,6 +283,13 @@ function normalizeCurrency(value) {
   return 'PYG';
 }
 
+function normalizeCondicionVenta(value, creditoConfig) {
+  const normalized = (value || '').toString().toUpperCase();
+  if (normalized.includes('CREDITO') || normalized.includes('CRÉDITO')) return 'CREDITO';
+  if (creditoConfig) return 'CREDITO';
+  return 'CONTADO';
+}
+
 function round(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round(Number(value) * factor + Number.EPSILON) / factor;
@@ -242,7 +304,7 @@ function ensureWithinLimit(value, label) {
   }
 }
 
-router.use(requireAuth);
+router.use(requireAuth, requireSucursal);
 
 router.get('/', async (req, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
@@ -251,7 +313,7 @@ router.get('/', async (req, res) => {
   }
 
   const filters = parsed.data || {};
-  const where = buildVentaWhere(filters);
+  const where = buildVentaWhere(filters, req.sucursalId);
 
   try {
     const ventas = await prisma.venta.findMany({
@@ -335,7 +397,7 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       }
 
       const productoIds = [...new Set(detallesNormalizados.map((detalle) => detalle.productoId))];
-      const productos = await tx.producto.findMany({ where: { id: { in: productoIds } } });
+      const productos = await tx.producto.findMany({ where: { id: { in: productoIds }, sucursalId: req.sucursalId } });
       const productosMap = new Map(productos.map((producto) => [producto.id, producto]));
       const stockReservado = new Map();
 
@@ -385,12 +447,26 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
 
       ensureWithinLimit(subtotalAcumulado, 'Subtotal');
 
-      let descuentoTotal = Number(payload.descuento_total ?? 0);
-      if (!Number.isFinite(descuentoTotal) || descuentoTotal < 0) {
-        descuentoTotal = 0;
+      const monedaSeleccionada = normalizeCurrency(payload.moneda);
+      let tipoCambioSeleccionado = null;
+      if (monedaSeleccionada === 'USD') {
+        const parsedTipoCambio = Number(payload.tipo_cambio);
+        if (!Number.isFinite(parsedTipoCambio) || parsedTipoCambio <= 0) {
+          throw new VentaValidationError('Ingresá un tipo de cambio válido para ventas en USD.');
+        }
+        tipoCambioSeleccionado = round(parsedTipoCambio, 4);
       }
-      descuentoTotal = round(descuentoTotal, 2);
-      ensureWithinLimit(descuentoTotal, 'Descuento total');
+
+      let descuentoEntrada = Number(payload.descuento_total ?? 0);
+      if (!Number.isFinite(descuentoEntrada) || descuentoEntrada < 0) {
+        descuentoEntrada = 0;
+      }
+      descuentoEntrada = round(descuentoEntrada, 2);
+      ensureWithinLimit(descuentoEntrada, 'Descuento total');
+
+      const descuentoTotal = monedaSeleccionada === 'USD' && tipoCambioSeleccionado
+        ? round(descuentoEntrada * tipoCambioSeleccionado, 2)
+        : descuentoEntrada;
 
       if (descuentoTotal > subtotalAcumulado) {
         throw new VentaValidationError('El descuento no puede superar el subtotal.');
@@ -404,15 +480,6 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       ensureWithinLimit(impuestoTotal, 'Impuesto total');
 
       const total = baseGravada;
-      const monedaSeleccionada = normalizeCurrency(payload.moneda);
-      let tipoCambioSeleccionado = null;
-      if (monedaSeleccionada === 'USD') {
-        const parsedTipoCambio = Number(payload.tipo_cambio);
-        if (!Number.isFinite(parsedTipoCambio) || parsedTipoCambio <= 0) {
-          throw new VentaValidationError('Ingresá un tipo de cambio válido para ventas en USD.');
-        }
-        tipoCambioSeleccionado = round(parsedTipoCambio, 4);
-      }
 
       let totalEnMonedaSeleccionada = null;
       if (tipoCambioSeleccionado) {
@@ -424,10 +491,24 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
         ensureWithinLimit(totalEnMonedaSeleccionada, 'Total en moneda seleccionada');
       }
 
+      const condicionVenta = normalizeCondicionVenta(payload.condicion_venta, payload.credito);
+      const esCredito = condicionVenta === 'CREDITO';
+      const fechaVencimiento = payload.fecha_vencimiento || payload.credito?.fecha_vencimiento || null;
+      const saldoPendiente = esCredito ? total : null;
+
+      let clienteId = payload.clienteId || null;
+      if (clienteId) {
+        const cliente = await tx.cliente.findFirst({ where: { id: clienteId, sucursalId: req.sucursalId } });
+        if (!cliente || cliente.deleted_at) {
+          throw new VentaValidationError('El cliente no pertenece a la sucursal activa.');
+        }
+      }
+
       const venta = await tx.venta.create({
         data: {
           usuarioId: payload.usuarioId,
-          clienteId: payload.clienteId || null,
+          clienteId,
+          sucursalId: req.sucursalId,
           subtotal: subtotalAcumulado,
           descuento_total: descuentoTotal,
           impuesto_total: impuestoTotal,
@@ -436,7 +517,11 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
           moneda: monedaSeleccionada,
           tipo_cambio: tipoCambioSeleccionado,
           total_moneda: totalEnMonedaSeleccionada,
-          iva_porcentaje: ivaPorcentaje
+          iva_porcentaje: ivaPorcentaje,
+          condicion_venta: condicionVenta,
+          es_credito: esCredito,
+          fecha_vencimiento: fechaVencimiento || undefined,
+          saldo_pendiente: saldoPendiente
         }
       });
 
@@ -474,8 +559,8 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
         });
       }
 
-      const full = await tx.venta.findUnique({
-        where: { id: venta.id },
+      const full = await tx.venta.findFirst({
+        where: { id: venta.id, sucursalId: req.sucursalId },
         include: {
           detalles: {
             include: {
@@ -483,7 +568,8 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
             }
           },
           cliente: true,
-          usuario: true
+          usuario: true,
+          sucursal: true
         }
       });
 
@@ -521,6 +607,13 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
     return res.status(400).json({ error: 'Identificador de venta inválido.' });
   }
 
+  const facturarParsed = facturarRequestSchema.safeParse(req.body || {});
+  if (!facturarParsed.success) {
+    return res.status(400).json({ error: 'Datos inválidos para facturar.', detalles: facturarParsed.error.flatten() });
+  }
+
+  const facturarInput = facturarParsed.data;
+
   const { id } = parsedParams.data;
 
   try {
@@ -534,90 +627,150 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
   }
 
   try {
-    const { venta, factura } = await prisma.$transaction(async (tx) => {
-      const ventaActual = await tx.venta.findUnique({
-        where: { id },
-        include: {
-          cliente: true,
-          usuario: true,
-          detalles: { include: { producto: true } },
-          factura_electronica: true,
-          factura_digital: true
+    let venta = null;
+    let factura = null;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < MAX_FACTURA_REINTENTOS && !venta; attempt += 1) {
+      try {
+        const txResult = await prisma.$transaction(async (tx) => {
+          const ventaActual = await tx.venta.findFirst({
+            where: { id, sucursalId: req.sucursalId },
+            include: {
+              cliente: true,
+              usuario: true,
+              detalles: { include: { producto: true } },
+              factura_electronica: true,
+              factura_digital: true
+            }
+          });
+
+          if (!ventaActual) {
+            throw new VentaValidationError('No se encontró la venta solicitada.');
+          }
+
+          const condicionVentaFacturacion = normalizeCondicionVenta(
+            facturarInput.condicion_pago || ventaActual.condicion_venta,
+            facturarInput.credito
+          );
+          const esCreditoFacturacion = condicionVentaFacturacion === 'CREDITO';
+          const fechaVencimientoFacturacion =
+            facturarInput.fecha_vencimiento || facturarInput.credito?.fecha_vencimiento || ventaActual.fecha_vencimiento || null;
+          const saldoPendienteFacturacion = esCreditoFacturacion
+            ? Number(ventaActual.saldo_pendiente ?? ventaActual.total ?? 0)
+            : null;
+
+          if (
+            condicionVentaFacturacion !== ventaActual.condicion_venta ||
+            esCreditoFacturacion !== ventaActual.es_credito ||
+            fechaVencimientoFacturacion ||
+            (!esCreditoFacturacion && ventaActual.saldo_pendiente)
+          ) {
+            await tx.venta.update({
+              where: { id: ventaActual.id },
+              data: {
+                condicion_venta: condicionVentaFacturacion,
+                es_credito: esCreditoFacturacion,
+                fecha_vencimiento: fechaVencimientoFacturacion || undefined,
+                saldo_pendiente: esCreditoFacturacion ? saldoPendienteFacturacion : null
+              }
+            });
+
+            ventaActual.condicion_venta = condicionVentaFacturacion;
+            ventaActual.es_credito = esCreditoFacturacion;
+            ventaActual.fecha_vencimiento = fechaVencimientoFacturacion;
+            ventaActual.saldo_pendiente = esCreditoFacturacion ? saldoPendienteFacturacion : null;
+          }
+
+          if (ventaActual.deleted_at || (ventaActual.estado && ventaActual.estado.toUpperCase() === 'ANULADA')) {
+            throw new VentaValidationError('No es posible generar una factura para una venta anulada.');
+          }
+
+          if (!Array.isArray(ventaActual.detalles) || !ventaActual.detalles.length) {
+            throw new VentaValidationError('La venta no tiene detalles para facturar.');
+          }
+
+          const now = new Date();
+          let facturaActual = ventaActual.factura_electronica;
+
+          if (!facturaActual) {
+            const timbradoSeleccionado = selectTimbradoParaVenta(ventaActual, empresaConfig);
+            const secuenciaFactura = await resolveSecuenciaFactura(tx, timbradoSeleccionado, req.sucursalId);
+            const numeroFactura = buildNumeroFactura(timbradoSeleccionado, secuenciaFactura);
+
+            facturaActual = await tx.facturaElectronica.create({
+              data: {
+                id: randomUUID(),
+                ventaId: ventaActual.id,
+                sucursalId: req.sucursalId,
+                nro_factura: numeroFactura,
+                timbrado: timbradoSeleccionado.numero || 'NO_TIMBRADO',
+                fecha_emision: now,
+                estado: 'PAGADA',
+                respuesta_set: {
+                  mensaje: 'Factura generada y marcada como pagada en entorno local de prueba.',
+                  timestamp: now.toISOString()
+                },
+                intentos: 1,
+                ambiente: 'PRUEBA',
+                qr_data: construirQrPlaceholder(ventaActual, numeroFactura)
+              }
+            });
+
+            await tx.venta.update({
+              where: { id: ventaActual.id },
+              data: {
+                factura_electronicaId: facturaActual.id,
+                estado: ventaActual.estado === 'PENDIENTE' ? 'FACTURADO' : ventaActual.estado
+              }
+            });
+          } else {
+            const intentosPrevios = Number(facturaActual.intentos) || 0;
+            facturaActual = await tx.facturaElectronica.update({
+              where: { id: facturaActual.id },
+              data: {
+                intentos: { set: intentosPrevios + 1 },
+                respuesta_set: {
+                  mensaje: 'Factura reintentada (estado pagada) en entorno local de prueba.',
+                  intento: intentosPrevios + 1,
+                  timestamp: now.toISOString()
+                },
+                estado: 'PAGADA',
+                updated_at: now
+              }
+            });
+          }
+
+          const ventaRefrescada = await tx.venta.findFirst({
+            where: { id, sucursalId: req.sucursalId },
+            include: {
+              cliente: true,
+              usuario: true,
+              sucursal: true,
+              detalles: { include: { producto: true } },
+              factura_electronica: true,
+              factura_digital: true
+            }
+          });
+
+          return { venta: ventaRefrescada, factura: facturaActual };
+        });
+
+        venta = txResult.venta;
+        factura = txResult.factura;
+        lastError = null;
+      } catch (err) {
+        lastError = err;
+        if (isUniqueNroFacturaError(err) && attempt < MAX_FACTURA_REINTENTOS - 1) {
+          continue;
         }
-      });
-
-      if (!ventaActual) {
-        throw new VentaValidationError('No se encontró la venta solicitada.');
+        throw err;
       }
+    }
 
-      if (ventaActual.deleted_at || (ventaActual.estado && ventaActual.estado.toUpperCase() === 'ANULADA')) {
-        throw new VentaValidationError('No es posible generar una factura para una venta anulada.');
-      }
-
-      if (!Array.isArray(ventaActual.detalles) || !ventaActual.detalles.length) {
-        throw new VentaValidationError('La venta no tiene detalles para facturar.');
-      }
-
-      const now = new Date();
-      let facturaActual = ventaActual.factura_electronica;
-
-      if (!facturaActual) {
-        const numeroFactura = generarNumeroFactura(ventaActual.id);
-        facturaActual = await tx.facturaElectronica.create({
-          data: {
-            id: randomUUID(),
-            ventaId: ventaActual.id,
-            nro_factura: numeroFactura,
-            timbrado: '12545678-01',
-            fecha_emision: now,
-            estado: 'PAGADA',
-            respuesta_set: {
-              mensaje: 'Factura generada y marcada como pagada en entorno local de prueba.',
-              timestamp: now.toISOString()
-            },
-            intentos: 1,
-            ambiente: 'PRUEBA',
-            qr_data: construirQrPlaceholder(ventaActual, numeroFactura)
-          }
-        });
-
-        await tx.venta.update({
-          where: { id: ventaActual.id },
-          data: {
-            factura_electronicaId: facturaActual.id,
-            estado: ventaActual.estado === 'PENDIENTE' ? 'FACTURADO' : ventaActual.estado
-          }
-        });
-      } else {
-        const intentosPrevios = Number(facturaActual.intentos) || 0;
-        facturaActual = await tx.facturaElectronica.update({
-          where: { id: facturaActual.id },
-          data: {
-            intentos: { set: intentosPrevios + 1 },
-            respuesta_set: {
-              mensaje: 'Factura reintentada (estado pagada) en entorno local de prueba.',
-              intento: intentosPrevios + 1,
-              timestamp: now.toISOString()
-            },
-            estado: 'PAGADA',
-            updated_at: now
-          }
-        });
-      }
-
-      const ventaRefrescada = await tx.venta.findUnique({
-        where: { id },
-        include: {
-          cliente: true,
-          usuario: true,
-          detalles: { include: { producto: true } },
-          factura_electronica: true,
-          factura_digital: true
-        }
-      });
-
-      return { venta: ventaRefrescada, factura: facturaActual };
-    });
+    if (!venta || !factura) {
+      throw lastError || new Error('No se pudo generar la factura electrónica.');
+    }
 
     let facturaActualizada = factura;
     try {
@@ -634,6 +787,62 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
       }
     } catch (assetError) {
       console.error('[Factura] No se pudo generar el PDF.', assetError);
+    }
+
+    if (factpyConfig?.recordId) {
+      try {
+        const factpyOptions = {
+          condicion_pago: facturarInput.condicion_pago || venta?.condicion_venta,
+          fecha_vencimiento:
+            facturarInput.fecha_vencimiento || facturarInput.credito?.fecha_vencimiento || venta?.fecha_vencimiento,
+          credito: facturarInput.credito || facturaActualizada?.respuesta_set?.credito || factura?.respuesta_set?.credito
+        };
+
+        const payload = buildFactPyPayload(venta, facturaActualizada, factpyOptions);
+        const respuestaFactpy = await emitirFactura({
+          dataJson: payload,
+          recordID: factpyConfig.recordId,
+          baseUrl: factpyConfig.baseUrl,
+          timeoutMs: factpyConfig.timeoutMs
+        });
+
+        const estadoFactpy = respuestaFactpy?.status === false ? 'RECHAZADO' : 'ENVIADO';
+        const mergedRespuesta = {
+          receiptid: payload?.receiptid,
+          factpy: respuestaFactpy,
+          credito: payload?.credito || null,
+          condicionPago: payload?.condicionPago,
+          timestamp: new Date().toISOString()
+        };
+
+        facturaActualizada = await prisma.facturaElectronica.update({
+          where: { id: facturaActualizada.id },
+          data: {
+            respuesta_set: mergedRespuesta,
+            qr_data: respuestaFactpy?.cdc || facturaActualizada.qr_data,
+            xml_path: respuestaFactpy?.xmlLink || facturaActualizada.xml_path,
+            pdf_path: respuestaFactpy?.kude || facturaActualizada.pdf_path,
+            estado: estadoFactpy
+          }
+        });
+
+        venta.factura_electronica = facturaActualizada;
+      } catch (factpyError) {
+        console.error('[FactPy] Error al emitir', factpyError);
+      }
+    }
+
+    const shouldSendSifen = process.env.NODE_ENV === 'test' || (SIFEN_ENABLED && hasSifenCert());
+    if (shouldSendSifen) {
+      try {
+        const resultadoSifen = await procesarFacturaElectronica(venta);
+        if (resultadoSifen?.factura) {
+          facturaActualizada = resultadoSifen.factura;
+          venta.factura_electronica = facturaActualizada;
+        }
+      } catch (sifenError) {
+        console.error('[SIFEN] Error al procesar el documento electrónico.', sifenError);
+      }
     }
 
     try {
@@ -656,16 +865,6 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
           console.error('[FacturaDigital] Error al enviar el correo con la factura.', mailError);
         }
       }
-    }
-
-    try {
-      const resultadoSifen = await procesarFacturaElectronica(venta);
-      if (resultadoSifen?.factura) {
-        facturaActualizada = resultadoSifen.factura;
-        venta.factura_electronica = facturaActualizada;
-      }
-    } catch (sifenError) {
-      console.error('[SIFEN] Error al procesar el documento electrónico.', sifenError);
     }
 
     res.json({ venta: serialize(venta), factura: serialize(facturaActualizada) });
@@ -694,8 +893,8 @@ router.post('/:id/anular', authorizeRoles('ADMIN'), async (req, res) => {
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const venta = await tx.venta.findUnique({
-        where: { id },
+      const venta = await tx.venta.findFirst({
+        where: { id, sucursalId: req.sucursalId },
         include: {
           detalles: true
         }
@@ -779,7 +978,7 @@ router.get('/reporte/diario', authorizeRoles('ADMIN'), async (req, res) => {
 
   try {
     const { filters, range, filterChips } = prepareReportFilters(parsed.data);
-    const where = buildVentaWhere(filters);
+    const where = buildVentaWhere(filters, req.sucursalId);
     const ventas = await prisma.venta.findMany({
       where,
       include: VENTAS_REPORT_INCLUDE,
@@ -807,6 +1006,72 @@ router.get('/reporte/diario', authorizeRoles('ADMIN'), async (req, res) => {
   }
 });
 
+router.get('/reporte/diario/csv', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parámetros inválidos', detalles: parsed.error.flatten() });
+  }
+
+  try {
+    const { filters, range } = prepareReportFilters(parsed.data);
+    const where = buildVentaWhere(filters, req.sucursalId);
+    const ventas = await prisma.venta.findMany({
+      where,
+      include: VENTAS_REPORT_INCLUDE,
+      orderBy: { fecha: 'asc' }
+    });
+
+    const data = serialize(ventas);
+    if (!data.length) {
+      return res.status(404).json({ error: 'No se encontraron ventas para el rango seleccionado.' });
+    }
+
+    const csvContent = buildDailyCsv(data);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="reporte-ventas-diario-${range.fileLabel}.csv"`);
+    res.send(`\ufeff${csvContent}`);
+  } catch (error) {
+    if (error instanceof VentaValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('[ventas] reporte diario csv', error);
+    res.status(500).json({ error: 'No se pudo exportar el CSV diario.' });
+  }
+});
+
+router.get('/reporte/diario/xlsx', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Parámetros inválidos', detalles: parsed.error.flatten() });
+  }
+
+  try {
+    const { filters, range, filterChips } = prepareReportFilters(parsed.data);
+    const where = buildVentaWhere(filters, req.sucursalId);
+    const ventas = await prisma.venta.findMany({
+      where,
+      include: VENTAS_REPORT_INCLUDE,
+      orderBy: { fecha: 'asc' }
+    });
+
+    const data = serialize(ventas);
+    if (!data.length) {
+      return res.status(404).json({ error: 'No se encontraron ventas para el rango seleccionado.' });
+    }
+
+    const buffer = buildDailyXlsx(data, range, filterChips);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="reporte-ventas-diario-${range.fileLabel}.xlsx"`);
+    res.send(buffer);
+  } catch (error) {
+    if (error instanceof VentaValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('[ventas] reporte diario xlsx', error);
+    res.status(500).json({ error: 'No se pudo exportar el XLSX diario.' });
+  }
+});
+
 router.get('/reporte/margen', authorizeRoles('ADMIN'), async (req, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -815,7 +1080,7 @@ router.get('/reporte/margen', authorizeRoles('ADMIN'), async (req, res) => {
 
   try {
     const { filters, range, filterChips } = prepareReportFilters(parsed.data);
-    const where = buildVentaWhere(filters);
+    const where = buildVentaWhere(filters, req.sucursalId);
     const ventas = await prisma.venta.findMany({
       where,
       include: VENTAS_REPORT_INCLUDE,
@@ -903,7 +1168,7 @@ function renderDailySalesReport(doc, ventas, { range, filterChips }) {
   const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const totals = calculateDailyTotals(ventas);
   const rows = buildDailyReportRows(ventas, totals);
-  renderReportHeader(doc, 'Reporte diario de ventas', range, startX, usableWidth);
+  renderReportHeader(doc, 'Reporte diario de ventas', range, startX, usableWidth, filterChips);
   drawReportFilterTags(doc, filterChips, startX, usableWidth);
   drawReportSummaryChips(
     doc,
@@ -916,13 +1181,42 @@ function renderDailySalesReport(doc, ventas, { range, filterChips }) {
     startX,
     usableWidth
   );
-  if (totals.totalUsd > 0) {
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor('#475569')
-      .text(`Equivalente en USD: ${formatCurrencyUsd(totals.totalUsd)}`, startX, doc.y + 4);
-    doc.moveDown(0.4);
+  const extraLines = [];
+  if (totals.totalUsd > 0 || totals.impuestoUsd > 0) {
+    const parts = [];
+    if (totals.totalUsd > 0) parts.push(`Equivalente en USD: ${formatCurrencyUsd(totals.totalUsd)}`);
+    if (totals.impuestoUsd > 0) parts.push(`IVA en USD: ${formatCurrencyUsd(totals.impuestoUsd)}`);
+    extraLines.push(parts.join('   ·   '));
+  }
+  if (totals.iva5 > 0 || totals.iva10 > 0) {
+    const ivaParts = [];
+    ivaParts.push(`IVA 5%: ${formatCurrencyPyG(totals.iva5)}`);
+    ivaParts.push(`IVA 10%: ${formatCurrencyPyG(totals.iva10)}`);
+    if (totals.iva5Usd > 0 || totals.iva10Usd > 0) {
+      const ivaUsdParts = [];
+      if (totals.iva5Usd > 0) ivaUsdParts.push(`5% USD ${formatCurrencyUsd(totals.iva5Usd)}`);
+      if (totals.iva10Usd > 0) ivaUsdParts.push(`10% USD ${formatCurrencyUsd(totals.iva10Usd)}`);
+      ivaParts.push(`(${ivaUsdParts.join(' · ')})`);
+    }
+    extraLines.push(ivaParts.join('   ·   '));
+  }
+  if (totals.costo > 0 || totals.margen !== 0) {
+    const margenParts = [];
+    if (totals.costo > 0) margenParts.push(`Costo estimado: ${formatCurrencyPyG(totals.costo)}`);
+    const margenTexto = `Margen: ${formatCurrencyPyG(totals.margen)} (${formatPercentValue(totals.margenPercent)})`;
+    margenParts.push(margenTexto);
+    extraLines.push(margenParts.join('   ·   '));
+  }
+  if (extraLines.length) {
+    extraLines.forEach((line) => {
+      doc
+        .font('Helvetica')
+        .fontSize(9)
+        .fillColor('#475569')
+        .text(line, startX, doc.y + 4);
+      doc.moveDown(0.2);
+    });
+    doc.moveDown(0.2);
   }
   ensureMinimumSpacing(doc, 10);
   drawReportTable(
@@ -957,7 +1251,7 @@ function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
   const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const totals = calculateMarginTotals(ventas);
   const rows = buildMarginReportRows(ventas, totals);
-  renderReportHeader(doc, 'Reporte de margen de ventas', range, startX, usableWidth);
+  renderReportHeader(doc, 'Reporte de margen de ventas', range, startX, usableWidth, filterChips);
   drawReportFilterTags(doc, filterChips, startX, usableWidth);
   drawReportSummaryChips(
     doc,
@@ -994,7 +1288,7 @@ function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
     });
 }
 
-function renderReportHeader(doc, title, range, startX, usableWidth) {
+function renderReportHeader(doc, title, range, startX, usableWidth, filterChips = []) {
   const startLabel = formatRangeDateLabel(range.startDate);
   const endLabel = formatRangeDateLabel(range.endDate);
   const subtitle = startLabel === endLabel ? `Fecha: ${startLabel}` : `Rango: ${startLabel} – ${endLabel}`;
@@ -1044,6 +1338,13 @@ function renderReportHeader(doc, title, range, startX, usableWidth) {
       width: textWidth,
       align: 'center'
     });
+
+  const filtersText = Array.isArray(filterChips) && filterChips.length ? filterChips.join(' | ') : 'Sin filtros';
+  doc
+    .font('Helvetica')
+    .fontSize(9)
+    .fillColor('#64748b')
+    .text(`Filtros: ${filtersText}`, textStartX, doc.y + 6, { width: textWidth, align: 'center' });
 
   doc.moveDown(2);
 }
@@ -1221,13 +1522,14 @@ function buildDailyReportColumns(usableWidth) {
   const definitions = [
     { key: 'fecha', label: 'Fecha', ratio: 0.075 },
     { key: 'factura', label: 'N° factura', ratio: 0.11 },
-    { key: 'cliente', label: 'Cliente', ratio: 0.21 },
+    { key: 'cliente', label: 'Cliente', ratio: 0.19 },
     { key: 'usuario', label: 'Usuario', ratio: 0.09 },
     { key: 'estado', label: 'Estado', ratio: 0.065 },
-    { key: 'subtotal', label: 'Subtotal', ratio: 0.14, align: 'right' },
-    { key: 'descuento', label: 'Descuento', ratio: 0.085, align: 'right' },
-    { key: 'iva', label: 'IVA', ratio: 0.095, align: 'right' },
-    { key: 'total', label: 'Total', ratio: 0.11, align: 'right' },
+    { key: 'condicion', label: 'Condición', ratio: 0.05 },
+    { key: 'subtotal', label: 'Subtotal', ratio: 0.13, align: 'right' },
+    { key: 'descuento', label: 'Descuento', ratio: 0.08, align: 'right' },
+    { key: 'iva', label: 'IVA', ratio: 0.09, align: 'right' },
+    { key: 'total', label: 'Total', ratio: 0.1, align: 'right' },
     { key: 'items', label: 'Items', ratio: 0.02, align: 'center' }
   ];
 
@@ -1241,12 +1543,15 @@ function buildDailyReportRows(ventas, totals) {
   const rows = ventas.map((venta) => {
     const estadoBase = (venta.estado || '').toUpperCase();
     const anulada = estadoBase === 'ANULADA' || Boolean(venta.deleted_at);
+    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
+    const condicion = condicionRaw.includes('CREDITO') ? 'Crédito' : 'Contado';
     return {
       fecha: formatDateForDisplay(venta.fecha || venta.created_at),
       factura: resolveInvoiceNumberForReport(venta),
       cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
       usuario: venta.usuario?.nombre || venta.usuario?.usuario || '—',
       estado: anulada ? 'Anulada' : venta.estado || '—',
+      condicion,
       subtotal: formatCurrencyPyG(venta.subtotal),
       descuento: formatCurrencyPyG(venta.descuento_total),
       iva: formatCurrencyPyG(venta.impuesto_total),
@@ -1262,6 +1567,7 @@ function buildDailyReportRows(ventas, totals) {
     cliente: '',
     usuario: '',
     estado: '',
+    condicion: '',
     subtotal: formatCurrencyPyG(totals.subtotal),
     descuento: formatCurrencyPyG(totals.descuento),
     iva: formatCurrencyPyG(totals.impuesto),
@@ -1274,34 +1580,218 @@ function buildDailyReportRows(ventas, totals) {
 }
 
 function calculateDailyTotals(ventas) {
-  return ventas.reduce(
+  const result = ventas.reduce(
     (acc, venta) => {
+      const totalVenta = Number(venta.total ?? venta.subtotal) || 0;
+      const costo = computeCostoVenta(venta);
       acc.subtotal += Number(venta.subtotal) || 0;
       acc.descuento += Number(venta.descuento_total) || 0;
       acc.impuesto += Number(venta.impuesto_total) || 0;
-      acc.total += Number(venta.total ?? venta.subtotal) || 0;
+      acc.total += totalVenta;
       acc.items += countVentaItems(venta);
+      acc.costo += costo;
+      acc.margen += totalVenta - costo;
       const currency = (venta.moneda || 'PYG').toUpperCase();
+      const ivaTotal = Number(venta.impuesto_total) || 0;
+      const ivaRate = Number(venta.iva_porcentaje) || 10;
+      if (ivaRate === 5) acc.iva5 += ivaTotal; else acc.iva10 += ivaTotal;
       if (currency === 'USD') {
         const usdAmount = Number(venta.total_moneda) || 0;
         if (usdAmount > 0) {
           acc.totalUsd += usdAmount;
         }
+        const tipoCambio = Number(venta.tipo_cambio) || 0;
+        if (ivaTotal > 0 && tipoCambio > 0) {
+          const ivaUsd = ivaTotal / tipoCambio;
+          acc.impuestoUsd += ivaUsd;
+          if (ivaRate === 5) acc.iva5Usd += ivaUsd; else acc.iva10Usd += ivaUsd;
+        }
       }
       return acc;
     },
-    { subtotal: 0, descuento: 0, impuesto: 0, total: 0, items: 0, totalUsd: 0 }
+    {
+      subtotal: 0,
+      descuento: 0,
+      impuesto: 0,
+      total: 0,
+      items: 0,
+      totalUsd: 0,
+      impuestoUsd: 0,
+      iva5: 0,
+      iva10: 0,
+      iva5Usd: 0,
+      iva10Usd: 0,
+      costo: 0,
+      margen: 0
+    }
   );
+
+  result.margenPercent = result.total > 0 ? (result.margen / result.total) * 100 : 0;
+  return result;
+}
+
+function buildDailyCsv(ventas) {
+  const header = [
+    'Fecha',
+    'Nro factura',
+    'Cliente',
+    'Estado',
+    'Condición',
+    'Moneda',
+    'Subtotal_PYG',
+    'Descuento_PYG',
+    'IVA_PYG',
+    'Total_PYG',
+    'Total_Moneda',
+    'Tipo_cambio',
+    'Costo_estimado_PYG',
+    'Margen_PYG',
+    'Margen_%',
+    'Items'
+  ];
+
+  const totals = calculateDailyTotals(ventas);
+  const rows = ventas.map((venta) => {
+    const totalVenta = Number(venta.total ?? venta.subtotal) || 0;
+    const costo = computeCostoVenta(venta);
+    const margen = totalVenta - costo;
+    const margenPercent = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
+    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
+    return [
+      formatIsoDateOnly(venta.fecha || venta.created_at),
+      resolveInvoiceNumberForReport(venta),
+      venta.cliente?.nombre_razon_social || 'Cliente eventual',
+      venta.estado || '',
+      condicionRaw,
+      (venta.moneda || 'PYG').toUpperCase(),
+      plainNumber(venta.subtotal),
+      plainNumber(venta.descuento_total),
+      plainNumber(venta.impuesto_total),
+      plainNumber(totalVenta),
+      plainNumber(venta.total_moneda),
+      plainNumber(venta.tipo_cambio),
+      plainNumber(costo),
+      plainNumber(margen),
+      plainPercent(margenPercent),
+      plainNumber(countVentaItems(venta))
+    ];
+  });
+
+  rows.push([
+    'Totales',
+    `${ventas.length} ventas`,
+    '',
+    '',
+    '',
+    '',
+    plainNumber(totals.subtotal),
+    plainNumber(totals.descuento),
+    plainNumber(totals.impuesto),
+    plainNumber(totals.total),
+    plainNumber(totals.totalUsd),
+    '',
+    plainNumber(totals.costo),
+    plainNumber(totals.margen),
+    plainPercent(totals.margenPercent),
+    plainNumber(totals.items)
+  ]);
+
+  const lines = [header, ...rows].map((line) => stringifyCsvRow(line));
+  return lines.join('\n');
+}
+
+function buildDailyXlsx(ventas, range, filterChips = []) {
+  const header = [
+    'Fecha',
+    'Nro factura',
+    'Cliente',
+    'Estado',
+    'Condición',
+    'Moneda',
+    'Subtotal PYG',
+    'Descuento PYG',
+    'IVA PYG',
+    'Total PYG',
+    'Total Moneda',
+    'Tipo cambio',
+    'Costo estimado PYG',
+    'Margen PYG',
+    'Margen %',
+    'Items'
+  ];
+
+  const totals = calculateDailyTotals(ventas);
+  const rows = ventas.map((venta) => {
+    const totalVenta = Number(venta.total ?? venta.subtotal) || 0;
+    const costo = computeCostoVenta(venta);
+    const margen = totalVenta - costo;
+    const margenPercent = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
+    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
+    return [
+      formatIsoDateOnly(venta.fecha || venta.created_at),
+      resolveInvoiceNumberForReport(venta),
+      venta.cliente?.nombre_razon_social || 'Cliente eventual',
+      venta.estado || '',
+      condicionRaw,
+      (venta.moneda || 'PYG').toUpperCase(),
+      asNumberOrNull(venta.subtotal),
+      asNumberOrNull(venta.descuento_total),
+      asNumberOrNull(venta.impuesto_total),
+      asNumberOrNull(totalVenta),
+      asNumberOrNull(venta.total_moneda),
+      asNumberOrNull(venta.tipo_cambio),
+      asNumberOrNull(costo),
+      asNumberOrNull(margen),
+      asPercentNumber(margenPercent),
+      asNumberOrNull(countVentaItems(venta))
+    ];
+  });
+
+  rows.push([
+    'Totales',
+    `${ventas.length} ventas`,
+    '',
+    '',
+    '',
+    '',
+    asNumberOrNull(totals.subtotal),
+    asNumberOrNull(totals.descuento),
+    asNumberOrNull(totals.impuesto),
+    asNumberOrNull(totals.total),
+    asNumberOrNull(totals.totalUsd),
+    '',
+    asNumberOrNull(totals.costo),
+    asNumberOrNull(totals.margen),
+    asPercentNumber(totals.margenPercent),
+    asNumberOrNull(totals.items)
+  ]);
+
+  const metaRows = [
+    ['Reporte diario de ventas'],
+    [`Rango: ${formatRangeDateLabel(range.startDate)} – ${formatRangeDateLabel(range.endDate)}`],
+    [`Generado: ${formatDateTimeLabel(new Date())}`],
+    [`Filtros: ${Array.isArray(filterChips) && filterChips.length ? filterChips.join(' | ') : 'Sin filtros'}`],
+    []
+  ];
+
+  const aoa = [...metaRows, header, ...rows];
+  const sheet = XLSX.utils.aoa_to_sheet(aoa);
+  sheet['!cols'] = header.map(() => ({ wch: 18 }));
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Diario');
+  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 }
 
 function buildMarginReportColumns(usableWidth) {
   const definitions = [
-    { key: 'fecha', label: 'Fecha', ratio: 0.12 },
-    { key: 'factura', label: 'N° factura', ratio: 0.18 },
-    { key: 'cliente', label: 'Cliente', ratio: 0.24 },
-    { key: 'total', label: 'Total venta', ratio: 0.15, align: 'right' },
-    { key: 'costo', label: 'Costo estimado', ratio: 0.15, align: 'right' },
-    { key: 'margen', label: 'Margen', ratio: 0.1, align: 'right' },
+    { key: 'fecha', label: 'Fecha', ratio: 0.1 },
+    { key: 'factura', label: 'N° factura', ratio: 0.16 },
+    { key: 'cliente', label: 'Cliente', ratio: 0.22 },
+    { key: 'condicion', label: 'Condición', ratio: 0.08 },
+    { key: 'total', label: 'Total venta', ratio: 0.14, align: 'right' },
+    { key: 'costo', label: 'Costo estimado', ratio: 0.13, align: 'right' },
+    { key: 'margen', label: 'Margen', ratio: 0.11, align: 'right' },
     { key: 'margenPorcentaje', label: 'Margen %', ratio: 0.06, align: 'right' }
   ];
 
@@ -1317,10 +1807,13 @@ function buildMarginReportRows(ventas, totals) {
     const costo = computeCostoVenta(venta);
     const margen = totalVenta - costo;
     const porcentaje = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
+    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
+    const condicion = condicionRaw.includes('CREDITO') ? 'Crédito' : 'Contado';
     return {
       fecha: formatDateForDisplay(venta.fecha || venta.created_at),
       factura: resolveInvoiceNumberForReport(venta),
       cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
+      condicion,
       total: formatCurrencyPyG(totalVenta),
       costo: formatCurrencyPyG(costo),
       margen: formatCurrencyPyG(margen),
@@ -1332,6 +1825,7 @@ function buildMarginReportRows(ventas, totals) {
     fecha: 'Totales',
     factura: `(${ventas.length} ventas)`,
     cliente: '',
+    condicion: '',
     total: formatCurrencyPyG(totals.totalVenta),
     costo: formatCurrencyPyG(totals.costo),
     margen: formatCurrencyPyG(totals.margen),
@@ -1415,6 +1909,40 @@ function formatPercentValue(value) {
   return `${numeric.toLocaleString('es-PY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 }
 
+function plainNumber(value) {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return '';
+  return numeric.toString();
+}
+
+function asNumberOrNull(value) {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return null;
+  return numeric;
+}
+
+function asPercentNumber(value) {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return null;
+  return Number(numeric.toFixed(2));
+}
+
+function plainPercent(value) {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) return '';
+  return numeric.toFixed(2);
+}
+
+function stringifyCsvRow(values) {
+  return values
+    .map((value) => {
+      const text = value === null || value === undefined ? '' : String(value);
+      const escaped = text.replace(/"/g, '""');
+      return `"${escaped}"`;
+    })
+    .join(',');
+}
+
 function formatIntegerValue(value) {
   return new Intl.NumberFormat('es-PY').format(Number(value) || 0);
 }
@@ -1454,10 +1982,328 @@ function formatDateTimeLabel(value) {
   return new Intl.DateTimeFormat('es-PY', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
-function generarNumeroFactura(ventaId) {
-  const cleaned = (ventaId || '').replace(/-/g, '').toUpperCase();
-  const correlativo = cleaned.slice(0, 7).padEnd(7, '0');
-  return `001-001-${correlativo}`;
+function generarNumeroFactura(venta, timbradoInput) {
+  const timbrado = timbradoInput || selectTimbradoParaVenta(venta, empresaConfig);
+  const establecimiento = (timbrado.establecimiento || '001').padStart(3, '0');
+  const punto = (timbrado.punto_expedicion || timbrado.punto || '001').padStart(3, '0');
+  const base = (venta?.id || venta || '').toString().replace(/-/g, '').toUpperCase();
+  const correlativo = base.slice(0, 7).padEnd(7, '0');
+  return `${establecimiento}-${punto}-${correlativo}`;
+}
+
+function parseSecuenciaFromNumero(nroFactura) {
+  if (!nroFactura || typeof nroFactura !== 'string') return null;
+  const parts = nroFactura.split('-');
+  if (parts.length !== 3) return null;
+  const correlativo = parts[2].replace(/[^0-9]/g, '');
+  if (!correlativo) return null;
+  const parsed = Number(correlativo);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parsePositiveOverride(value) {
+  if (!value) return 0;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+}
+
+function getMinSecuenciaOverride(timbrado) {
+  const est = (timbrado.establecimiento || '001').padStart(3, '0');
+  const punto = (timbrado.punto_expedicion || timbrado.punto || '001').padStart(3, '0');
+  const scopedKey = `FACTURA_MIN_SECUENCIA_${est}_${punto}`;
+  const globalKey = 'FACTURA_MIN_SECUENCIA';
+  const scoped = parsePositiveOverride(process.env[scopedKey]);
+  const global = parsePositiveOverride(process.env[globalKey]);
+  return Math.max(scoped, global);
+}
+
+async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
+  const whereDigital = {
+    timbrado: timbrado.numero,
+    establecimiento: timbrado.establecimiento || '001',
+    punto_expedicion: timbrado.punto_expedicion || timbrado.punto || '001'
+  };
+
+  // Importante: nro_factura es único global, por eso no filtramos por sucursal al buscar el máximo electrónico.
+  const whereElectronica = { timbrado: timbrado.numero };
+
+  const fetchMaxes = async (whereDigitalFilter, whereElectronicaFilter) => {
+    const [ultimoDigital, ultimasElectronicas] = await Promise.all([
+      tx.facturaDigital.findFirst({
+        where: whereDigitalFilter,
+        orderBy: { secuencia: 'desc' },
+        select: { secuencia: true }
+      }),
+      tx.facturaElectronica.findMany({
+        where: whereElectronicaFilter,
+        select: { nro_factura: true },
+        orderBy: { created_at: 'desc' },
+        take: 10
+      })
+    ]);
+
+    const maxSecuenciaElectronica = (ultimasElectronicas || []).reduce((max, item) => {
+      const parsed = parseSecuenciaFromNumero(item.nro_factura);
+      return Math.max(max, parsed || 0);
+    }, 0);
+
+    const maxSecuencia = Math.max(ultimoDigital?.secuencia || 0, maxSecuenciaElectronica);
+    return maxSecuencia + 1;
+  };
+
+  // Primero intentamos scoped a la sucursal; si no hay registros, ampliamos a todo el timbrado.
+  const overrideMin = getMinSecuenciaOverride(timbrado);
+
+  const scoped = await fetchMaxes(whereDigital, whereElectronica);
+  return Math.max(scoped, overrideMin);
+}
+
+function toDateOnlyString(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+function deriveCreditoDescripcion(descripcion, fechaEmision, fechaVencimiento) {
+  if (descripcion && descripcion.trim()) return descripcion.trim().slice(0, 10);
+  if (fechaEmision && fechaVencimiento) {
+    const diffMs = new Date(fechaVencimiento).getTime() - new Date(fechaEmision).getTime();
+    const dias = Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+    return `${dias} dias`.slice(0, 10);
+  }
+  return '30 dias';
+}
+
+function normalizeCuotas(cuotas) {
+  if (!Array.isArray(cuotas)) return [];
+  return cuotas
+    .map((cuota, idx) => {
+      const monto = round(Number(cuota?.monto) || 0, 2);
+      const numero = Number(cuota?.numero) || idx + 1;
+      const fechaVencimiento = toDateOnlyString(cuota?.fecha_vencimiento || cuota?.fechaVencimiento);
+      if (!monto || !fechaVencimiento) return null;
+      return { numero, monto, fechaVencimiento };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.numero - b.numero);
+}
+
+function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
+  const condicionVenta = normalizeCondicionVenta(opciones?.condicion_pago || venta?.condicion_venta, opciones?.credito);
+  const esCredito = condicionVenta === 'CREDITO';
+
+  if (!esCredito) {
+    return {
+      condicionVenta,
+      condicionPago: 1,
+      pagos: [
+        {
+          tipoPago: '1',
+          monto: totalPago
+        }
+      ],
+      credito: null
+    };
+  }
+
+  const creditoConfig = opciones?.credito || venta?.credito_config || venta?.factura_electronica?.respuesta_set?.credito;
+  const fechaVencimiento = opciones?.fecha_vencimiento || creditoConfig?.fecha_vencimiento || venta?.fecha_vencimiento;
+
+  const cuotasNormalizadas = normalizeCuotas(creditoConfig?.cuotas);
+  if (creditoConfig && (creditoConfig?.tipo === 'CUOTAS' || cuotasNormalizadas.length)) {
+    const cantidadCuota = creditoConfig.cantidad_cuotas || cuotasNormalizadas.length || 1;
+    const cuotasPayload = cuotasNormalizadas.length
+      ? cuotasNormalizadas
+      : [
+          {
+            numero: 1,
+            monto: totalPago,
+            fechaVencimiento: toDateOnlyString(fechaVencimiento) || toDateOnlyString(fechaEmision)
+          }
+        ];
+
+    return {
+      condicionVenta,
+      condicionPago: 2,
+      pagos: [{}],
+      credito: {
+        condicionCredito: 2,
+        cantidadCuota: cantidadCuota,
+        cuotas: cuotasPayload
+      }
+    };
+  }
+
+  const descripcion = deriveCreditoDescripcion(creditoConfig?.descripcion, fechaEmision, fechaVencimiento);
+
+  return {
+    condicionVenta,
+    condicionPago: 2,
+    pagos: [{}],
+    credito: {
+      condicionCredito: 1,
+      descripcion
+    }
+  };
+}
+
+function buildFactPyPayload(venta, factura, opciones = {}) {
+  if (!venta) {
+    throw new Error('Venta requerida para FactPy');
+  }
+  const parseMonto = (value) => {
+    if (typeof value === 'string') {
+      const normalized = value.replace(/\./g, '').replace(/,/g, '.');
+      const parsed = Number(normalized);
+      return Number.isFinite(parsed) ? parsed : Number(value);
+    }
+    return Number(value);
+  };
+
+  const timbradoSeleccionado = selectTimbradoParaVenta(venta, empresaConfig);
+  const numeroFactura = factura?.nro_factura || generarNumeroFactura(venta, timbradoSeleccionado);
+  const secuencia = (numeroFactura.split('-').pop() || '0000001').replace(/[^0-9]/g, '').padStart(7, '0');
+  const fecha = venta?.created_at ? new Date(venta.created_at) : new Date();
+  const cliente = venta?.cliente || {};
+  const nombreCliente = cliente.nombre_razon_social || cliente.nombre || 'CLIENTE';
+  const rucCliente = cliente.ruc || '';
+  const direccionCliente = cliente.direccion || cliente.direccion_facturacion || 'S/D';
+  const correoCliente = cliente.correo || cliente.email || '';
+  const moneda = (venta?.moneda || 'PYG').toUpperCase();
+  const cambio = parseMonto(venta?.tipo_cambio) || 0;
+  const establecimiento = process.env.FACTPY_ESTABLECIMIENTO || timbradoSeleccionado.establecimiento || '001';
+  const punto = process.env.FACTPY_PUNTO || timbradoSeleccionado.punto_expedicion || timbradoSeleccionado.punto || '001';
+  const descuentoTotalGs = parseMonto(venta?.descuento_total) || 0;
+  const descuentoTotal = (() => {
+    if (moneda === 'USD') {
+      if (cambio && cambio > 0) {
+        return round(descuentoTotalGs / cambio, 4);
+      }
+      return 0;
+    }
+    return descuentoTotalGs;
+  })();
+
+  const random9 = String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, '0');
+
+  const convertirMonto = (monto) => {
+    const valor = parseMonto(monto) || 0;
+    if (moneda === 'USD') {
+      if (!cambio || cambio <= 0) return 0;
+      return round(valor / cambio, 4);
+    }
+    return round(valor, 2);
+  };
+
+  const items = Array.isArray(venta?.detalles)
+    ? venta.detalles.map((detalle, idx) => {
+        const cantidad = Number(detalle?.cantidad) || 1;
+        const precioUnitarioGs = Number(detalle?.precio_unitario || detalle?.subtotal / (cantidad || 1) || detalle?.producto?.precio_venta) || 0;
+        const precioUnitarioConvertido = convertirMonto(precioUnitarioGs);
+        const precioUnitario = precioUnitarioConvertido > 0 ? precioUnitarioConvertido : round(precioUnitarioGs, 4);
+        const precioTotal = round(precioUnitario * cantidad, 4);
+        const ivaTasa = Number(detalle?.iva_porcentaje || detalle?.producto?.iva_porcentaje || venta?.iva_porcentaje || 10);
+        const divisor = ivaTasa === 5 ? 1.05 : 1.1;
+        const baseGravItem = Number((precioTotal / divisor).toFixed(8));
+        const liqIvaItem = Number((precioTotal - baseGravItem).toFixed(8));
+        const descripcion = detalle?.producto?.nombre || 'Item de venta';
+        const codigo = detalle?.producto?.sku || detalle?.productoId || `ITEM-${idx + 1}`;
+        return {
+          descripcion,
+          codigo,
+          unidadMedida: 77,
+          ivaTasa,
+          ivaAfecta: 1,
+          cantidad,
+          precioUnitario,
+          precioTotal,
+          baseGravItem,
+          liqIvaItem
+        };
+      })
+    : [];
+
+  const totalPagoBruto = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
+  const descuentoAplicable = totalPagoBruto > 0 ? Math.min(descuentoTotal, totalPagoBruto) : 0;
+  const itemsConDescuento = totalPagoBruto > 0 && descuentoAplicable > 0
+    ? items.map((item) => {
+        const proporcion = Number(item.precioTotal) / totalPagoBruto;
+        const descuentoItem = round(proporcion * descuentoAplicable, 4);
+        const precioTotalAjustado = Math.max(round(item.precioTotal - descuentoItem, 4), 0);
+        const precioUnitarioAjustado = item.cantidad ? round(precioTotalAjustado / item.cantidad, 4) : precioTotalAjustado;
+        const divisor = item.ivaTasa === 5 ? 1.05 : 1.1;
+        const baseGravItem = Number((precioTotalAjustado / divisor).toFixed(8));
+        const liqIvaItem = Number((precioTotalAjustado - baseGravItem).toFixed(8));
+        return {
+          ...item,
+          precioUnitario: precioUnitarioAjustado,
+          precioTotal: precioTotalAjustado,
+          baseGravItem,
+          liqIvaItem
+        };
+      })
+    : items;
+
+  const totalPago = round(itemsConDescuento.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
+  const totalGs = round(Number(venta?.total) || totalPago, 2);
+  const totalMoneda =
+    moneda === 'USD'
+      ? Number(venta?.total_moneda) || (cambio > 0 ? round(totalGs / cambio, 4) : totalPago)
+      : totalGs;
+
+  const credito = buildCreditoSection(venta, opciones, totalPago, fecha);
+
+  return {
+    fecha: fecha.toISOString().replace('T', ' ').slice(0, 19),
+    establecimiento,
+    punto,
+    numero: secuencia,
+    descripcion: factura?.id || venta?.id,
+    tipoDocumento: 1,
+    tipoEmision: 1,
+    tipoTransaccion: 1,
+    receiptid: venta.id,
+    condicionPago: credito.condicionPago,
+    moneda,
+    cambio,
+    cliente: {
+      ruc: rucCliente,
+      nombre: nombreCliente,
+      direccion: direccionCliente,
+      cpais: 'PRY',
+      correo: correoCliente,
+      numCasa: 0,
+      diplomatico: false,
+      dncp: 0
+    },
+    codigoSeguridadAleatorio: random9,
+    items: itemsConDescuento,
+    pagos: credito.pagos,
+    ...(credito.credito ? { credito: credito.credito } : {}),
+    totalPago,
+    totalPagoGs: totalGs,
+    totalPagoMoneda: totalMoneda,
+    totalRedondeo: 0
+  };
+}
+
+function selectTimbradoParaVenta(venta, config) {
+  const baseTimbrado = config?.timbrado || {};
+  const overrides = Array.isArray(config?.timbradosPorSucursal) ? config.timbradosPorSucursal : [];
+  if (!venta) return baseTimbrado;
+  const sucursalId = venta.sucursalId || venta.sucursal?.id;
+  const sucursalNombre = (venta.sucursal?.nombre || '').trim().toLowerCase();
+  const match = overrides.find((item) => {
+    if (item.sucursalId && sucursalId && item.sucursalId === sucursalId) return true;
+    if (item.nombre && sucursalNombre && sucursalNombre === String(item.nombre).trim().toLowerCase()) return true;
+    return false;
+  });
+  if (match) {
+    return { ...baseTimbrado, ...match };
+  }
+  return baseTimbrado;
 }
 
 function construirQrPlaceholder(venta, nroFactura) {
@@ -1472,7 +2318,7 @@ function construirQrPlaceholder(venta, nroFactura) {
 }
 
 async function buildFacturaQrImage(factura, venta) {
-  const nroFactura = factura?.nro_factura || generarNumeroFactura(venta?.id);
+  const nroFactura = factura?.nro_factura || generarNumeroFactura(venta);
   const rawPayload = factura?.qr_data || construirQrPlaceholder(venta, nroFactura);
   const payloadString = typeof rawPayload === 'string' ? rawPayload : JSON.stringify(rawPayload);
 
@@ -1529,7 +2375,7 @@ async function generarArchivosFactura(venta, factura) {
 function renderFacturaPdf(doc, venta, factura, qrBuffer) {
   const logoPath = path.join(__dirname, '..', 'public', 'img', 'logo.png');
   const hasLogo = fs.existsSync(logoPath);
-  const nroFactura = factura?.nro_factura || generarNumeroFactura(venta?.id);
+  const nroFactura = factura?.nro_factura || generarNumeroFactura(venta);
   const fechaEmision = factura?.fecha_emision || venta?.fecha || venta?.created_at || new Date();
   const margins = doc.page.margins;
   const contentWidth = doc.page.width - margins.left - margins.right;
@@ -1579,6 +2425,10 @@ function renderFacturaPdf(doc, venta, factura, qrBuffer) {
     align: 'right'
   });
   doc.text(`Ambiente: ${factura?.ambiente || 'PRUEBA'}`, headerRightX, doc.y, {
+    width: contentWidth / 2 - 20,
+    align: 'right'
+  });
+  doc.text(`Condición: ${venta?.condicion_venta || 'CONTADO'}`, headerRightX, doc.y, {
     width: contentWidth / 2 - 20,
     align: 'right'
   });

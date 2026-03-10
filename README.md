@@ -68,6 +68,7 @@ Esta carpeta ya contiene un backend Express funcional conectado a PostgreSQL med
 | `npm run db:check` | Conecta con Prisma y muestra un producto de ejemplo si existe.          |
 | `npm run db:seed`  | Inserta usuarios, categorías, clientes, productos y una venta demo.     |
 | `npm run db:reset` | Vacía tablas relacionadas (venta/producto/movimientos, etc.) y ejecuta el seed nuevamente. |
+| `npm run factpy:check` | Smoke contra FactPy (usa `scripts/factpy-check.js`, desactiva SIFEN). |
 
 ## Endpoints actuales
 
@@ -100,6 +101,12 @@ Si prefieres evitar tocar tu base local, puedes usar los seeds y reset para volv
 
 - `DEV_SETUP.md`: guía corta para montar el entorno.
 - `scripts/`: helpers (`db-check`, `seed`, `reset`).
+- `scripts/factpy-check.js`: smoke FactPy. Usa `FACTPY_RECORD_ID`, `FACTPY_ESTABLECIMIENTO`, `FACTPY_PUNTO`, `FACTPY_TIPO_CAMBIO/FACTPY_TC`. Para crédito:
+	- Plazo (default): `FACTPY_CREDITO_MODE=plazo`
+	- Cuotas: `FACTPY_CREDITO_MODE=cuotas` (genera 3 cuotas a 30/60/90 días)
+- Ejemplos rápidos:
+	- Plazo: `FACTPY_RECORD_ID=... FACTPY_ESTABLECIMIENTO=001 FACTPY_PUNTO=001 FACTPY_TIPO_CAMBIO=7300 FACTPY_CREDITO_MODE=plazo npm run factpy:check`
+	- Cuotas: `FACTPY_RECORD_ID=... FACTPY_ESTABLECIMIENTO=001 FACTPY_PUNTO=001 FACTPY_TIPO_CAMBIO=7300 FACTPY_CREDITO_MODE=cuotas npm run factpy:check`
 - `prisma/schema.prisma`: esquema en español (fuente de verdad). Mantén sincronizado `init.sql` si haces cambios.
 
 Para colaboradores automatizados (Copilot/IA) ver `.github/copilot-instructions.md`.

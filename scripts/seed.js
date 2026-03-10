@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 
 const SEED_IDS = {
   admin: '11111111-1111-4111-8111-111111111111',
+  sucursalCentral: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   categoriaDrones: '22222222-2222-4222-8222-222222222222',
   categoriaRepuestos: '33333333-3333-4333-8333-333333333333',
   clienteDemo: '44444444-4444-4444-8444-444444444444',
@@ -22,7 +23,21 @@ const SEED_IDS = {
 async function runSeed(prisma) {
   console.log('Iniciando seed de datos básicos...');
 
-  const adminPassword = await bcrypt.hash('changeme', 10);
+  const adminPassword = await bcrypt.hash('admin123', 10);
+  
+    const sucursal = await prisma.sucursal.upsert({
+      where: { id: SEED_IDS.sucursalCentral },
+      update: {
+        nombre: 'Casa Central',
+        ciudad: 'Asuncion',
+        deleted_at: null
+      },
+      create: {
+        id: SEED_IDS.sucursalCentral,
+        nombre: 'Casa Central',
+        ciudad: 'Asuncion'
+      }
+    });
 
   const admin = await prisma.usuario.upsert({
     where: { id: SEED_IDS.admin },
@@ -39,6 +54,21 @@ async function runSeed(prisma) {
       nombre: 'Administrador',
       usuario: 'admin',
       password_hash: adminPassword,
+      rol: 'ADMIN'
+    }
+  });
+
+  await prisma.usuarioSucursal.upsert({
+    where: {
+      usuarioId_sucursalId: {
+        usuarioId: admin.id,
+        sucursalId: sucursal.id
+      }
+    },
+    update: { rol: 'ADMIN' },
+    create: {
+      usuarioId: admin.id,
+      sucursalId: sucursal.id,
       rol: 'ADMIN'
     }
   });
@@ -74,7 +104,8 @@ async function runSeed(prisma) {
         ruc: '80000001-0',
         direccion: 'Av. Siempre Viva 123',
         telefono: '021-555-000',
-        correo: 'facturacion@demo.com'
+        correo: 'facturacion@demo.com',
+        sucursal: { connect: { id: sucursal.id } }
       }
     }),
     prisma.cliente.upsert({
@@ -83,7 +114,8 @@ async function runSeed(prisma) {
       create: {
         id: SEED_IDS.clienteFinal,
         nombre_razon_social: 'Consumidor Final',
-        direccion: 'Sin dirección'
+        direccion: 'Sin dirección',
+        sucursal: { connect: { id: sucursal.id } }
       }
     })
   ]);
@@ -98,7 +130,8 @@ async function runSeed(prisma) {
         tipo: 'DRON',
         precio_venta: 2500000,
         stock_actual: 9,
-        categoria: { connect: { id: categorias[0].id } }
+        categoria: { connect: { id: categorias[0].id } },
+        sucursal: { connect: { id: sucursal.id } }
       }
     }),
     prisma.producto.upsert({
@@ -110,7 +143,8 @@ async function runSeed(prisma) {
         tipo: 'REPUESTO',
         precio_venta: 120000,
         stock_actual: 25,
-        categoria: { connect: { id: categorias[1].id } }
+        categoria: { connect: { id: categorias[1].id } },
+        sucursal: { connect: { id: sucursal.id } }
       }
     })
   ]);
@@ -122,6 +156,7 @@ async function runSeed(prisma) {
       id: SEED_IDS.ventaDemo,
       usuario: { connect: { id: admin.id } },
       cliente: { connect: { id: clientes[0].id } },
+      sucursal: { connect: { id: sucursal.id } },
       subtotal: 2500000,
       total: 2500000,
       estado: 'COMPLETADA',
@@ -198,6 +233,7 @@ async function runSeed(prisma) {
     where: { id: SEED_IDS.aperturaCajaDemo },
     update: {
       usuarioId: admin.id,
+      sucursalId: sucursal.id,
       fecha_apertura: fechaApertura,
       fecha_cierre: cierreHora,
       saldo_inicial: saldoInicial,
@@ -207,6 +243,7 @@ async function runSeed(prisma) {
     create: {
       id: SEED_IDS.aperturaCajaDemo,
       usuario: { connect: { id: admin.id } },
+      sucursal: { connect: { id: sucursal.id } },
       fecha_apertura: fechaApertura,
       fecha_cierre: cierreHora,
       saldo_inicial: saldoInicial,
@@ -219,6 +256,7 @@ async function runSeed(prisma) {
     update: {
       usuarioId: admin.id,
       aperturaId: aperturaCaja.id,
+      sucursalId: sucursal.id,
       saldo_inicial: saldoInicial,
       fecha_apertura: fechaApertura,
       fecha_cierre: cierreHora,
@@ -236,6 +274,7 @@ async function runSeed(prisma) {
       id: SEED_IDS.cierreCajaDemo,
       usuario: { connect: { id: admin.id } },
       apertura: { connect: { id: aperturaCaja.id } },
+      sucursal: { connect: { id: sucursal.id } },
       saldo_inicial: saldoInicial,
       fecha_apertura: fechaApertura,
       fecha_cierre: cierreHora,
@@ -256,6 +295,7 @@ async function runSeed(prisma) {
       update: {
         cierreId: cierre.id,
         usuarioId: admin.id,
+        sucursalId: sucursal.id,
         descripcion: salida.descripcion,
         monto: salida.monto,
         fecha: salida.fecha,
@@ -266,6 +306,7 @@ async function runSeed(prisma) {
         id: salida.id,
         cierre: { connect: { id: cierre.id } },
         usuario: { connect: { id: admin.id } },
+        sucursal: { connect: { id: sucursal.id } },
         descripcion: salida.descripcion,
         monto: salida.monto,
         fecha: salida.fecha

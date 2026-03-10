@@ -8,22 +8,29 @@ const prisma = new PrismaClient();
 async function clearTables() {
   console.log('Limpiando tablas principales...');
 
-  // Orden: primero dependencias, luego entidades
+  // Orden: primero dependencias, luego entidades para evitar FK
   const tables = [
+    () => prisma.auditLog.deleteMany(),
+    () => prisma.reciboDetalle.deleteMany(),
+    () => prisma.recibo.deleteMany(),
+    () => prisma.pago.deleteMany(),
     () => prisma.detalleVenta.deleteMany(),
     () => prisma.detalleCompra.deleteMany(),
     () => prisma.movimientoStock.deleteMany(),
-    () => prisma.pago.deleteMany(),
     () => prisma.salidaCaja.deleteMany(),
+    () => prisma.facturaDigital.deleteMany(),
     () => prisma.facturaElectronica.deleteMany(),
     () => prisma.venta.deleteMany(),
     () => prisma.cierreCaja.deleteMany(),
+    () => prisma.aperturaCaja.deleteMany(),
     () => prisma.compra.deleteMany(),
     () => prisma.producto.deleteMany(),
+    () => prisma.usuarioSucursal.deleteMany(),
     () => prisma.usuario.deleteMany(),
     () => prisma.cliente.deleteMany(),
     () => prisma.proveedor.deleteMany(),
-    () => prisma.categoria.deleteMany()
+    () => prisma.categoria.deleteMany(),
+    () => prisma.sucursal.deleteMany()
   ];
 
   for (const deleteFn of tables) {

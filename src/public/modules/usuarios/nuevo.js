@@ -14,7 +14,8 @@ export async function createUsuario(data) {
     usuario: data.usuario,
     password: data.password,
     rol: data.rol || 'VENDEDOR',
-    activo: data.activo !== undefined ? Boolean(data.activo) : true
+    activo: data.activo !== undefined ? Boolean(data.activo) : true,
+    sucursalIds: Array.isArray(data.sucursalIds) ? data.sucursalIds : []
   };
 
   return request('/usuarios', {

@@ -1,4 +1,4 @@
-import { request, buildQuery } from '../common/api.js';
+import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency, formatNumber, formatDate } from '../common/format.js';
 import { loadSession } from '../auth/session.js';
 
@@ -19,6 +19,9 @@ const posState = {
   ivaPorcentaje: 10,
   moneda: 'PYG',
   tipoCambio: null,
+  condicionVenta: 'CONTADO',
+  fechaVencimiento: null,
+  comprobante: 'FACTURA',
   lastSale: null,
   loading: false,
   productSearch: {
@@ -70,13 +73,10 @@ function ensureDom(container) {
         </div>
         <div class="pos-summary">
           <div class="pos-summary-row">
-            <label for="pos-discount">Descuento (Gs.)</label>
-            <input type="number" id="pos-discount" min="0" step="1000" placeholder="0">
-          </div>
-          <div class="pos-summary-row">
-            <label for="pos-iva">IVA aplicado</label>
-            <select id="pos-iva">
-              ${IVA_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
+            <label for="pos-comprobante">Comprobante</label>
+            <select id="pos-comprobante">
+              <option value="FACTURA">Factura</option>
+              <option value="TICKET">Ticket</option>
             </select>
           </div>
           <div class="pos-summary-row">
@@ -90,12 +90,34 @@ function ensureDom(container) {
             <label for="pos-exchange">Tipo de cambio</label>
             <input type="number" id="pos-exchange" min="0" step="0.0001" placeholder="0.0000">
           </div>
+          <div class="pos-summary-row">
+            <label for="pos-iva">IVA aplicado</label>
+            <select id="pos-iva">
+              ${IVA_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="pos-summary-row">
+            <label for="pos-discount">Descuento <span data-discount-unit>(auto)</span></label>
+            <input type="number" id="pos-discount" min="0" step="0.01" placeholder="0">
+          </div>
+          <div class="pos-summary-row">
+            <label for="pos-condicion">Condición de venta</label>
+            <select id="pos-condicion">
+              <option value="CONTADO">Contado</option>
+              <option value="CREDITO">Crédito</option>
+            </select>
+          </div>
+          <div class="pos-summary-row" id="pos-credit-row" hidden>
+            <label for="pos-fecha-venc">Vencimiento (crédito)</label>
+            <input type="date" id="pos-fecha-venc">
+          </div>
           <div class="pos-summary-totals" id="pos-summary-totals"></div>
         </div>
         <div class="pos-actions">
           <button type="button" class="btn primary" id="pos-confirm">Confirmar venta</button>
           <button type="button" class="btn ghost" id="pos-clear">Limpiar</button>
           <button type="button" class="btn ghost" id="pos-print" hidden>Imprimir factura</button>
+          <button type="button" class="btn ghost" id="pos-ticket" hidden>Imprimir ticket</button>
         </div>
         <div id="pos-feedback" class="feedback"></div>
         <div class="pos-last-sale" id="pos-last-sale" hidden></div>
@@ -127,19 +149,26 @@ function ensureDom(container) {
     productResults: layout?.querySelector('#pos-product-results') || null,
     cartList: layout?.querySelector('#pos-cart-list') || null,
     discountInput: layout?.querySelector('#pos-discount') || null,
+    discountUnit: layout?.querySelector('[data-discount-unit]') || null,
     ivaSelect: layout?.querySelector('#pos-iva') || null,
     currencySelect: layout?.querySelector('#pos-currency') || null,
     exchangeRow: layout?.querySelector('#pos-exchange-row') || null,
     exchangeInput: layout?.querySelector('#pos-exchange') || null,
+    condicionSelect: layout?.querySelector('#pos-condicion') || null,
+    comprobanteSelect: layout?.querySelector('#pos-comprobante') || null,
+    creditRow: layout?.querySelector('#pos-credit-row') || null,
+    fechaVencInput: layout?.querySelector('#pos-fecha-venc') || null,
     feedback: layout?.querySelector('#pos-feedback') || null,
     confirmButton: layout?.querySelector('#pos-confirm') || null,
     clearButton: layout?.querySelector('#pos-clear') || null,
     printButton: layout?.querySelector('#pos-print') || null,
+    ticketButton: layout?.querySelector('#pos-ticket') || null,
     summaryTotals: layout?.querySelector('#pos-summary-totals') || null,
     lastSale: layout?.querySelector('#pos-last-sale') || null
   };
 
   renderCurrencyControls();
+  toggleCreditFields();
   attachEventListeners();
   attachGlobalShortcuts();
 
@@ -151,6 +180,9 @@ function ensureDom(container) {
   }
   if (posDom.printButton && !posDom.printButton.dataset.defaultLabel) {
     posDom.printButton.dataset.defaultLabel = posDom.printButton.textContent || 'Imprimir factura';
+  }
+  if (posDom.ticketButton && !posDom.ticketButton.dataset.defaultLabel) {
+    posDom.ticketButton.dataset.defaultLabel = posDom.ticketButton.textContent || 'Imprimir ticket';
   }
 
   focusProductSearch();
@@ -316,6 +348,22 @@ function attachEventListeners() {
         }
       }
       renderCurrencyControls();
+      if (posDom.discountUnit) {
+        posDom.discountUnit.textContent = posState.moneda === 'USD' ? 'USD' : 'Gs.';
+      }
+      renderSummary();
+    });
+  }
+
+  if (posDom.comprobanteSelect) {
+    posDom.comprobanteSelect.addEventListener('change', (event) => {
+      const selected = String(event.target.value || 'FACTURA').toUpperCase();
+      posState.comprobante = selected === 'TICKET' ? 'TICKET' : 'FACTURA';
+      if (posState.comprobante === 'TICKET') {
+        posState.condicionVenta = 'CONTADO';
+        posState.fechaVencimiento = null;
+      }
+      toggleCreditFields();
       renderSummary();
     });
   }
@@ -328,6 +376,22 @@ function attachEventListeners() {
       } else {
         posState.tipoCambio = null;
       }
+      renderSummary();
+    });
+  }
+
+  if (posDom.condicionSelect) {
+    posDom.condicionSelect.addEventListener('change', (event) => {
+      posState.condicionVenta = event.target.value === 'CREDITO' ? 'CREDITO' : 'CONTADO';
+      toggleCreditFields();
+      renderSummary();
+    });
+  }
+
+  if (posDom.fechaVencInput) {
+    posDom.fechaVencInput.addEventListener('change', (event) => {
+      const value = event.target.value || null;
+      posState.fechaVencimiento = value;
       renderSummary();
     });
   }
@@ -347,6 +411,12 @@ function attachEventListeners() {
   if (posDom.printButton) {
     posDom.printButton.addEventListener('click', async () => {
       await generateInvoice();
+    });
+  }
+
+  if (posDom.ticketButton) {
+    posDom.ticketButton.addEventListener('click', async () => {
+      await generateTicket();
     });
   }
 }
@@ -510,10 +580,15 @@ function clearCart() {
   posState.ivaPorcentaje = 10;
   posState.moneda = 'PYG';
   posState.tipoCambio = null;
+  posState.condicionVenta = 'CONTADO';
+  posState.fechaVencimiento = null;
   posState.lastSale = null;
   if (posDom.discountInput) posDom.discountInput.value = '';
   if (posDom.ivaSelect) posDom.ivaSelect.value = '10';
+  if (posDom.condicionSelect) posDom.condicionSelect.value = 'CONTADO';
+  if (posDom.fechaVencInput) posDom.fechaVencInput.value = '';
   renderCurrencyControls();
+  toggleCreditFields();
   renderCart();
   renderSummary();
   renderLastSale();
@@ -659,14 +734,22 @@ function renderCart() {
 
 function computeTotals() {
   const subtotal = posState.cart.reduce((acc, item) => acc + item.precio * item.cantidad, 0);
-  const descuento = Math.min(Math.max(posState.descuento || 0, 0), subtotal);
-  const base = Math.max(subtotal - descuento, 0);
+  const requiereCambio = posState.moneda === 'USD';
+  const tipoCambioValido = Number(posState.tipoCambio) > 0;
+  const tc = requiereCambio && tipoCambioValido ? Number(posState.tipoCambio) : null;
+
+  const descuentoEntrada = Math.max(posState.descuento || 0, 0);
+  const descuentoGs = tc ? Math.min(descuentoEntrada * tc, subtotal) : Math.min(descuentoEntrada, subtotal);
+  const descuentoMoneda = tc ? descuentoGs / tc : descuentoGs;
+
+  const base = Math.max(subtotal - descuentoGs, 0);
   const divisor = IVA_DIVISOR[posState.ivaPorcentaje] || IVA_DIVISOR[10];
   const ivaCalculado = base > 0 ? base / divisor : 0;
   const total = base;
   return {
     subtotal,
-    descuento,
+    descuento: descuentoGs,
+    descuentoMoneda,
     base,
     ivaCalculado,
     total
@@ -693,18 +776,54 @@ function renderCurrencyControls() {
   }
 }
 
+function toggleCreditFields() {
+  if (!posDom) return;
+  if (posDom.comprobanteSelect) {
+    posDom.comprobanteSelect.value = posState.comprobante;
+  }
+  const forceContado = posState.comprobante === 'TICKET';
+  if (forceContado) {
+    posState.condicionVenta = 'CONTADO';
+    posState.fechaVencimiento = null;
+  }
+  const isCredito = posState.condicionVenta === 'CREDITO';
+  if (posDom.condicionSelect) {
+    posDom.condicionSelect.value = posState.condicionVenta;
+    posDom.condicionSelect.disabled = forceContado;
+  }
+  if (posDom.creditRow) {
+    posDom.creditRow.hidden = !isCredito;
+  }
+  if (!isCredito) {
+    posState.fechaVencimiento = null;
+    if (posDom.fechaVencInput) {
+      posDom.fechaVencInput.value = '';
+    }
+  }
+}
+
 function renderSummary() {
   if (!posDom || !posDom.summaryTotals) return;
   const totals = computeTotals();
   const requiereCambio = posState.moneda === 'USD';
   const tipoCambioValido = requiereCambio && Number(posState.tipoCambio) > 0;
-  const totalUsd = requiereCambio && tipoCambioValido ? totals.total / Number(posState.tipoCambio) : 0;
+  const cambio = tipoCambioValido ? Number(posState.tipoCambio) : null;
+  const toUsd = (monto) => (cambio ? monto / cambio : 0);
+  const subtotalUsd = requiereCambio && cambio ? toUsd(totals.subtotal) : 0;
+  const descuentoUsd = requiereCambio && cambio ? totals.descuentoMoneda : toUsd(totals.descuento);
+  const ivaUsd = requiereCambio && cambio ? toUsd(totals.ivaCalculado) : 0;
+  const totalUsd = requiereCambio && cambio ? toUsd(totals.total) : 0;
+  const isCredito = posState.condicionVenta === 'CREDITO';
+
+  const showUsd = requiereCambio && cambio;
+  const currencyMain = showUsd ? 'USD' : 'PYG';
 
   let summaryHtml = `
-    <div class="row"><span>Subtotal</span><strong>${formatCurrency(totals.subtotal, 'PYG')}</strong></div>
-    <div class="row"><span>Descuento</span><strong>${formatCurrency(totals.descuento, 'PYG')}</strong></div>
-    <div class="row"><span>IVA (${posState.ivaPorcentaje}%)</span><strong>${formatCurrency(totals.ivaCalculado, 'PYG')}</strong></div>
-    <div class="row total"><span>Total</span><strong>${formatCurrency(totals.total, 'PYG')}</strong></div>
+    <div class="row"><span>Subtotal</span><strong>${formatCurrency(showUsd ? subtotalUsd : totals.subtotal, currencyMain)}</strong></div>
+    <div class="row"><span>Descuento</span><strong>${formatCurrency(showUsd ? descuentoUsd : totals.descuento, currencyMain)}</strong></div>
+    <div class="row"><span>IVA (${posState.ivaPorcentaje}%)</span><strong>${formatCurrency(showUsd ? ivaUsd : totals.ivaCalculado, currencyMain)}</strong></div>
+    <div class="row total"><span>Total</span><strong>${formatCurrency(showUsd ? totalUsd : totals.total, currencyMain)}</strong></div>
+    <div class="row"><span>Condición</span><strong>${isCredito ? 'Crédito' : 'Contado'}</strong></div>
   `;
 
   if (requiereCambio) {
@@ -713,14 +832,27 @@ function renderSummary() {
       <div class="row total"><span>Total (USD)</span><strong>${
         tipoCambioValido ? formatCurrency(totalUsd, 'USD') : 'Completar tipo de cambio'
       }</strong></div>
+      <div class="row"><span>Total (Gs.)</span><strong>${formatCurrency(totals.total, 'PYG')}</strong></div>
+    `;
+  }
+
+  if (isCredito) {
+    summaryHtml += `
+      <div class="row"><span>Vencimiento</span><strong>${posState.fechaVencimiento || 'Sin definir'}</strong></div>
     `;
   }
 
   posDom.summaryTotals.innerHTML = summaryHtml;
+  const lastSaleEstado = String(posState.lastSale?.estado || '').toUpperCase();
+  const lastSaleEsTicket = lastSaleEstado === 'TICKET';
   if (posDom.printButton) {
-    posDom.printButton.hidden = !posState.lastSale;
+    posDom.printButton.hidden = !posState.lastSale || lastSaleEsTicket;
+  }
+  if (posDom.ticketButton) {
+    posDom.ticketButton.hidden = !posState.lastSale || !lastSaleEsTicket;
   }
   renderCurrencyControls();
+  toggleCreditFields();
   updateActionStates();
 }
 
@@ -735,6 +867,7 @@ function renderLastSale() {
   const totalGs = Number(venta.total) || 0;
   const monedaVenta = String(venta.moneda || 'PYG').toUpperCase();
   const isUsd = monedaVenta === 'USD';
+  const esTicket = String(venta.estado || '').toUpperCase() === 'TICKET';
   const totalUsd = isUsd
     ? Number(venta.total_moneda) ||
       (Number(venta.tipo_cambio) && Number(venta.tipo_cambio) > 0 ? totalGs / Number(venta.tipo_cambio) : null)
@@ -742,6 +875,7 @@ function renderLastSale() {
   posDom.lastSale.hidden = false;
   posDom.lastSale.innerHTML = `
     <h4>Venta registrada</h4>
+    <p>Tipo: ${esTicket ? 'Ticket' : 'Factura/venta'}</p>
     <p>ID: <code>${escapeHtml(venta.id)}</code></p>
     <p>Cliente: ${escapeHtml(venta.cliente?.nombre_razon_social || 'Cliente eventual')}</p>
     <p>Total Gs.: ${formatCurrency(totalGs, 'PYG')}</p>
@@ -769,6 +903,7 @@ function setFeedback(message, variant) {
 async function confirmSale() {
   if (!posDom) return;
   if (posState.loading) return;
+  const comprobanteEsTicket = posState.comprobante === 'TICKET';
   if (!posState.cart.length) {
     setFeedback('Agrega al menos un producto al carrito.', 'error');
     updateActionStates();
@@ -785,6 +920,25 @@ async function confirmSale() {
   if (totals.descuento > totals.subtotal) {
     setFeedback('El descuento no puede superar al subtotal.', 'error');
     updateActionStates();
+    return;
+  }
+
+  if (comprobanteEsTicket) {
+    posState.condicionVenta = 'CONTADO';
+    posState.fechaVencimiento = null;
+  }
+
+  const isCredito = !comprobanteEsTicket && posState.condicionVenta === 'CREDITO';
+  if (isCredito && !posState.cliente) {
+    setFeedback('Selecciona un cliente para ventas a crédito.', 'error');
+    updateActionStates();
+    focusClientSearch();
+    return;
+  }
+  if (isCredito && !posState.fechaVencimiento) {
+    setFeedback('Ingresa la fecha de vencimiento del crédito.', 'error');
+    updateActionStates();
+    if (posDom?.fechaVencInput) posDom.fechaVencInput.focus();
     return;
   }
 
@@ -805,9 +959,13 @@ async function confirmSale() {
       usuarioId: session.id,
       clienteId: posState.cliente?.id || undefined,
       iva_porcentaje: posState.ivaPorcentaje,
-      descuento_total: totals.descuento,
+      // Enviamos el descuento en la moneda de la venta (USD si la venta es USD); el backend convierte a Gs.
+      descuento_total: Number(posState.descuento) || 0,
       moneda: posState.moneda,
       tipo_cambio: posState.moneda === 'USD' ? posState.tipoCambio : undefined,
+      condicion_venta: posState.condicionVenta,
+      estado: comprobanteEsTicket ? 'TICKET' : undefined,
+      fecha_vencimiento: isCredito ? posState.fechaVencimiento : undefined,
       detalles: posState.cart.map((item) => ({
         productoId: item.productoId,
         cantidad: item.cantidad
@@ -822,8 +980,12 @@ async function confirmSale() {
     posState.lastSale = venta;
     setFeedback('Venta registrada correctamente.', 'success');
     renderLastSale();
+    const esTicket = String(venta?.estado || '').toUpperCase() === 'TICKET';
     if (posDom.printButton) {
-      posDom.printButton.hidden = false;
+      posDom.printButton.hidden = esTicket;
+    }
+    if (posDom.ticketButton) {
+      posDom.ticketButton.hidden = !esTicket;
     }
     posState.cart = [];
     posState.descuento = 0;
@@ -859,7 +1021,7 @@ async function generateInvoice() {
     const facturaDigital = venta?.factura_digital;
     const facturaElectronica = response?.factura || venta?.factura_electronica;
     const pdfUrl = facturaDigital?.id
-      ? `/facturas-digitales/${encodeURIComponent(facturaDigital.id)}/pdf`
+      ? urlWithSession(`/facturas-digitales/${encodeURIComponent(facturaDigital.id)}/pdf`)
       : facturaElectronica?.pdf_path;
     const facturaTipo = facturaDigital ? 'digital' : 'electrónica';
     if (!venta) {
@@ -886,6 +1048,36 @@ async function generateInvoice() {
     if (posDom?.printButton) {
       posDom.printButton.disabled = false;
       posDom.printButton.textContent = defaultLabel;
+    }
+    updateActionStates();
+  }
+}
+
+async function generateTicket() {
+  if (!posState.lastSale) {
+    setFeedback('Registra una venta antes de imprimir el ticket.', 'info');
+    return;
+  }
+  const isTicketSale = String(posState.lastSale?.estado || '').toUpperCase() === 'TICKET';
+  if (!isTicketSale) {
+    setFeedback('Esta venta está marcada para factura. Selecciona Ticket antes de confirmar.', 'warn');
+    return;
+  }
+  const defaultLabel = posDom?.ticketButton?.dataset?.defaultLabel || 'Imprimir ticket';
+  if (posDom?.ticketButton) {
+    posDom.ticketButton.disabled = true;
+    posDom.ticketButton.textContent = 'Generando...';
+  }
+  try {
+    openTicketWindow(posState.lastSale);
+    setFeedback('Ticket listo para imprimir.', 'success');
+  } catch (error) {
+    console.error(error);
+    setFeedback(error.message || 'No se pudo generar el ticket.', 'error');
+  } finally {
+    if (posDom?.ticketButton) {
+      posDom.ticketButton.disabled = false;
+      posDom.ticketButton.textContent = defaultLabel;
     }
     updateActionStates();
   }
@@ -988,6 +1180,115 @@ function openInvoiceWindow(venta, factura) {
   win.document.close();
 }
 
+function openTicketWindow(venta) {
+  const win = window.open('', '', 'width=420,height=900');
+  if (!win) {
+    throw new Error('No se pudo abrir la ventana de impresión. Revisa el bloqueo de pop-ups.');
+  }
+
+  const cliente = venta?.cliente;
+  const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
+  const totals = computeInvoiceTotals(venta);
+  const fechaEmision = venta?.created_at || new Date().toISOString();
+  const monedaVenta = String(venta?.moneda || 'PYG').toUpperCase();
+  const totalMoneda = monedaVenta === 'USD' && Number(venta?.total_moneda)
+    ? Number(venta.total_moneda)
+    : Number(venta?.total) || 0;
+  const empresaNombre = venta?.sucursal?.nombre || 'TRIDENT INNOVA E.A.S';
+  const sucursalCiudad = venta?.sucursal?.ciudad || 'Sucursal';
+  const sucursalDir = venta?.sucursal?.direccion || '';
+  const ticketSerie = venta?.id ? venta.id.slice(0, 8).toUpperCase() : 'TICKET';
+
+  const detalleFilas = detalles
+    .map(
+      (item) => `
+        <tr>
+          <td>
+            <div class="prod">${escapeHtml(item.producto?.nombre || 'Producto')}</div>
+            <div class="meta">Cant: ${formatNumber(item.cantidad)} · ${formatCurrency(Number(item.precio_unitario) || 0, 'PYG')}</div>
+          </td>
+          <td class="right">${formatCurrency(Number(item.subtotal) || 0, 'PYG')}</td>
+        </tr>
+      `
+    )
+    .join('');
+
+  win.document.open();
+  win.document.write(`<!DOCTYPE html>
+  <html lang="es">
+    <head>
+      <meta charset="utf-8">
+      <title>Ticket ${ticketSerie}</title>
+      <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 16px; background: #0f172a; color: #e2e8f0; }
+        .ticket { max-width: 360px; margin: 0 auto; background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.35); }
+        header { text-align: center; margin-bottom: 12px; }
+        header img { height: 56px; object-fit: contain; margin-bottom: 8px; filter: drop-shadow(0 3px 8px rgba(0,0,0,0.35)); }
+        header h1 { margin: 0; font-size: 16px; letter-spacing: 0.04em; }
+        header p { margin: 2px 0; font-size: 12px; color: #94a3b8; }
+        .meta { font-size: 12px; color: #cbd5e1; }
+        .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 12px 0; }
+        .chip { background: #1f2937; border: 1px solid #273449; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { font-size: 12px; padding: 8px 4px; }
+        th { text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: #cbd5e1; }
+        td.right { text-align: right; }
+        tr + tr td { border-top: 1px dashed #1f2937; }
+        .prod { font-weight: 600; }
+        .totals { margin-top: 12px; border-top: 1px dashed #1f2937; padding-top: 12px; }
+        .totals .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; }
+        .totals .row.total { font-size: 15px; font-weight: 700; color: #f97316; }
+        footer { text-align: center; margin-top: 12px; font-size: 11px; color: #94a3b8; }
+        .badge { display: inline-flex; align-items: center; gap: 6px; background: #0ea5e9; color: #0b1021; padding: 5px 10px; border-radius: 999px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; font-size: 11px; }
+        .divider { margin: 12px 0; border-top: 1px dashed #1f2937; }
+      </style>
+    </head>
+    <body>
+      <div class="ticket">
+        <header>
+          <img src="/img/logotridentgrande.png" alt="Logo" onerror="this.style.display='none';" />
+          <h1>${escapeHtml(empresaNombre)}</h1>
+          <p>${escapeHtml(sucursalCiudad)}</p>
+          ${sucursalDir ? `<p>${escapeHtml(sucursalDir)}</p>` : ''}
+          <div class="meta">Ticket ${escapeHtml(ticketSerie)} · ${escapeHtml(formatDate(fechaEmision))}</div>
+        </header>
+        <div class="grid">
+          <div class="chip">Cliente<br><strong>${escapeHtml(cliente?.nombre_razon_social || 'Cliente eventual')}</strong></div>
+          <div class="chip">Condición<br><strong>${escapeHtml(venta?.condicion_venta || 'CONTADO')}</strong></div>
+          <div class="chip">Moneda<br><strong>${escapeHtml(monedaVenta)}</strong></div>
+          <div class="chip">Vendedor<br><strong>${escapeHtml(venta?.usuario?.nombre || '—')}</strong></div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Detalle</th><th class="right">Importe</th></tr>
+          </thead>
+          <tbody>
+            ${detalleFilas || '<tr><td colspan="2">Sin items</td></tr>'}
+          </tbody>
+        </table>
+        <div class="totals">
+          <div class="row"><span>Subtotal</span><span>${formatCurrency(totals.subtotal, 'PYG')}</span></div>
+          <div class="row"><span>Descuento</span><span>${formatCurrency(totals.descuento, 'PYG')}</span></div>
+          <div class="row"><span>IVA ${venta?.iva_porcentaje || 10}%</span><span>${formatCurrency(totals.iva, 'PYG')}</span></div>
+          <div class="row total"><span>Total (${monedaVenta})</span><span>${formatCurrency(totalMoneda, monedaVenta)}</span></div>
+        </div>
+        <div class="divider"></div>
+        <footer>
+          <div class="badge">Venta al contado</div>
+          <div>Gracias por tu compra</div>
+        </footer>
+      </div>
+      <script>
+        window.addEventListener('load', function () {
+          window.focus();
+          window.print();
+        });
+      </script>
+    </body>
+  </html>`);
+  win.document.close();
+}
+
 function computeInvoiceTotals(venta) {
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
   const subtotal = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
@@ -1077,7 +1378,11 @@ function updateActionStates() {
   const hasClearable = hasCart || Boolean(posState.cliente) || (posState.descuento || 0) > 0;
   const requiereTipoCambio = posState.moneda === 'USD';
   const tipoCambioValido = Number(posState.tipoCambio) > 0;
-  const canConfirm = hasCart && (!requiereTipoCambio || tipoCambioValido);
+  const isCredito = posState.condicionVenta === 'CREDITO';
+  const hasCliente = Boolean(posState.cliente);
+  const hasVencimiento = !!posState.fechaVencimiento;
+  const creditoOk = !isCredito || (hasCliente && hasVencimiento);
+  const canConfirm = hasCart && (!requiereTipoCambio || tipoCambioValido) && creditoOk;
 
   if (posDom.confirmButton) {
     if (!posDom.confirmButton.dataset.defaultLabel) {
@@ -1095,6 +1400,9 @@ function updateActionStates() {
 
   if (posDom.printButton) {
     posDom.printButton.disabled = posState.loading || posDom.printButton.hidden;
+  }
+  if (posDom.ticketButton) {
+    posDom.ticketButton.disabled = posState.loading || posDom.ticketButton.hidden;
   }
 }
 
@@ -1124,7 +1432,8 @@ function setPosLoading(isLoading, loadingLabel) {
     posDom.discountInput,
     posDom.ivaSelect,
     posDom.currencySelect,
-    posDom.exchangeInput
+    posDom.exchangeInput,
+    posDom.comprobanteSelect
   ].forEach((control) => {
     if (control) {
       control.disabled = posState.loading;
@@ -1138,6 +1447,9 @@ function setPosLoading(isLoading, loadingLabel) {
 
   if (posDom.printButton) {
     posDom.printButton.disabled = posState.loading || posDom.printButton.hidden;
+  }
+  if (posDom.ticketButton) {
+    posDom.ticketButton.disabled = posState.loading || posDom.ticketButton.hidden;
   }
 
   updateActionStates();

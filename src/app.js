@@ -12,6 +12,10 @@ const authRoutes = require('./routes/auth');
 const cierreCajaRoutes = require('./routes/cierreCaja');
 const salidaCajaRoutes = require('./routes/salidaCaja');
 const facturaDigitalRoutes = require('./routes/facturaDigital');
+const factpyRoutes = require('./routes/factpy');
+const pagoRoutes = require('./routes/pago');
+const reciboRoutes = require('./routes/recibo');
+const sucursalRoutes = require('./routes/sucursal');
 const errorHandler = require('./middleware/errorHandler');
 const { attachUser } = require('./middleware/authContext');
 
@@ -33,6 +37,10 @@ app.use('/auth', authRoutes);
 app.use('/cierres-caja', cierreCajaRoutes);
 app.use('/salidas-caja', salidaCajaRoutes);
 app.use('/facturas-digitales', facturaDigitalRoutes);
+app.use('/pagos', pagoRoutes);
+app.use('/recibos', reciboRoutes);
+app.use('/factpy', factpyRoutes);
+app.use('/sucursales', sucursalRoutes);
 
 // Error handler (último middleware)
 app.use(errorHandler);

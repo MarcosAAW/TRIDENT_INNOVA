@@ -1,10 +1,10 @@
 -- init.sql
--- Esquema SQL inicial para Trident Innova (PostgreSQL)
--- Generado a partir del prisma/schema.prisma proporcionado
+-- Esquema SQL actualizado para Trident Innova (PostgreSQL)
+-- Sincronizado con prisma/schema.prisma (sucursales, crédito y recibos)
 
--- Extensiones necesarias
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Enums
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'TipoProducto') THEN
     CREATE TYPE "TipoProducto" AS ENUM ('DRON', 'REPUESTO', 'SERVICIO', 'OTRO');
@@ -25,11 +25,11 @@ END $$;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'EstadoFactura') THEN
-  CREATE TYPE "EstadoFactura" AS ENUM ('PENDIENTE', 'ENVIADO', 'ACEPTADO', 'PAGADA', 'RECHAZADO');
+    CREATE TYPE "EstadoFactura" AS ENUM ('PENDIENTE', 'ENVIADO', 'ACEPTADO', 'PAGADA', 'RECHAZADO');
   END IF;
 END $$;
 
--- Tabla: categoria
+-- Tablas base
 CREATE TABLE IF NOT EXISTS categoria (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   nombre varchar(255) NOT NULL,
@@ -39,7 +39,68 @@ CREATE TABLE IF NOT EXISTS categoria (
   deleted_at timestamptz
 );
 
--- Tabla: producto
+CREATE TABLE IF NOT EXISTS sucursal (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre varchar(255) NOT NULL,
+  ciudad varchar(255),
+  direccion text,
+  telefono varchar(100),
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  deleted_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS usuario (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre varchar(255) NOT NULL,
+  usuario varchar(150) NOT NULL UNIQUE,
+  password_hash varchar(255) NOT NULL,
+  rol "RolUsuario" NOT NULL DEFAULT 'ADMIN',
+  activo boolean DEFAULT true,
+  last_login timestamptz,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  deleted_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS usuario_sucursal (
+  usuario_id uuid NOT NULL,
+  sucursal_id uuid NOT NULL,
+  rol varchar(100),
+  creado_en timestamptz DEFAULT now(),
+  PRIMARY KEY (usuario_id, sucursal_id),
+  CONSTRAINT fk_usuario_sucursal_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE CASCADE,
+  CONSTRAINT fk_usuario_sucursal_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cliente (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre_razon_social varchar(255) NOT NULL,
+  ruc varchar(100) UNIQUE,
+  direccion text,
+  telefono varchar(50),
+  correo varchar(255),
+  tipo_cliente varchar(50),
+  sucursal_id uuid,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  deleted_at timestamptz
+  , CONSTRAINT fk_cliente_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS proveedor (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre_razon_social varchar(255) NOT NULL,
+  ruc varchar(100) UNIQUE,
+  contacto varchar(255),
+  direccion text,
+  telefono varchar(50),
+  correo varchar(255),
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  deleted_at timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS producto (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   sku varchar(100) NOT NULL UNIQUE,
@@ -61,59 +122,24 @@ CREATE TABLE IF NOT EXISTS producto (
   unidad varchar(50),
   imagen_url text,
   activo boolean DEFAULT true,
+  sucursal_id uuid,
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now(),
   deleted_at timestamptz,
-  CONSTRAINT fk_producto_categoria FOREIGN KEY (categoria_id) REFERENCES categoria(id) ON DELETE SET NULL
+  CONSTRAINT fk_producto_categoria FOREIGN KEY (categoria_id) REFERENCES categoria(id) ON DELETE SET NULL,
+  CONSTRAINT fk_producto_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: cliente
-CREATE TABLE IF NOT EXISTS cliente (
-  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-  nombre_razon_social varchar(255) NOT NULL,
-  ruc varchar(100) UNIQUE,
-  direccion text,
-  telefono varchar(50),
-  correo varchar(255),
-  tipo_cliente varchar(50),
-  created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now(),
-  deleted_at timestamptz
-);
+-- Índices de sucursal para cliente y producto
+CREATE INDEX IF NOT EXISTS idx_cliente_sucursal ON cliente (sucursal_id);
+CREATE INDEX IF NOT EXISTS idx_producto_sucursal ON producto (sucursal_id);
 
--- Tabla: proveedor
-CREATE TABLE IF NOT EXISTS proveedor (
-  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-  nombre_razon_social varchar(255) NOT NULL,
-  ruc varchar(100) UNIQUE,
-  contacto varchar(255),
-  direccion text,
-  telefono varchar(50),
-  correo varchar(255),
-  created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now(),
-  deleted_at timestamptz
-);
-
--- Tabla: usuario
-CREATE TABLE IF NOT EXISTS usuario (
-  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-  nombre varchar(255) NOT NULL,
-  usuario varchar(150) NOT NULL UNIQUE,
-  password_hash varchar(255) NOT NULL,
-  rol "RolUsuario" NOT NULL,
-  activo boolean DEFAULT true,
-  last_login timestamptz,
-  created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now(),
-  deleted_at timestamptz
-);
-
--- Tabla: venta
+-- Ventas y compras
 CREATE TABLE IF NOT EXISTS venta (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   cliente_id uuid,
   usuario_id uuid NOT NULL,
+  sucursal_id uuid,
   fecha timestamptz DEFAULT now(),
   subtotal numeric(12,2) NOT NULL,
   descuento_total numeric(12,2),
@@ -123,16 +149,21 @@ CREATE TABLE IF NOT EXISTS venta (
   iva_porcentaje integer DEFAULT 10,
   estado varchar(50) NOT NULL,
   factura_electronica_id uuid,
+  factura_digital_id uuid,
   moneda varchar(10) DEFAULT 'PYG',
   tipo_cambio numeric(12,4),
+  condicion_venta varchar(20) NOT NULL DEFAULT 'CONTADO',
+  es_credito boolean NOT NULL DEFAULT false,
+  fecha_vencimiento timestamptz,
+  saldo_pendiente numeric(12,2),
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now(),
   deleted_at timestamptz,
   CONSTRAINT fk_venta_cliente FOREIGN KEY (cliente_id) REFERENCES cliente(id) ON DELETE SET NULL,
-  CONSTRAINT fk_venta_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT
+  CONSTRAINT fk_venta_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_venta_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: detalle_venta
 CREATE TABLE IF NOT EXISTS detalle_venta (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   venta_id uuid NOT NULL,
@@ -144,7 +175,6 @@ CREATE TABLE IF NOT EXISTS detalle_venta (
   CONSTRAINT fk_detalleventa_producto FOREIGN KEY (producto_id) REFERENCES producto(id) ON DELETE RESTRICT
 );
 
--- Tabla: compra
 CREATE TABLE IF NOT EXISTS compra (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   proveedor_id uuid,
@@ -158,7 +188,6 @@ CREATE TABLE IF NOT EXISTS compra (
   CONSTRAINT fk_compra_proveedor FOREIGN KEY (proveedor_id) REFERENCES proveedor(id) ON DELETE SET NULL
 );
 
--- Tabla: detalle_compra
 CREATE TABLE IF NOT EXISTS detalle_compra (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   compra_id uuid NOT NULL,
@@ -169,30 +198,31 @@ CREATE TABLE IF NOT EXISTS detalle_compra (
   CONSTRAINT fk_detallecompra_producto FOREIGN KEY (producto_id) REFERENCES producto(id) ON DELETE RESTRICT
 );
 
--- Tabla: factura_electronica
+-- Facturación
 CREATE TABLE IF NOT EXISTS factura_electronica (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-  venta_id uuid,
+  venta_id uuid UNIQUE,
+  sucursal_id uuid,
   nro_factura varchar(100) UNIQUE,
   timbrado varchar(255),
   fecha_emision timestamptz,
   xml_path text,
-  CONSTRAINT fk_cierre_caja_apertura FOREIGN KEY (apertura_id) REFERENCES apertura_caja(id) ON DELETE SET NULL,
-  CONSTRAINT uq_cierre_caja_apertura UNIQUE (apertura_id)
+  pdf_path text,
   qr_data text,
-  estado "EstadoFactura" NOT NULL,
+  estado "EstadoFactura" NOT NULL DEFAULT 'PENDIENTE',
   respuesta_set jsonb,
   intentos integer DEFAULT 0,
   ambiente varchar(50),
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now(),
-  CONSTRAINT fk_factura_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE SET NULL
+  CONSTRAINT fk_factura_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE SET NULL,
+  CONSTRAINT fk_factura_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: factura_digital
 CREATE TABLE IF NOT EXISTS factura_digital (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
-  venta_id text UNIQUE,
+  venta_id uuid UNIQUE,
+  sucursal_id uuid,
   nro_factura varchar(100) NOT NULL UNIQUE,
   timbrado varchar(30) NOT NULL,
   establecimiento varchar(5) NOT NULL,
@@ -221,10 +251,11 @@ CREATE TABLE IF NOT EXISTS factura_digital (
   updated_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz,
   CONSTRAINT fk_factura_digital_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE SET NULL,
+  CONSTRAINT fk_factura_digital_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL,
   CONSTRAINT uq_factura_digital_secuencia UNIQUE (timbrado, establecimiento, punto_expedicion, secuencia)
 );
 
--- Tabla: movimiento_stock
+-- Movimientos y pagos
 CREATE TABLE IF NOT EXISTS movimiento_stock (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   producto_id uuid NOT NULL,
@@ -242,17 +273,20 @@ CREATE TABLE IF NOT EXISTS movimiento_stock (
 CREATE TABLE IF NOT EXISTS pago (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   venta_id uuid NOT NULL,
+  sucursal_id uuid,
   fecha_pago timestamptz DEFAULT now(),
   monto numeric(12,2) NOT NULL,
   metodo varchar(100),
   referencia varchar(255),
-  CONSTRAINT fk_pago_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE CASCADE
+  CONSTRAINT fk_pago_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE CASCADE,
+  CONSTRAINT fk_pago_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: apertura_caja
+-- Caja
 CREATE TABLE IF NOT EXISTS apertura_caja (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   usuario_id uuid NOT NULL,
+  sucursal_id uuid,
   fecha_apertura timestamptz DEFAULT now(),
   fecha_cierre timestamptz,
   saldo_inicial numeric(12,2) NOT NULL DEFAULT 0,
@@ -260,14 +294,15 @@ CREATE TABLE IF NOT EXISTS apertura_caja (
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now(),
   deleted_at timestamptz,
-  CONSTRAINT fk_apertura_caja_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT
+  CONSTRAINT fk_apertura_caja_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_apertura_caja_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: cierre_caja
 CREATE TABLE IF NOT EXISTS cierre_caja (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   usuario_id uuid NOT NULL,
-  apertura_id uuid,
+  apertura_id uuid UNIQUE,
+  sucursal_id uuid,
   saldo_inicial numeric(12,2) NOT NULL DEFAULT 0,
   fecha_apertura timestamptz,
   fecha_cierre timestamptz DEFAULT now(),
@@ -285,14 +320,15 @@ CREATE TABLE IF NOT EXISTS cierre_caja (
   updated_at timestamptz DEFAULT now(),
   deleted_at timestamptz,
   CONSTRAINT fk_cierre_caja_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT,
-  CONSTRAINT fk_cierre_caja_apertura FOREIGN KEY (apertura_id) REFERENCES apertura_caja(id) ON DELETE SET NULL
+  CONSTRAINT fk_cierre_caja_apertura FOREIGN KEY (apertura_id) REFERENCES apertura_caja(id) ON DELETE SET NULL,
+  CONSTRAINT fk_cierre_caja_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: salida_caja
 CREATE TABLE IF NOT EXISTS salida_caja (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   cierre_id uuid,
   usuario_id uuid NOT NULL,
+  sucursal_id uuid,
   descripcion text NOT NULL,
   monto numeric(12,2) NOT NULL,
   fecha timestamptz DEFAULT now(),
@@ -301,10 +337,46 @@ CREATE TABLE IF NOT EXISTS salida_caja (
   updated_at timestamptz DEFAULT now(),
   deleted_at timestamptz,
   CONSTRAINT fk_salida_caja_cierre FOREIGN KEY (cierre_id) REFERENCES cierre_caja(id) ON DELETE SET NULL,
-  CONSTRAINT fk_salida_caja_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT
+  CONSTRAINT fk_salida_caja_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_salida_caja_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
 );
 
--- Tabla: archivo
+-- Recibos y aplicaciones
+CREATE TABLE IF NOT EXISTS recibo (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  numero varchar(100) UNIQUE,
+  cliente_id uuid,
+  usuario_id uuid NOT NULL,
+  sucursal_id uuid,
+  fecha timestamptz DEFAULT now(),
+  total numeric(12,2) NOT NULL,
+  total_moneda numeric(12,2),
+  moneda varchar(10) NOT NULL DEFAULT 'PYG',
+  tipo_cambio numeric(12,4),
+  metodo varchar(100) NOT NULL,
+  referencia varchar(255),
+  estado varchar(50) NOT NULL DEFAULT 'PENDIENTE',
+  observacion text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  CONSTRAINT fk_recibo_cliente FOREIGN KEY (cliente_id) REFERENCES cliente(id) ON DELETE SET NULL,
+  CONSTRAINT fk_recibo_usuario FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_recibo_sucursal FOREIGN KEY (sucursal_id) REFERENCES sucursal(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS recibo_detalle (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recibo_id uuid NOT NULL,
+  venta_id uuid NOT NULL,
+  monto numeric(12,2) NOT NULL,
+  monto_moneda numeric(12,2),
+  saldo_previo numeric(12,2),
+  saldo_posterior numeric(12,2),
+  CONSTRAINT fk_recibo_detalle_recibo FOREIGN KEY (recibo_id) REFERENCES recibo(id) ON DELETE CASCADE,
+  CONSTRAINT fk_recibo_detalle_venta FOREIGN KEY (venta_id) REFERENCES venta(id) ON DELETE CASCADE
+);
+
+-- Otros
 CREATE TABLE IF NOT EXISTS archivo (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   tipo_entidad varchar(100),
@@ -316,7 +388,6 @@ CREATE TABLE IF NOT EXISTS archivo (
   subido_en timestamptz DEFAULT now()
 );
 
--- Tabla: certificado
 CREATE TABLE IF NOT EXISTS certificado (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   huella varchar(255) UNIQUE,
@@ -328,7 +399,6 @@ CREATE TABLE IF NOT EXISTS certificado (
   created_at timestamptz DEFAULT now()
 );
 
--- Tabla: almacen
 CREATE TABLE IF NOT EXISTS almacen (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   nombre varchar(255) NOT NULL,
@@ -336,7 +406,6 @@ CREATE TABLE IF NOT EXISTS almacen (
   created_at timestamptz DEFAULT now()
 );
 
--- Tabla: audit_log
 CREATE TABLE IF NOT EXISTS audit_log (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   usuario_id uuid,
@@ -348,13 +417,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
   creado_en timestamptz DEFAULT now()
 );
 
--- Índices recomendados
+-- Índices
 CREATE INDEX IF NOT EXISTS idx_producto_sku ON producto(sku);
 CREATE INDEX IF NOT EXISTS idx_producto_codigo_barra ON producto(codigo_barra);
 CREATE INDEX IF NOT EXISTS idx_cliente_ruc ON cliente(ruc);
 CREATE INDEX IF NOT EXISTS idx_venta_fecha ON venta(fecha);
+CREATE INDEX IF NOT EXISTS idx_venta_sucursal ON venta(sucursal_id);
+CREATE INDEX IF NOT EXISTS idx_pago_fecha ON pago(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimiento_producto ON movimiento_stock(producto_id);
 CREATE INDEX IF NOT EXISTS idx_cierre_caja_fecha ON cierre_caja(fecha_cierre);
 CREATE INDEX IF NOT EXISTS idx_salida_caja_fecha ON salida_caja(fecha);
+CREATE INDEX IF NOT EXISTS idx_recibo_fecha ON recibo(fecha);
 
 -- Fin del script

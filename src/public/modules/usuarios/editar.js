@@ -13,7 +13,8 @@ export async function updateUsuario(id, data) {
     nombre: data.nombre,
     usuario: data.usuario,
     rol: data.rol,
-    activo: data.activo
+    activo: data.activo,
+    sucursalIds: Array.isArray(data.sucursalIds) ? data.sucursalIds : []
   };
 
   if (data.password) {

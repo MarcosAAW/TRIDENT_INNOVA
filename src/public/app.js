@@ -4,11 +4,12 @@ import { clientesModule } from './modules/clientes/index.js';
 import { ventasModule } from './modules/ventas/index.js';
 import { posModule } from './modules/pos/index.js';
 import { usuariosModule } from './modules/usuarios/index.js';
+import { sucursalesModule } from './modules/sucursales/index.js';
 import { initAuth } from './modules/auth/index.js';
 import { cajaModule } from './modules/caja/index.js';
 
 document.addEventListener('DOMContentLoaded', () => {
-  const baseModules = [productosModule, clientesModule, ventasModule, posModule, usuariosModule, cajaModule];
+  const baseModules = [productosModule, clientesModule, ventasModule, posModule, usuariosModule, sucursalesModule, cajaModule];
   let dashboardReady = false;
 
   initAuth({
@@ -35,6 +36,10 @@ function adaptModuleForRole(module, role) {
   if (!module) return null;
   if (role === 'ADMIN') {
     return module;
+  }
+
+  if (module.key === 'sucursales') {
+    return null;
   }
 
   if (module.key === 'usuarios') {

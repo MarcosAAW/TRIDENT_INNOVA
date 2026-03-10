@@ -5,6 +5,7 @@ const { serialize } = require('../utils/serialize');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
 const { requireAuth } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
 
 const baseClienteSchema = {
   nombre_razon_social: z.string().min(1, 'El nombre o razón social es obligatorio'),
@@ -18,7 +19,7 @@ const baseClienteSchema = {
 const createClienteSchema = z.object(baseClienteSchema);
 const updateClienteSchema = createClienteSchema.partial();
 
-router.use(requireAuth);
+router.use(requireAuth, requireSucursal);
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -73,6 +74,7 @@ router.get('/', async (req, res) => {
 
   const { page = 1, pageSize = 20, ...filters } = parsed.data;
   const where = buildWhere(filters);
+  where.sucursalId = req.sucursalId;
 
   try {
     const [clientes, total] = await Promise.all([
@@ -102,7 +104,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const cliente = await prisma.cliente.findUnique({ where: { id: req.params.id } });
+    const cliente = await prisma.cliente.findFirst({ where: { id: req.params.id, sucursalId: req.sucursalId } });
     if (!cliente || cliente.deleted_at) {
       return res.status(404).json({ error: 'Cliente no encontrado' });
     }
@@ -115,7 +117,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', validate(createClienteSchema), async (req, res) => {
   try {
-    const created = await prisma.cliente.create({ data: req.validatedBody });
+    const created = await prisma.cliente.create({ data: { ...req.validatedBody, sucursalId: req.sucursalId } });
     res.status(201).json(serialize(created));
   } catch (err) {
     handlePrismaError(err, res, 'Error al crear cliente');
@@ -126,6 +128,10 @@ router.put('/:id', validate(updateClienteSchema), async (req, res) => {
   try {
     const data = { ...req.validatedBody };
     delete data.id;
+    const existing = await prisma.cliente.findFirst({ where: { id: req.params.id, sucursalId: req.sucursalId } });
+    if (!existing || existing.deleted_at) {
+      return res.status(404).json({ error: 'Cliente no encontrado en esta sucursal' });
+    }
     const updated = await prisma.cliente.update({ where: { id: req.params.id }, data });
     res.json(serialize(updated));
   } catch (err) {
@@ -135,6 +141,10 @@ router.put('/:id', validate(updateClienteSchema), async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
+    const existing = await prisma.cliente.findFirst({ where: { id: req.params.id, sucursalId: req.sucursalId } });
+    if (!existing || existing.deleted_at) {
+      return res.status(404).json({ error: 'Cliente no encontrado en esta sucursal' });
+    }
     const deleted = await prisma.cliente.update({ where: { id: req.params.id }, data: { deleted_at: new Date() } });
     res.json({ ok: true, cliente: serialize(deleted) });
   } catch (err) {

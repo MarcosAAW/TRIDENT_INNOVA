@@ -19,5 +19,19 @@ module.exports = {
     vigencia_fin: process.env.FACTURA_DIGITAL_VIGENCIA_FIN || '31/12/2030',
     establecimiento: process.env.FACTURA_DIGITAL_ESTABLECIMIENTO || '001',
     punto_expedicion: process.env.FACTURA_DIGITAL_PUNTO || '001'
-  }
+  },
+  timbradosPorSucursal: [
+    {
+      nombre: 'Obligado',
+      sucursalId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      establecimiento: '001',
+      punto_expedicion: '001'
+    },
+    {
+      nombre: 'San Ignacio',
+      sucursalId: 'aeff3b8d-fb26-42fd-a10c-661a48d7850b',
+      establecimiento: '002',
+      punto_expedicion: '001'
+    }
+  ]
 };

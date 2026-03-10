@@ -29,10 +29,28 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
     }
 
+    const memberships = await prisma.usuarioSucursal.findMany({
+      where: { usuarioId: record.id },
+      include: { sucursal: true }
+    });
+
+    const defaultMembership = memberships.find((item) => !item.sucursal?.deleted_at) || memberships[0] || null;
+
     const { password_hash, ...safeUser } = record;
+    const usuarioRespuesta = {
+      ...safeUser,
+      sucursalId: defaultMembership?.sucursalId || null,
+      sucursales:
+        memberships.map((item) => ({
+          sucursalId: item.sucursalId,
+          nombre: item.sucursal?.nombre || null,
+          rol: item.rol || null
+        })) || []
+    };
+
     res.json({
       message: 'Inicio de sesión exitoso',
-      usuario: safeUser
+      usuario: usuarioRespuesta
     });
   } catch (err) {
     console.error(err);

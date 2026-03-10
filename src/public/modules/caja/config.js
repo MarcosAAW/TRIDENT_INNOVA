@@ -1,5 +1,5 @@
 import { formatCurrency, formatDate } from '../common/format.js';
-import { buildQuery, request } from '../common/api.js';
+import { buildQuery, request, urlWithSession } from '../common/api.js';
 import { createCierreCaja, prepareCierrePayload, fetchEstadoCaja, crearAperturaCaja } from './nuevo.js';
 import { crearSalidaCaja } from './salida.js';
 import { fetchCierreDetalle } from './detalle.js';
@@ -345,7 +345,7 @@ export const cajaModule = {
     },
     'descargar-reporte': ({ id }) => {
       if (!id) return;
-      const url = `/cierres-caja/${id}/reporte`;
+      const url = urlWithSession(`/cierres-caja/${id}/reporte`);
       window.open(url, '_blank', 'noopener');
     },
     'registrar-salida-cierre': async ({ id, showMessage, reload }) => {

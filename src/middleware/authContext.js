@@ -7,7 +7,11 @@ function sanitizeUser(user) {
 }
 
 async function attachUser(req, _res, next) {
-  const userId = req.header('x-user-id');
+  const userId =
+    req.header('x-user-id') ||
+    req.query.uid ||
+    req.query.userId ||
+    req.query['x-user-id'];
   if (!userId) {
     return next();
   }

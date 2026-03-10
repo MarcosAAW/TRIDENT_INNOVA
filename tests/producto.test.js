@@ -2,6 +2,7 @@ const request = require('supertest');
 const { app, prisma } = require('../src/app');
 
 let adminUser;
+let sucursal;
 
 const basePayload = {
   sku: 'DRON-TEST',
@@ -26,7 +27,10 @@ function auth(req, user = adminUser) {
   if (!user) {
     throw new Error('No hay usuario autenticado configurado para el test.');
   }
-  return req.set('x-user-id', user.id).set('x-user-role', user.rol);
+  if (!sucursal) {
+    throw new Error('No hay sucursal configurada para el test.');
+  }
+  return req.set('x-user-id', user.id).set('x-user-role', user.rol).set('x-sucursal-id', sucursal.id);
 }
 
 describe('Productos API', () => {
@@ -35,6 +39,9 @@ describe('Productos API', () => {
   });
 
   beforeEach(async () => {
+      // Orden de borrado respeta FK: recibo_detalle -> recibo -> ventas -> resto
+    await prisma.reciboDetalle.deleteMany();
+    await prisma.recibo.deleteMany();
     await prisma.detalleVenta.deleteMany();
     await prisma.movimientoStock.deleteMany();
     await prisma.venta.deleteMany();
@@ -42,13 +49,29 @@ describe('Productos API', () => {
     await prisma.salidaCaja.deleteMany();
     await prisma.cierreCaja.deleteMany();
     await prisma.aperturaCaja.deleteMany();
+    await prisma.usuarioSucursal.deleteMany();
     await prisma.usuario.deleteMany();
+    await prisma.sucursal.deleteMany();
+
+    sucursal = await prisma.sucursal.create({
+      data: {
+        nombre: 'Sucursal Test'
+      }
+    });
 
     adminUser = await prisma.usuario.create({
       data: {
         nombre: 'Admin pruebas',
         usuario: 'admin.pruebas',
         password_hash: 'hash',
+        rol: 'ADMIN'
+      }
+    });
+
+    await prisma.usuarioSucursal.create({
+      data: {
+        usuarioId: adminUser.id,
+        sucursalId: sucursal.id,
         rol: 'ADMIN'
       }
     });

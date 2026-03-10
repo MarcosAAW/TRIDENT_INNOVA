@@ -4,6 +4,73 @@ import { createUsuario } from './nuevo.js';
 import { updateUsuario } from './editar.js';
 import { deleteUsuario } from './eliminar.js';
 
+let sucursalOptions = [];
+let sucursalOptionsPromise = null;
+
+function resetSucursalOptions() {
+  sucursalOptions = [];
+  sucursalOptionsPromise = null;
+}
+
+function mapSucursalOptions(rows) {
+  return rows
+    .filter(Boolean)
+    .map((row) => ({
+      value: row.id,
+      label: row.nombre || row.ciudad || row.id
+    }));
+}
+
+async function ensureSucursalOptions({ force = false } = {}) {
+  if (force) {
+    resetSucursalOptions();
+  }
+  if (sucursalOptions.length) return sucursalOptions;
+  if (!sucursalOptionsPromise) {
+    sucursalOptionsPromise = request('/sucursales')
+      .then((response) => {
+        const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+        return mapSucursalOptions(rows);
+      })
+      .catch((error) => {
+        console.error('[Usuarios] No se pudo cargar sucursales', error);
+        return [];
+      })
+      .finally(() => {
+        sucursalOptionsPromise = null;
+      });
+  }
+  sucursalOptions = await sucursalOptionsPromise;
+  return sucursalOptions;
+}
+
+function applySucursalOptions(control, selectedIds = []) {
+  if (!control) return;
+  const selection = new Set((selectedIds || []).map((id) => String(id)));
+  control.innerHTML = sucursalOptions
+    .map((opt) => `<option value="${opt.value}">${opt.label}</option>`)
+    .join('');
+  Array.from(control.options || []).forEach((opt) => {
+    opt.selected = selection.has(opt.value);
+  });
+}
+
+function hydrateSucursales(control, selectedIds = [], { force = false } = {}) {
+  if (!control) return;
+  ensureSucursalOptions({ force })
+    .then(() => applySucursalOptions(control, selectedIds))
+    .catch((error) => {
+      console.error('[Usuarios] No se pudo preparar sucursales', error);
+    });
+}
+
+function renderSucursalLabels(item) {
+  const labels = (item?.sucursales || [])
+    .map((rel) => rel?.sucursal?.nombre || rel?.sucursalId)
+    .filter(Boolean);
+  return labels.length ? labels.join(', ') : '-';
+}
+
 const ROL_OPTIONS = [
   { value: 'ADMIN', label: 'Admin' },
   { value: 'VENDEDOR', label: 'Vendedor' },
@@ -44,12 +111,23 @@ export const usuariosModule = {
     { name: 'usuario', label: 'Usuario', type: 'text', required: true, placeholder: 'usuario.interno' },
     { name: 'password', label: 'Contraseña', type: 'password', helperText: 'Mínimo 6 caracteres.' },
     { name: 'rol', label: 'Rol', type: 'select', required: true, defaultValue: 'VENDEDOR', options: ROL_OPTIONS },
+    {
+      name: 'sucursalIds',
+      label: 'Sucursales habilitadas',
+      type: 'select',
+      multiple: true,
+      required: true,
+      options: [],
+      size: 5,
+      helperText: 'Seleccioná una o más sucursales para el usuario.'
+    },
     { name: 'activo', label: 'Usuario activo', type: 'checkbox', defaultValue: true }
   ],
   columns: [
     { header: 'Nombre', accessor: (item) => item.nombre || '' },
     { header: 'Usuario', accessor: (item) => item.usuario || '' },
     { header: 'Rol', accessor: (item) => item.rol || '-' },
+    { header: 'Sucursales', render: (item) => renderSucursalLabels(item) },
     {
       header: 'Estado',
       render: (item) => {
@@ -87,10 +165,16 @@ export const usuariosModule = {
     return {
       ...item,
       activo: Boolean(item.activo),
-      password: ''
+      password: '',
+      sucursalIds: Array.isArray(item.sucursales)
+        ? item.sucursales.map((rel) => rel.sucursalId)
+        : []
     };
   },
   hooks: {
+    afterFormRender({ form }) {
+      hydrateSucursales(form?.elements.sucursalIds, [], { force: true });
+    },
     onResetForm({ form }) {
       const passwordControl = form?.elements.password;
       if (passwordControl) {
@@ -98,13 +182,18 @@ export const usuariosModule = {
         passwordControl.value = '';
         passwordControl.placeholder = '';
       }
+
+      hydrateSucursales(form?.elements.sucursalIds, [], { force: true });
     },
-    afterEditStart({ form }) {
+    afterEditStart({ form, item }) {
       const passwordControl = form?.elements.password;
       if (passwordControl) {
         passwordControl.required = false;
         passwordControl.placeholder = 'Deja en blanco para mantener';
       }
+
+      const selectedSucursales = Array.isArray(item?.sucursalIds) ? item.sucursalIds : [];
+      hydrateSucursales(form?.elements.sucursalIds, selectedSucursales, { force: true });
     }
   },
   actions: {

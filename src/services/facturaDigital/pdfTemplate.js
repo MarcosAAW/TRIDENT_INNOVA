@@ -12,6 +12,7 @@ function renderFacturaDigitalPdf(doc, context) {
     breakdown,
     qrBuffer
   } = context;
+  const currency = (factura?.moneda || venta?.moneda || 'PYG').toUpperCase();
   const ventaAnulada = (venta?.estado || '').toUpperCase() === 'ANULADA';
 
   const margin = 32;
@@ -63,8 +64,8 @@ function renderFacturaDigitalPdf(doc, context) {
 
   cursorY = drawOperacionInfo(doc, factura, margin, cursorY, contentWidth);
   cursorY = drawClienteInfo(doc, venta, margin, cursorY + 8, contentWidth);
-  cursorY = drawDetalleTabla(doc, venta, detalles, margin, cursorY + 12, contentWidth) + 10;
-  cursorY = drawTotales(doc, totals, breakdown, factura, venta, margin, cursorY, contentWidth, qrBuffer);
+  cursorY = drawDetalleTabla(doc, venta, detalles, currency, margin, cursorY + 12, contentWidth) + 10;
+  cursorY = drawTotales(doc, totals, breakdown, factura, currency, margin, cursorY, contentWidth, qrBuffer);
   drawFooter(doc, empresa, timbrado, qrBuffer, margin, cursorY + 18, contentWidth);
   if (ventaAnulada) {
     drawAnuladoWatermark(doc);
@@ -72,21 +73,37 @@ function renderFacturaDigitalPdf(doc, context) {
 }
 
 function drawOperacionInfo(doc, factura, x, y, width) {
-  const columnas = [
-    { label: 'FECHA', value: formatFecha(factura.fecha_emision), width: width * 0.3 },
-    { label: 'CONDICIÓN DE VENTA', value: factura.condicion || 'CONTADO', width: width * 0.35 },
-    { label: 'NOTA DE REMISIÓN Nº', value: factura.nota_remision || 'S/D', width: width * 0.35 }
+  const rows = [
+    [
+      { label: 'FECHA / HORA', value: formatFechaHora(factura.fecha_emision), width: width * 0.3 },
+      { label: 'CONDICIÓN DE VENTA', value: factura.condicion || 'CONTADO', width: width * 0.35 },
+      { label: 'TIPO DE TRANSACCIÓN', value: factura.tipo_transaccion || 'Venta de mercadería', width: width * 0.35 }
+    ],
+    [
+      { label: 'MONEDA', value: (factura.moneda || 'PYG').toUpperCase(), width: width * 0.2 },
+      { label: 'TIPO DE CAMBIO', value: formatCambio(factura.tipo_cambio), width: width * 0.25 },
+      { label: 'NOTA DE REMISIÓN Nº', value: factura.nota_remision || 'S/D', width: width * 0.25 },
+      { label: 'CORREO EMISOR', value: factura.correo_emisor || '-', width: width * 0.3 }
+    ]
   ];
 
-  let currentX = x;
-  columnas.forEach((col) => {
-    doc.rect(currentX, y, col.width - 4, 32).stroke('#111827');
-    doc.font('Helvetica-Bold').fontSize(9).text(col.label, currentX + 6, y + 6);
-    doc.font('Helvetica').fontSize(11).text(col.value || '-', currentX + 6, y + 18);
-    currentX += col.width;
+  const rowHeight = 36;
+  let cursorY = y;
+  rows.forEach((cols) => {
+    let currentX = x;
+    cols.forEach((col) => {
+      doc.rect(currentX, cursorY, col.width - 4, rowHeight).stroke('#111827');
+      doc.font('Helvetica-Bold').fontSize(9).text(col.label, currentX + 6, cursorY + 6);
+      doc.font('Helvetica').fontSize(11).text(col.value || '-', currentX + 6, cursorY + 18, {
+        width: col.width - 14,
+        ellipsis: true
+      });
+      currentX += col.width;
+    });
+    cursorY += rowHeight;
   });
 
-  return y + 40;
+  return cursorY + 4;
 }
 
 function drawClienteInfo(doc, venta, x, y, width) {
@@ -108,7 +125,7 @@ function drawClienteInfo(doc, venta, x, y, width) {
   return y;
 }
 
-function drawDetalleTabla(doc, venta, detalles, x, y, width) {
+function drawDetalleTabla(doc, venta, detalles, currency, x, y, width) {
   const headerHeight = 24;
   const columns = [
     { key: 'cantidad', label: 'CANTIDAD', width: 70, align: 'center' },
@@ -130,7 +147,7 @@ function drawDetalleTabla(doc, venta, detalles, x, y, width) {
   doc.rect(x, y, width, headerHeight).stroke('#111827');
 
   let cursor = y + headerHeight;
-  const prepared = prepareDetalleRows(detalles, venta, columns);
+  const prepared = prepareDetalleRows(detalles, venta, columns, currency);
   const minRows = 8;
   const rowsToRender = Math.max(prepared.length, minRows);
 
@@ -152,40 +169,40 @@ function drawDetalleTabla(doc, venta, detalles, x, y, width) {
   return cursor;
 }
 
-function prepareDetalleRows(detalles, venta, columns) {
+function prepareDetalleRows(detalles, venta, columns, currency) {
   const rows = [];
   const safeDetalles = Array.isArray(detalles) ? detalles : [];
+  const tipoCambio = Number(venta?.tipo_cambio) || 0;
+  const factor = currency.toUpperCase() === 'USD' && tipoCambio > 0 ? 1 / tipoCambio : 1;
   safeDetalles.forEach((detalle) => {
     const cantidad = Number(detalle.cantidad) || 0;
-    const precio = Number(detalle.precio_unitario) || 0;
-    const subtotal = Number(detalle.subtotal) || cantidad * precio;
+    const precioBase = Number(detalle.precio_unitario) || 0;
+    const subtotalBase = Number(detalle.subtotal) || cantidad * precioBase;
+    const precio = precioBase * factor;
+    const subtotal = subtotalBase * factor;
     const iva = resolveDetalleIva(detalle, venta);
     const impuesto = splitTax(subtotal, iva);
     rows.push({
       cantidad: formatNumber(cantidad),
       descripcion: detalle.producto?.nombre || detalle.descripcion || 'Producto',
-      precio_unitario: formatCurrency(precio),
-      exentas: formatCurrency(impuesto.exentas),
-      gravado5: formatCurrency(impuesto.gravado5),
-      gravado10: formatCurrency(impuesto.gravado10)
+      precio_unitario: formatCurrency(precio, currency),
+      exentas: formatCurrency(impuesto.exentas, currency),
+      gravado5: formatCurrency(impuesto.gravado5, currency),
+      gravado10: formatCurrency(impuesto.gravado10, currency)
     });
   });
   return rows;
 }
 
-function drawTotales(doc, totals, breakdown, factura, venta, x, y, width, qrBuffer) {
+function drawTotales(doc, totals, breakdown, factura, currency, x, y, width, qrBuffer) {
   const tableWidth = width * 0.6;
   const qrPanelWidth = width - tableWidth - 16;
   const rowHeight = 22;
+  const qrPanelHeight = 190;
   const rows = [
-    { label: 'SUBTOTAL', value: formatCurrency(totals.subtotal) },
-    { label: 'DESCUENTO', value: formatCurrency(totals.descuento) },
-    { label: 'TOTAL', value: formatCurrency(totals.total) },
-    { label: 'TOTAL A PAGAR GS.', value: formatCurrency(totals.total) },
-    {
-      label: 'TOTAL A PAGAR U$S',
-      value: formatCurrency(calcTotalUsd(totals.total, venta?.tipo_cambio, venta?.total_moneda), 'USD')
-    }
+    { label: 'SUBTOTAL', value: formatCurrency(totals.subtotal, currency) },
+    { label: 'DESCUENTO', value: formatCurrency(totals.descuento, currency) },
+    { label: 'TOTAL', value: formatCurrency(totals.total, currency) }
   ];
 
   rows.forEach((row, index) => {
@@ -198,16 +215,12 @@ function drawTotales(doc, totals, breakdown, factura, venta, x, y, width, qrBuff
   });
 
   const ivaBlockY = y + rows.length * rowHeight + 10;
-  const totalIvaGs = breakdown.iva5 + breakdown.iva10;
-  const totalIvaUsd = calcPartialUsd(totalIvaGs, totals.total, venta);
+  const totalIva = breakdown.iva5 + breakdown.iva10;
   const ivaRows = [
-    { label: 'LIQUIDACIÓN DEL IVA (5%)', value: formatCurrency(breakdown.iva5) },
-    { label: 'LIQUIDACIÓN DEL IVA (10%)', value: formatCurrency(breakdown.iva10) },
-    { label: 'TOTAL IVA', value: formatCurrency(totalIvaGs) }
+    { label: 'LIQUIDACIÓN DEL IVA (5%)', value: formatCurrency(breakdown.iva5, currency) },
+    { label: 'LIQUIDACIÓN DEL IVA (10%)', value: formatCurrency(breakdown.iva10, currency) },
+    { label: 'TOTAL IVA', value: formatCurrency(totalIva, currency) }
   ];
-  if (totalIvaUsd > 0) {
-    ivaRows.push({ label: 'TOTAL IVA U$S', value: formatCurrency(totalIvaUsd) });
-  }
   ivaRows.forEach((row, index) => {
     doc.rect(x, ivaBlockY + index * rowHeight, tableWidth, rowHeight).stroke('#111827');
     doc.font('Helvetica-Bold').fontSize(9).text(row.label, x + 8, ivaBlockY + 6 + index * rowHeight);
@@ -225,7 +238,9 @@ function drawTotales(doc, totals, breakdown, factura, venta, x, y, width, qrBuff
     qrBuffer
   });
 
-  return ivaBlockY + ivaRows.length * rowHeight;
+  const tablaBottom = ivaBlockY + ivaRows.length * rowHeight;
+  const qrBottom = y + qrPanelHeight;
+  return Math.max(tablaBottom, qrBottom);
 }
 
 function drawQrPanel(doc, { x, y, width, factura, qrBuffer }) {
@@ -246,7 +261,8 @@ function drawQrPanel(doc, { x, y, width, factura, qrBuffer }) {
   doc.font('Helvetica').fontSize(8).text(`Factura Nº ${factura.numero || '-'}`, x + padding, textY, {
     width: width - padding * 2
   });
-  doc.text(`Control: ${factura.numero_control || '-'}`, x + padding, textY + 14, { width: width - padding * 2 });
+  const controlCode = formatControlCode(factura.cdc || factura.numero_control || '-');
+  doc.text(`Control / CDC: ${controlCode}`, x + padding, textY + 14, { width: width - padding * 2 });
 }
 
 function drawFooter(doc, empresa, timbrado, qrBuffer, x, y, width) {
@@ -319,9 +335,13 @@ function calcPartialUsd(amountPyG, totalPyG, venta) {
   return 0;
 }
 
-function formatCurrency(value) {
+function formatCurrency(value, currency = 'PYG') {
   const amount = Number(value) || 0;
-  return amount.toLocaleString('es-PY', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const isUsd = currency.toUpperCase() === 'USD';
+  return amount.toLocaleString('es-PY', {
+    minimumFractionDigits: isUsd ? 2 : 0,
+    maximumFractionDigits: isUsd ? 2 : 0
+  });
 }
 
 function formatNumber(value) {
@@ -333,6 +353,38 @@ function formatFecha(value) {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleDateString('es-PY');
+}
+
+function formatFechaHora(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString('es-PY');
+}
+
+function formatCambio(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return '-';
+  return num.toLocaleString('es-PY', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+
+function formatControlCode(raw) {
+  if (!raw) return '-';
+  const str = String(raw).trim();
+  if (!str) return '-';
+  if (str.startsWith('{') || str.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(str);
+      if (parsed?.cdc) return parsed.cdc;
+      if (parsed?.control) return parsed.control;
+      if (parsed?.factura) return parsed.factura;
+    } catch (_err) {
+      // ignore JSON parse errors
+    }
+  }
+  if (str.length > 32) {
+    return `${str.slice(0, 14)}...${str.slice(-8)}`;
+  }
+  return str;
 }
 
 module.exports = { renderFacturaDigitalPdf };

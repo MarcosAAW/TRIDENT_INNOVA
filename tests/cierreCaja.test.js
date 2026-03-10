@@ -3,6 +3,28 @@ jest.mock('../src/prismaClient', () => {
   return new FakePrisma();
 });
 
+jest.mock('../src/middleware/authContext', () => ({
+  attachUser: (req, _res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    next();
+  },
+  requireAuth: (req, res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    return next();
+  },
+  authorizeRoles: () => (req, res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    return next();
+  }
+}));
+
+jest.mock('../src/middleware/sucursalContext', () => ({
+  requireSucursal: (req, _res, next) => {
+    req.sucursalId = req.sucursalId || '00000000-0000-0000-0000-000000000001';
+    return next();
+  }
+}));
+
 const request = require('supertest');
 const prisma = require('../src/prismaClient');
 const { app } = require('../src/app');

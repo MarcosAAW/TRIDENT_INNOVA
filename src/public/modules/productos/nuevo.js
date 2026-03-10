@@ -2,9 +2,26 @@ import { request } from '../common/api.js';
 
 const DEFAULT_CURRENCY = 'PYG';
 
-export async function createProducto(payload) {
+export async function createProducto(payload, rawPayload = {}) {
   const body = sanitizeProductoPayload(payload);
-  return request('/productos', { method: 'POST', body });
+  const producto = await request('/productos', { method: 'POST', body });
+  const file = rawPayload?.imagen_archivo;
+  if (file instanceof File && file.size > 0 && producto?.id) {
+    await uploadProductoImagen(producto.id, file);
+  }
+  return producto;
+}
+
+export async function uploadProductoImagen(productoId, file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request(`/productos/${productoId}/imagen`, { method: 'POST', body: formData });
+}
+
+export async function fetchNextSku(tipo) {
+  if (!tipo) return null;
+  const response = await request(`/productos/next-sku?tipo=${encodeURIComponent(tipo)}`);
+  return response?.sku || null;
 }
 
 export function sanitizeProductoPayload(payload) {
@@ -95,6 +112,7 @@ export function sanitizeProductoPayload(payload) {
   if (!body.unidad) delete body.unidad;
   if (!body.codigo_barra) delete body.codigo_barra;
   if (!body.imagen_url) delete body.imagen_url;
+  if (body.imagen_archivo) delete body.imagen_archivo;
   if (!body.categoriaId) delete body.categoriaId;
 
   return body;

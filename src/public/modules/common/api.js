@@ -58,7 +58,44 @@ function attachSessionHeaders(headers = {}) {
     if (session?.rol) {
       headers['x-user-role'] = session.rol;
     }
+    const sucursalId = resolveSucursalId(session);
+    if (sucursalId) {
+      headers['x-sucursal-id'] = sucursalId;
+    }
   } catch (error) {
     console.warn('[API] No se pudo adjuntar la sesión al request.', error);
+  }
+}
+
+function resolveSucursalId(session) {
+  try {
+    const fromSession = session?.sucursalId;
+    const fromQuery = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('sucursalId') : null;
+    if (fromQuery && typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem('sucursalId', fromQuery);
+    }
+    const fromStorage = typeof window !== 'undefined' && window.localStorage ? window.localStorage.getItem('sucursalId') : null;
+    return fromQuery || fromStorage || fromSession || null;
+  } catch (err) {
+    console.warn('[API] No se pudo resolver sucursalId.', err);
+    return null;
+  }
+}
+
+export function urlWithSession(url) {
+  try {
+    const session = loadSession();
+    if (!session?.id) return url;
+    const base = typeof window !== 'undefined' && window.location ? window.location.origin : 'http://localhost';
+    const u = new URL(url, base);
+    u.searchParams.set('uid', session.id);
+    const sucursalId = resolveSucursalId(session);
+    if (sucursalId) {
+      u.searchParams.set('sucursalId', sucursalId);
+    }
+    return u.pathname + u.search + u.hash;
+  } catch (error) {
+    console.warn('[API] No se pudo adjuntar la sesión a la URL.', error);
+    return url;
   }
 }

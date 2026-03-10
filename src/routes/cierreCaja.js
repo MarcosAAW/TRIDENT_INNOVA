@@ -6,8 +6,12 @@ const { z } = require('zod');
 const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
 const validate = require('../middleware/validate');
+const { requireAuth } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
 
 const router = express.Router();
+
+router.use(requireAuth, requireSucursal);
 
 function decimal(minValue = null, message) {
   const base = z.coerce.number({ invalid_type_error: 'Debe ser un número.' }).refine(
@@ -87,10 +91,11 @@ const estadoQuerySchema = z.object({
   fecha_hasta: z.coerce.date().optional()
 });
 
-async function findAperturaActiva(client, usuarioId) {
+async function findAperturaActiva(client, usuarioId, sucursalId) {
   return client.aperturaCaja.findFirst({
     where: {
       usuarioId,
+      sucursalId,
       deleted_at: null,
       fecha_cierre: null
     },
@@ -98,8 +103,8 @@ async function findAperturaActiva(client, usuarioId) {
   });
 }
 
-async function calcularResumen(client, { usuarioId, fechaHasta }) {
-  const apertura = await findAperturaActiva(client, usuarioId);
+async function calcularResumen(client, { usuarioId, fechaHasta, sucursalId }) {
+  const apertura = await findAperturaActiva(client, usuarioId, sucursalId);
   if (!apertura) return null;
 
   const fechaInicio = ensureDate(apertura.fecha_apertura);
@@ -110,6 +115,7 @@ async function calcularResumen(client, { usuarioId, fechaHasta }) {
   const ventas = await client.venta.findMany({
     where: {
       usuarioId,
+      sucursalId,
       deleted_at: null,
       fecha: {
         gte: fechaInicio,
@@ -150,6 +156,7 @@ async function calcularResumen(client, { usuarioId, fechaHasta }) {
   const salidasPendientes = await client.salidaCaja.findMany({
     where: {
       usuarioId,
+      sucursalId,
       deleted_at: null,
       cierreId: null,
       fecha: {
@@ -192,7 +199,7 @@ router.get('/', async (req, res) => {
   }
 
   const filters = parsed.data;
-  const where = {};
+  const where = { sucursalId: req.sucursalId };
 
   if (!filters.include_deleted) {
     where.deleted_at = null;
@@ -258,7 +265,7 @@ router.get('/estado', async (req, res) => {
   }
 
   try {
-    const resumen = await calcularResumen(prisma, parsed.data);
+    const resumen = await calcularResumen(prisma, { ...parsed.data, sucursalId: req.sucursalId });
     if (!resumen) {
       return res.status(404).json({ error: 'No existe una apertura activa para el usuario.' });
     }
@@ -280,7 +287,7 @@ router.post('/aperturas', validate(aperturaSchema), async (req, res) => {
   const fechaApertura = payload.fecha_apertura ? ensureDate(payload.fecha_apertura) : new Date();
 
   try {
-    const existente = await findAperturaActiva(prisma, payload.usuarioId);
+    const existente = await findAperturaActiva(prisma, payload.usuarioId, req.sucursalId);
     if (existente) {
       return res.status(409).json({ error: 'Ya existe una apertura activa para este usuario.' });
     }
@@ -288,6 +295,7 @@ router.post('/aperturas', validate(aperturaSchema), async (req, res) => {
     const apertura = await prisma.aperturaCaja.create({
       data: {
         usuarioId: payload.usuarioId,
+        sucursalId: req.sucursalId,
         fecha_apertura: fechaApertura,
         saldo_inicial: Number(payload.saldo_inicial),
         observaciones: payload.observaciones || null
@@ -309,7 +317,11 @@ router.post('/', validate(createCierreSchema), async (req, res) => {
   const fechaCierre = payload.fecha_cierre ? ensureDate(payload.fecha_cierre) : new Date();
 
   try {
-    const resumen = await calcularResumen(prisma, { usuarioId: payload.usuarioId, fechaHasta: fechaCierre });
+    const resumen = await calcularResumen(prisma, {
+      usuarioId: payload.usuarioId,
+      fechaHasta: fechaCierre,
+      sucursalId: req.sucursalId
+    });
     if (!resumen) {
       return res.status(409).json({ error: 'Para cerrar la caja primero registrá una apertura.' });
     }
@@ -340,6 +352,7 @@ router.post('/', validate(createCierreSchema), async (req, res) => {
       const created = await tx.cierreCaja.create({
         data: {
           usuarioId: payload.usuarioId,
+            sucursalId: req.sucursalId,
           aperturaId: resumen.apertura.id,
           saldo_inicial: resumen.totales.saldoInicial,
           fecha_apertura: resumen.periodo.desde,
@@ -404,6 +417,7 @@ router.post('/salidas', validate(standaloneSalidaSchema), async (req, res) => {
       data: {
         usuarioId: payload.usuarioId,
         cierreId: payload.cierreId || null,
+        sucursalId: req.sucursalId,
         descripcion: payload.descripcion,
         monto: Number(payload.monto),
         fecha: payload.fecha ? ensureDate(payload.fecha) : undefined,
@@ -458,8 +472,8 @@ router.get('/:id', async (req, res) => {
   }
 
   try {
-    const cierre = await prisma.cierreCaja.findUnique({
-      where: { id },
+    const cierre = await prisma.cierreCaja.findFirst({
+      where: { id, sucursalId: req.sucursalId },
       include: {
         usuario: true,
         apertura: true,
@@ -489,7 +503,7 @@ router.post('/:id/salidas', validate(createSalidaSchema), async (req, res) => {
   const payload = req.validatedBody;
 
   try {
-    const cierre = await prisma.cierreCaja.findUnique({ where: { id } });
+    const cierre = await prisma.cierreCaja.findFirst({ where: { id, sucursalId: req.sucursalId } });
     if (!cierre) {
       return res.status(404).json({ error: 'Cierre de caja no encontrado.' });
     }
@@ -498,6 +512,7 @@ router.post('/:id/salidas', validate(createSalidaSchema), async (req, res) => {
       data: {
         cierreId: id,
         usuarioId: payload.usuarioId,
+        sucursalId: req.sucursalId,
         descripcion: payload.descripcion,
         monto: Number(payload.monto),
         fecha: payload.fecha ? ensureDate(payload.fecha) : undefined,
@@ -510,7 +525,7 @@ router.post('/:id/salidas', validate(createSalidaSchema), async (req, res) => {
     });
 
     const totalSalidas = await prisma.salidaCaja.aggregate({
-      where: { cierreId: id, deleted_at: null },
+      where: { cierreId: id, sucursalId: req.sucursalId, deleted_at: null },
       _sum: { monto: true }
     });
 

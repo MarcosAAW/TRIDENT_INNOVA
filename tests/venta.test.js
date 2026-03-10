@@ -3,6 +3,54 @@ jest.mock('../src/prismaClient', () => {
   return new FakePrisma();
 });
 
+jest.mock('../src/services/factpy/client', () => ({
+  emitirFactura: jest.fn(async () => ({
+    status: true,
+    kude: '/storage/facturas/mock.pdf',
+    xmlLink: '/storage/facturas/mock.xml',
+    cdc: 'MOCK-CDC',
+    receiptid: 'MOCK-RECEIPT'
+  })),
+  consultarEstados: jest.fn(async () => [])
+}));
+
+jest.mock('../src/services/sifen/facturaProcessor', () => ({
+  procesarFacturaElectronica: jest.fn(async (venta) => ({
+    factura: {
+      id: venta?.factura_electronica?.id || 'mock-factura-id',
+      nro_factura: venta?.factura_electronica?.nro_factura || '001-001-MOCK',
+      estado: 'PAGADA',
+      intentos: Number(venta?.factura_electronica?.intentos ?? 1),
+      pdf_path: '/storage/facturas/mock.pdf',
+      xml_path: '/storage/facturas/mock.xml',
+      qr_data: 'MOCK-QR'
+    },
+    envio: { ok: true }
+  }))
+}));
+
+jest.mock('../src/middleware/authContext', () => ({
+  attachUser: (req, _res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    next();
+  },
+  requireAuth: (req, res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    return next();
+  },
+  authorizeRoles: () => (req, res, next) => {
+    req.usuarioActual = req.usuarioActual || { id: 'test-user', rol: 'ADMIN' };
+    return next();
+  }
+}));
+
+jest.mock('../src/middleware/sucursalContext', () => ({
+  requireSucursal: (req, _res, next) => {
+    req.sucursalId = req.sucursalId || '00000000-0000-0000-0000-000000000001';
+    return next();
+  }
+}));
+
 const request = require('supertest');
 const prisma = require('../src/prismaClient');
 const { app } = require('../src/app');

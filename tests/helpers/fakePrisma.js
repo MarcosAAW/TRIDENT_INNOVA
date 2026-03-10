@@ -46,6 +46,7 @@ class FakePrisma {
     this.venta = {
       create: async ({ data }) => this._ventaCreate(data),
       findUnique: async (args) => this._ventaFindUnique(args),
+      findFirst: async (args) => this._ventaFindFirst(args),
       findMany: async (args = {}) => this._ventaFindMany(args),
       update: async ({ where, data, include }) => this._ventaUpdate(where, data, include),
       deleteMany: async () => this._ventaDeleteMany()
@@ -446,6 +447,11 @@ class FakePrisma {
       }
       return cloned;
     });
+  }
+
+  _ventaFindFirst(args = {}) {
+    const results = this._ventaFindMany(args);
+    return results && results.length ? results[0] : null;
   }
 
   _ventaUpdate(where = {}, data = {}, include = {}) {

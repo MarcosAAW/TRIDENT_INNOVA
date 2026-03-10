@@ -4,6 +4,8 @@ const fs = require('fs/promises');
 const { z } = require('zod');
 const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
+const { requireAuth } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
 const {
   enviarFacturaDigitalPorCorreo,
   EmailNotConfiguredError,
@@ -20,10 +22,12 @@ const resendSchema = z.object({
     .optional()
 });
 
+router.use(requireAuth, requireSucursal);
+
 router.get('/:id/pdf', async (req, res) => {
   const { id } = req.params;
   try {
-    const factura = await prisma.facturaDigital.findUnique({ where: { id } });
+    const factura = await prisma.facturaDigital.findFirst({ where: { id, sucursalId: req.sucursalId } });
     if (!factura || !factura.pdf_path) {
       return res.status(404).json({ error: 'Factura digital no encontrada.' });
     }
@@ -48,8 +52,8 @@ router.post('/:id/enviar', async (req, res) => {
   }
 
   try {
-    const factura = await prisma.facturaDigital.findUnique({
-      where: { id },
+    const factura = await prisma.facturaDigital.findFirst({
+      where: { id, sucursalId: req.sucursalId },
       include: {
         venta: {
           include: {

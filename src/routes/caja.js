@@ -3,8 +3,12 @@ const { z } = require('zod');
 const prisma = require('../prismaClient');
 const { serialize } = require('../utils/serialize');
 const validate = require('../middleware/validate');
+const { requireAuth } = require('../middleware/authContext');
+const { requireSucursal } = require('../middleware/sucursalContext');
 
 const router = express.Router();
+
+router.use(requireAuth, requireSucursal);
 
 const MAX_DECIMAL_VALUE = 10_000_000_000;
 
@@ -99,7 +103,7 @@ router.get('/cierres', async (req, res) => {
   }
 
   const filters = parsed.data;
-  const where = {};
+  const where = { sucursalId: req.sucursalId };
 
   if (!filters.include_deleted) {
     where.deleted_at = null;
@@ -232,6 +236,7 @@ router.post('/cierres', validate(createCierreSchema), async (req, res) => {
       const created = await tx.cierreCaja.create({
         data: {
           usuarioId: payload.usuarioId,
+          sucursalId: req.sucursalId,
           fecha_apertura: fechaApertura,
           fecha_cierre: fechaCierre,
           total_ventas: totalVentas,
@@ -253,6 +258,7 @@ router.post('/cierres', validate(createCierreSchema), async (req, res) => {
             data: {
               cierreId: created.id,
               usuarioId: payload.usuarioId,
+                  sucursalId: req.sucursalId,
               descripcion: salida.descripcion,
               monto: round(salida.monto, 2),
               fecha: fechaSalida,
@@ -285,7 +291,7 @@ router.get('/salidas', async (req, res) => {
   }
 
   const filters = parsed.data;
-  const where = {};
+  const where = { sucursalId: req.sucursalId };
 
   if (!filters.include_deleted) {
     where.deleted_at = null;
@@ -359,6 +365,7 @@ router.post('/salidas', validate(salidaSchema), async (req, res) => {
       data: {
         usuarioId: payload.usuarioId,
         cierreId: payload.cierreId || null,
+        sucursalId: req.sucursalId,
         descripcion: payload.descripcion,
         monto,
         fecha: fechaSalida,
