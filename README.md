@@ -77,6 +77,8 @@ Servidos desde `src/app.js`:
 - Rutas de productos (`/productos`): listado paginado con filtros (`page`, `pageSize`, `tipo`, `activo`, `search`, `include_deleted`); creación/edición con validación Zod; soft delete vía `DELETE /productos/:id`.
 - Rutas de clientes (`/clientes`): búsqueda con filtros (`tipo_cliente`, `search`, `include_deleted`) y CRUD completo con soft delete (`DELETE /clientes/:id`).
 - Rutas de ventas (`/ventas`): `GET /ventas` con filtros de búsqueda (`search`, `estado`, `iva_porcentaje`, `fecha_desde`, `fecha_hasta`, `mes`, `include_deleted`) y `POST /ventas` con transacción que descuenta stock y registra `MovimientoStock`.
+- Facturación actual: `POST /ventas/:id/facturar` emite la factura electrónica vía FactPy y es el flujo canónico que se muestra en ventas y POS.
+- Compatibilidad legacy: `/facturas-digitales/*` sigue disponible sólo para comprobantes históricos. En producción la ruta no se monta por defecto y sólo se habilita con `FACTURA_DIGITAL_LEGACY_ENABLED=true`.
 
 > _Próximos pasos sugeridos_: CRUD de proveedores, autenticación y endpoints para revertir ventas o manejar notas de crédito.
 
@@ -95,7 +97,16 @@ Los tests (`tests/*.test.js`) son de integración: arrancan la app real y usan l
 npm test
 ```
 
-Si prefieres evitar tocar tu base local, puedes usar los seeds y reset para volver al estado inicial después de correr la suite.
+Por seguridad, Jest ahora se bloquea si `DATABASE_URL` no parece apuntar a una base de pruebas. La forma recomendada es usar una base separada, por ejemplo `trident_db_test`.
+
+Si necesitas forzar la suite sobre otra base de forma explícita, puedes usar:
+
+```powershell
+$env:ALLOW_NON_TEST_DATABASE_FOR_JEST="true"
+npm test
+```
+
+Si aun así prefieres tocar tu base local, puedes usar los seeds y reset para volver al estado inicial después de correr la suite.
 
 ## Recursos adicionales
 

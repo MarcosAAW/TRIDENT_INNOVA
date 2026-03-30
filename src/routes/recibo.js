@@ -9,15 +9,15 @@ const { requireAuth } = require('../middleware/authContext');
 const { requireSucursal } = require('../middleware/sucursalContext');
 
 const router = express.Router();
+const MAX_RECIBO_REINTENTOS = 3;
 
 const ventaAplicacionSchema = z.object({
   ventaId: z.string().uuid({ message: 'ventaId inválido' }),
-  monto: z.coerce.number().positive('El monto debe ser mayor a cero')
+  monto: z.coerce.number().positive('El monto debe ser mayor a cero'),
+  cuotas: z.array(z.coerce.number().int().positive('La cuota debe ser un entero positivo')).optional()
 });
 
-const createReciboSchema = z.object({
-  clienteId: z.string().uuid().optional(),
-  numero: z.string().trim().optional(),
+const pagoReciboSchema = z.object({
   metodo: z.string().trim().min(1, 'El método es requerido'),
   referencia: z.string().trim().optional(),
   observacion: z.string().trim().optional(),
@@ -26,6 +26,24 @@ const createReciboSchema = z.object({
   tipo_cambio: z.coerce.number().positive('El tipo de cambio debe ser mayor a cero').optional(),
   ventas: z.array(ventaAplicacionSchema).min(1, 'Debes indicar al menos una venta')
 });
+
+const createReciboSchema = z
+  .object({
+    clienteId: z.string().uuid().optional(),
+    numero: z.string().trim().optional(),
+    metodo: z.string().trim().optional(),
+    referencia: z.string().trim().optional(),
+    observacion: z.string().trim().optional(),
+    fecha: z.coerce.date().optional(),
+    moneda: z.enum(['PYG', 'USD']).default('PYG').optional(),
+    tipo_cambio: z.coerce.number().positive('El tipo de cambio debe ser mayor a cero').optional(),
+    ventas: z.array(ventaAplicacionSchema).min(1, 'Debes indicar al menos una venta').optional(),
+    pagos: z.array(pagoReciboSchema).min(1, 'Debes agregar al menos un pago').optional()
+  })
+  .refine((value) => Array.isArray(value.pagos) ? value.pagos.length > 0 : Boolean(value.metodo && value.ventas && value.ventas.length), {
+    message: 'Debes indicar al menos un pago',
+    path: ['pagos']
+  });
 
 const listQuerySchema = z.object({
   clienteId: z.string().uuid().optional(),
@@ -138,106 +156,243 @@ router.post('/', async (req, res) => {
   }
 
   const data = parsed.data;
-  const moneda = (data.moneda || 'PYG').toUpperCase();
-  const tipoCambio = Number(data.tipo_cambio);
+  const pagos = Array.isArray(data.pagos) && data.pagos.length
+    ? data.pagos
+    : [
+        {
+          metodo: data.metodo || '',
+          referencia: data.referencia,
+          observacion: data.observacion,
+          fecha: data.fecha,
+          moneda: data.moneda || 'PYG',
+          tipo_cambio: data.tipo_cambio,
+          ventas: Array.isArray(data.ventas) ? data.ventas : []
+        }
+      ];
 
-  if (moneda === 'USD' && (!Number.isFinite(tipoCambio) || tipoCambio <= 0)) {
-    return res.status(400).json({ error: 'Indicá un tipo de cambio válido para cobros en USD.' });
+  for (const pago of pagos) {
+    const monedaPago = (pago.moneda || 'PYG').toUpperCase();
+    const tipoCambioPago = Number(pago.tipo_cambio);
+    if (monedaPago === 'USD' && (!Number.isFinite(tipoCambioPago) || tipoCambioPago <= 0)) {
+      return res.status(400).json({ error: 'Indicá un tipo de cambio válido para cobros en USD.' });
+    }
   }
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      const ventaIds = data.ventas.map((v) => v.ventaId);
-      const ventas = await tx.venta.findMany({
-        where: {
-          id: { in: ventaIds },
-          sucursalId: req.sucursalId,
-          deleted_at: null
-        }
-      });
+    let result = null;
+    let lastError = null;
 
-      if (ventas.length !== ventaIds.length) {
-        throw new Error('VENTA_NO_EN_SUCURSAL');
-      }
+    for (let attempt = 0; attempt < MAX_RECIBO_REINTENTOS && !result; attempt += 1) {
+      try {
+        result = await prisma.$transaction(async (tx) => {
+          const ventaIds = pagos.flatMap((pago) => pago.ventas.map((v) => v.ventaId));
+          const uniqueVentaIds = [...new Set(ventaIds)];
+          const ventas = await tx.venta.findMany({
+            where: {
+              id: { in: uniqueVentaIds },
+              sucursalId: req.sucursalId,
+              deleted_at: null
+            }
+          });
 
-      const pagosCalculados = data.ventas.map((item) => {
-        const montoMoneda = Number(item.monto || 0);
-        const montoGs = moneda === 'USD' ? montoMoneda * tipoCambio : montoMoneda;
-        return { ...item, montoGs, montoMoneda };
-      });
-
-      const total = pagosCalculados.reduce((acc, item) => acc + Number(item.montoGs || 0), 0);
-      const totalMoneda = pagosCalculados.reduce((acc, item) => acc + Number(item.montoMoneda || 0), 0);
-      const clienteId = data.clienteId || ventas[0]?.clienteId || null;
-      const numero = data.numero || (await buildReciboNumero(tx, req.sucursalId));
-
-      const recibo = await tx.recibo.create({
-        data: {
-          numero,
-          clienteId,
-          usuarioId: req.usuarioActual.id,
-          sucursalId: req.sucursalId,
-          fecha: data.fecha || undefined,
-          total,
-          total_moneda: totalMoneda,
-          moneda,
-          tipo_cambio: moneda === 'USD' ? tipoCambio : null,
-          metodo: data.metodo,
-          referencia: data.referencia || null,
-          observacion: data.observacion || null
-        }
-      });
-
-      for (const aplicacion of pagosCalculados) {
-        const venta = ventas.find((v) => v.id === aplicacion.ventaId);
-        const saldoPrevio = Number(venta?.saldo_pendiente ?? venta?.total ?? 0);
-        const nuevoSaldo = Math.max(saldoPrevio - Number(aplicacion.montoGs || 0), 0);
-
-        await tx.reciboDetalle.create({
-          data: {
-            reciboId: recibo.id,
-            ventaId: aplicacion.ventaId,
-            monto: aplicacion.montoGs,
-            monto_moneda: aplicacion.montoMoneda,
-            saldo_previo: saldoPrevio,
-            saldo_posterior: nuevoSaldo
+          if (ventas.length !== uniqueVentaIds.length) {
+            throw new Error('VENTA_NO_EN_SUCURSAL');
           }
-        });
 
-        await tx.venta.update({
-          where: { id: aplicacion.ventaId },
-          data: {
-            saldo_pendiente: nuevoSaldo,
-            es_credito: nuevoSaldo > 0 ? true : venta?.es_credito,
-            estado: nuevoSaldo <= 0 ? 'PAGADA' : venta?.estado
-          }
-        });
-      }
+          const ventaMap = new Map(ventas.map((v) => [v.id, v]));
+          const saldos = new Map(ventas.map((v) => [v.id, Number(v.saldo_pendiente ?? v.total ?? 0)]));
+          const clienteId = data.clienteId || ventas[0]?.clienteId || null;
+          let numeroPersonalizado = data.numero || null;
+          const recibosCreados = [];
 
-      const reciboCompleto = await tx.recibo.findUnique({
-        where: { id: recibo.id },
-        include: {
-          cliente: true,
-          usuario: true,
-          aplicaciones: {
-            include: {
-              venta: {
-                include: {
-                  factura_electronica: true
+          for (const pago of pagos) {
+            const monedaPago = (pago.moneda || 'PYG').toUpperCase();
+            const tipoCambioPago = monedaPago === 'USD' ? Number(pago.tipo_cambio) : null;
+            const aplicacionesCalculadas = pago.ventas.map((item) => {
+              const venta = ventaMap.get(item.ventaId);
+              const saldoPrevio = saldos.get(item.ventaId) ?? Number(venta?.saldo_pendiente ?? venta?.total ?? 0);
+              const ventaMoneda = normalizeCurrency(venta?.moneda || venta?.moneda_venta);
+              const ventaEsUsd = ventaMoneda === 'USD';
+              const montoMoneda = Number(item.monto || 0);
+              const cuotasSeleccionadas = Array.isArray(item.cuotas) ? item.cuotas : [];
+              let montoGs = monedaPago === 'USD' && tipoCambioPago ? montoMoneda * tipoCambioPago : montoMoneda;
+              let saldoPrevioMonedaVenta = null;
+
+              if (ventaEsUsd && monedaPago === 'USD') {
+                saldoPrevioMonedaVenta = getVentaSaldoPendienteMoneda(venta, saldoPrevio);
+                const montoCuotasSeleccionadas = getSelectedCuotasPendingAmount(venta, cuotasSeleccionadas);
+                if (montoCuotasSeleccionadas > 0 && montoMoneda > montoCuotasSeleccionadas + 0.01) {
+                  throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
+                }
+                if (saldoPrevioMonedaVenta > 0 && montoMoneda > saldoPrevioMonedaVenta + 0.01) {
+                  throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
+                }
+                if (saldoPrevioMonedaVenta > 0) {
+                  montoGs = roundAmount((saldoPrevio * montoMoneda) / saldoPrevioMonedaVenta, 2);
                 }
               }
+
+              if (montoGs > saldoPrevio + 0.01) {
+                if (!(ventaEsUsd && monedaPago === 'USD' && saldoPrevioMonedaVenta > 0 && montoMoneda <= saldoPrevioMonedaVenta + 0.01)) {
+                  throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
+                }
+                montoGs = saldoPrevio;
+              }
+              const saldoPosterior = Math.max(saldoPrevio - montoGs, 0);
+              saldos.set(item.ventaId, saldoPosterior);
+              return {
+                ...item,
+                montoGs,
+                montoMoneda,
+                saldoPrevio,
+                saldoPrevioMonedaVenta,
+                saldoPosterior,
+                cuotas: cuotasSeleccionadas
+              };
+            });
+
+            const total = aplicacionesCalculadas.reduce((acc, item) => acc + Number(item.montoGs || 0), 0);
+            const totalMoneda = aplicacionesCalculadas.reduce((acc, item) => acc + Number(item.montoMoneda || 0), 0);
+            const numero = numeroPersonalizado || (await buildReciboNumero(tx, req.sucursalId));
+            numeroPersonalizado = null;
+
+            const recibo = await tx.recibo.create({
+              data: {
+                numero,
+                clienteId,
+                usuarioId: req.usuarioActual.id,
+                sucursalId: req.sucursalId,
+                fecha: pago.fecha || undefined,
+                total,
+                total_moneda: totalMoneda,
+                moneda: monedaPago,
+                tipo_cambio: monedaPago === 'USD' ? tipoCambioPago : null,
+                metodo: pago.metodo,
+                referencia: pago.referencia || null,
+                observacion: pago.observacion || null
+              }
+            });
+
+            for (const aplicacion of aplicacionesCalculadas) {
+              const venta = ventaMap.get(aplicacion.ventaId);
+              await tx.reciboDetalle.create({
+                data: {
+                  reciboId: recibo.id,
+                  ventaId: aplicacion.ventaId,
+                  monto: aplicacion.montoGs,
+                  monto_moneda: aplicacion.montoMoneda,
+                  saldo_previo: aplicacion.saldoPrevio,
+                  saldo_posterior: aplicacion.saldoPosterior
+                }
+              });
+
+              let updatedCreditoConfig = venta.credito_config;
+              if (
+                updatedCreditoConfig &&
+                typeof updatedCreditoConfig === 'object' &&
+                updatedCreditoConfig.tipo === 'CUOTAS' &&
+                Array.isArray(updatedCreditoConfig.cuotas)
+              ) {
+                const cuotas = [...updatedCreditoConfig.cuotas];
+                const now = new Date();
+                if (Array.isArray(aplicacion.cuotas) && aplicacion.cuotas.length > 0) {
+                  const esUsd = normalizeCurrency(venta.moneda || venta.moneda_venta) === 'USD';
+                  let ultimaCuotaPagada = null;
+                  for (const cuota of cuotas) {
+                    if (cuota.pagada) continue;
+                    if (aplicacion.cuotas.includes(cuota.numero)) {
+                      cuota.pagada = true;
+                      cuota.fecha_pago = now;
+                      cuota.monto_pagado = Number(cuota.monto);
+                      ultimaCuotaPagada = cuota;
+                    }
+                  }
+                  const saldoPendiente = Number(aplicacion.saldoPosterior || 0);
+                  if (!esUsd && saldoPendiente > 0 && saldoPendiente < 100 && ultimaCuotaPagada) {
+                    ultimaCuotaPagada.monto_pagado = Number(ultimaCuotaPagada.monto_pagado || 0) + saldoPendiente;
+                    aplicacion.saldoPosterior = 0;
+                  }
+                } else {
+                  const esUsd = normalizeCurrency(venta.moneda || venta.moneda_venta) === 'USD';
+                  let montoRestante = esUsd ? aplicacion.montoMoneda : aplicacion.montoGs;
+                  for (const cuota of cuotas) {
+                    if (cuota.pagada) continue;
+                    const montoCuota = Number(cuota.monto || 0);
+                    if (montoRestante >= montoCuota - 0.01) {
+                      cuota.pagada = true;
+                      cuota.fecha_pago = now;
+                      montoRestante -= montoCuota;
+                    } else if (montoRestante > 0.01) {
+                      cuota.pagada = false;
+                      cuota.monto_pagado = (cuota.monto_pagado || 0) + montoRestante;
+                      montoRestante = 0;
+                    }
+                    if (montoRestante <= 0.01) break;
+                  }
+                }
+                updatedCreditoConfig.cuotas = cuotas;
+              }
+
+              await tx.venta.update({
+                where: { id: aplicacion.ventaId },
+                data: {
+                  saldo_pendiente: aplicacion.saldoPosterior,
+                  es_credito: aplicacion.saldoPosterior > 0 ? true : venta?.es_credito,
+                  estado: aplicacion.saldoPosterior <= 0 ? 'PAGADA' : venta?.estado,
+                  credito_config: updatedCreditoConfig ? updatedCreditoConfig : undefined
+                }
+              });
             }
+
+            const reciboCompleto = await tx.recibo.findUnique({
+              where: { id: recibo.id },
+              include: {
+                cliente: true,
+                usuario: true,
+                aplicaciones: {
+                  include: {
+                    venta: {
+                      include: {
+                        factura_electronica: true
+                      }
+                    }
+                  }
+                }
+              }
+            });
+
+            recibosCreados.push(reciboCompleto);
           }
+
+          return recibosCreados;
+        });
+        lastError = null;
+      } catch (transactionError) {
+        lastError = transactionError;
+        if (isUniqueReciboNumeroError(transactionError) && attempt < MAX_RECIBO_REINTENTOS - 1) {
+          result = null;
+          continue;
         }
-      });
+        throw transactionError;
+      }
+    }
 
-      return reciboCompleto;
-    });
+    if (!result) {
+      throw lastError || new Error('NO_SE_PUDO_CREAR_RECIBO');
+    }
 
-    return res.status(201).json(serialize(result));
+    if (Array.isArray(result) && result.length === 1) {
+      return res.status(201).json(serialize(result[0]));
+    }
+
+    return res.status(201).json({ recibos: serialize(result) });
   } catch (err) {
     if (err?.message === 'VENTA_NO_EN_SUCURSAL') {
       return res.status(404).json({ error: 'Alguna venta no pertenece a esta sucursal o no existe.' });
+    }
+    if (err?.message?.startsWith('MONTO_EXCEDE_SALDO:')) {
+      const ventaId = err.message.split(':')[1];
+      return res.status(400).json({ error: `El monto supera el saldo pendiente de la venta ${ventaId}.` });
     }
     console.error('[Recibos] No se pudo crear el recibo.', err);
     return res.status(500).json({ error: 'No se pudo crear el recibo.' });
@@ -254,6 +409,73 @@ function endOfDay(input) {
   const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
   date.setUTCHours(23, 59, 59, 999);
   return date;
+}
+
+function normalizeCurrency(value) {
+  return String(value || 'PYG').trim().toUpperCase();
+}
+
+function roundAmount(value, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round((Number(value) || 0) * factor) / factor;
+}
+
+function getVentaCreditoCuotas(venta) {
+  if (
+    !venta?.credito_config ||
+    typeof venta.credito_config !== 'object' ||
+    venta.credito_config.tipo !== 'CUOTAS' ||
+    !Array.isArray(venta.credito_config.cuotas)
+  ) {
+    return [];
+  }
+  return venta.credito_config.cuotas;
+}
+
+function getCuotaSaldoPendiente(cuota) {
+  const monto = Number(cuota?.monto || 0);
+  const montoPagado = Number(cuota?.monto_pagado || 0);
+  return Math.max(roundAmount(monto - montoPagado, 4), 0);
+}
+
+function getVentaSaldoPendienteMoneda(venta, saldoPrevioGs) {
+  const cuotas = getVentaCreditoCuotas(venta);
+  if (cuotas.length) {
+    return roundAmount(
+      cuotas.reduce((acc, cuota) => {
+        if (cuota?.pagada) return acc;
+        return acc + getCuotaSaldoPendiente(cuota);
+      }, 0),
+      4
+    );
+  }
+
+  const totalMoneda = Number(venta?.total_moneda || 0);
+  const totalGs = Number(venta?.total || 0);
+  if (totalMoneda > 0 && totalGs > 0 && saldoPrevioGs > 0) {
+    return roundAmount((saldoPrevioGs * totalMoneda) / totalGs, 4);
+  }
+
+  const tipoCambioVenta = Number(venta?.tipo_cambio || 0);
+  if (tipoCambioVenta > 0 && saldoPrevioGs > 0) {
+    return roundAmount(saldoPrevioGs / tipoCambioVenta, 4);
+  }
+
+  return 0;
+}
+
+function getSelectedCuotasPendingAmount(venta, selectedCuotas) {
+  if (!Array.isArray(selectedCuotas) || !selectedCuotas.length) {
+    return 0;
+  }
+  const selectedSet = new Set(selectedCuotas.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0));
+  return roundAmount(
+    getVentaCreditoCuotas(venta).reduce((acc, cuota) => {
+      if (!selectedSet.has(Number(cuota?.numero))) return acc;
+      return acc + getCuotaSaldoPendiente(cuota);
+    }, 0),
+    4
+  );
 }
 
 function formatNumber(value, fractionDigits = 0) {
@@ -273,6 +495,78 @@ function formatCurrency(value, currency = 'PYG') {
 function formatAmount(value, currency = 'PYG') {
   const prefix = (currency || '').toUpperCase() === 'USD' ? 'USD' : 'Gs.';
   return `${prefix} ${formatCurrency(value, currency)}`;
+}
+
+function capitalize(text) {
+  if (!text) return '';
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function numberToWordsEs(num) {
+  const units = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve'];
+  const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+  const hundreds = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+
+  const toWordsBelowThousand = (n) => {
+    if (n === 0) return '';
+    if (n < 10) return units[n];
+    if (n < 20) return teens[n - 10];
+    if (n < 100) {
+      const ten = Math.trunc(n / 10);
+      const unit = n % 10;
+      if (n === 20) return 'veinte';
+      const suffix = unit ? ` y ${units[unit]}` : '';
+      return `${tens[ten]}${suffix}`;
+    }
+    if (n === 100) return 'cien';
+    const hundred = Math.trunc(n / 100);
+    const remainder = n % 100;
+    const rest = remainder ? ` ${toWordsBelowThousand(remainder)}` : '';
+    return `${hundreds[hundred]}${rest}`;
+  };
+
+  const toWords = (n) => {
+    if (n === 0) return 'cero';
+    let result = '';
+    const billions = Math.trunc(n / 1_000_000_000);
+    const millions = Math.trunc((n % 1_000_000_000) / 1_000_000);
+    const thousands = Math.trunc((n % 1_000_000) / 1000);
+    const remainder = n % 1000;
+
+    if (billions) {
+      result += `${toWords(billions)} mil millones`;
+    }
+    if (millions) {
+      result += `${result ? ' ' : ''}${millions === 1 ? 'un millon' : `${toWords(millions)} millones`}`;
+    }
+    if (thousands) {
+      result += `${result ? ' ' : ''}${thousands === 1 ? 'mil' : `${toWordsBelowThousand(thousands)} mil`}`;
+    }
+    if (remainder) {
+      result += `${result ? ' ' : ''}${toWordsBelowThousand(remainder)}`;
+    }
+    return result.trim();
+  };
+
+  return toWords(Math.trunc(Math.abs(num)));
+}
+
+function formatAmountInWords(total, currency = 'PYG') {
+  const safeMonto = Number.isFinite(Number(total)) ? Math.abs(Number(total)) : 0;
+  let entero = Math.trunc(safeMonto);
+  let centavos = Math.round((safeMonto - entero) * 100);
+
+  // Ajuste por redondeo: 0.995 -> 1.00
+  if (centavos === 100) {
+    entero += 1;
+    centavos = 0;
+  }
+
+  const monedaNombre = String(currency || 'PYG').toUpperCase() === 'USD' ? 'dolares' : 'guaranies';
+  const textoNumero = numberToWordsEs(entero);
+  const textoCentavos = centavos === 0 ? 'cero centavos' : `${numberToWordsEs(centavos)} ${centavos === 1 ? 'centavo' : 'centavos'}`;
+  return `${textoNumero} ${monedaNombre} con ${textoCentavos}`;
 }
 
 function formatCambio(value) {
@@ -298,6 +592,7 @@ function renderReciboPdf(doc, recibo) {
   const totalGs = Number(recibo.total || 0);
   const totalMoneda = Number(recibo.total_moneda ?? (moneda === 'USD' ? 0 : recibo.total));
   const totalPrincipal = moneda === 'USD' ? (totalMoneda || (tipoCambio > 0 ? totalGs / tipoCambio : totalGs)) : totalGs;
+  const totalEnLetras = formatAmountInWords(totalPrincipal, moneda);
 
   // Encabezado con logo y datos principales
   const headerHeight = 90;
@@ -393,6 +688,18 @@ function renderReciboPdf(doc, recibo) {
 
   cursorY += blockHeight + 14;
 
+  // Monto en letras ubicado antes del detalle
+  doc
+    .font('Helvetica')
+    .fontSize(9)
+    .fillColor('#475569')
+    .text(`Monto en letras: ${capitalize(totalEnLetras)}`, startX, cursorY, {
+      width: usableWidth,
+      align: 'left'
+    });
+
+  cursorY = doc.y + 10;
+
   // Tabla de aplicaciones / facturas
   doc.font('Helvetica-Bold').fontSize(12).fillColor('#0f172a').text('Detalle de facturas', startX, cursorY);
   cursorY = doc.y + 6;
@@ -414,11 +721,20 @@ function renderReciboPdf(doc, recibo) {
     const pagoLabel = moneda === 'USD'
       ? `${formatAmount(montoMoneda, moneda)} (Gs. ${formatCurrency(montoGs, 'PYG')})`
       : formatAmount(montoGs, 'PYG');
+
+    const ventaMoneda = (venta.moneda || 'PYG').toUpperCase();
+    const ventaTc = Number(venta.tipo_cambio) || Number(recibo.tipo_cambio) || 0;
+    const saldoNuevoUsd = ventaMoneda === 'USD' && ventaTc > 0 ? saldoNuevo / ventaTc : null;
+    const saldoPrevioUsd = ventaMoneda === 'USD' && ventaTc > 0 ? saldoPrevio / ventaTc : null;
+    const saldoLabel = ventaMoneda === 'USD'
+      ? `USD ${formatCurrency(saldoNuevoUsd, 'USD')} (previo: USD ${formatCurrency(saldoPrevioUsd, 'USD')}) · Gs. ${formatCurrency(saldoNuevo, 'PYG')} (previo: Gs. ${formatCurrency(saldoPrevio, 'PYG')})`
+      : `Gs. ${formatCurrency(saldoNuevo, 'PYG')} (previo: Gs. ${formatCurrency(saldoPrevio, 'PYG')})`;
+
     return {
       factura: factura?.nro_factura || '—',
       venta: venta.id || ap.ventaId || '—',
       pago: pagoLabel,
-      saldo: `Gs. ${formatCurrency(saldoNuevo, 'PYG')} (previo: Gs. ${formatCurrency(saldoPrevio, 'PYG')})`
+      saldo: saldoLabel
     };
   }));
 
@@ -428,6 +744,11 @@ function renderReciboPdf(doc, recibo) {
     .fontSize(12)
     .fillColor('#0f172a')
     .text(`Total cobrado: ${formatAmount(totalPrincipal, moneda)}`, startX, cursorY, { width: usableWidth });
+  doc
+    .font('Helvetica')
+    .fontSize(10)
+    .fillColor('#475569')
+    .text(`Monto en letras: ${capitalize(totalEnLetras)}`, startX, doc.y + 2, { width: usableWidth });
   if (moneda === 'USD') {
     doc
       .font('Helvetica')
@@ -474,8 +795,11 @@ function drawTable(doc, startX, startY, columns, rows) {
 
 async function buildReciboNumero(tx, sucursalId) {
   const ultimo = await tx.recibo.findFirst({
-    where: { sucursalId },
-    orderBy: { created_at: 'desc' },
+    where: {
+      sucursalId,
+      numero: { not: null }
+    },
+    orderBy: { numero: 'desc' },
     select: { numero: true }
   });
   const lastSeq = parseReciboSeq(ultimo?.numero);
@@ -489,6 +813,14 @@ function parseReciboSeq(numero) {
   if (!digits) return null;
   const parsed = Number(digits);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isUniqueReciboNumeroError(error) {
+  return (
+    error?.code === 'P2002' &&
+    Array.isArray(error?.meta?.target) &&
+    error.meta.target.some((target) => typeof target === 'string' && target.includes('numero'))
+  );
 }
 
 module.exports = router;

@@ -3,6 +3,7 @@ const fs = require('fs/promises');
 const xmlgen = require('facturacionelectronicapy-xmlgen');
 const { loadEmisorParams } = require('../../config/sifen');
 const { resolveUbicacion } = require('./geoCodes');
+const { getSaleDetailSnapshot } = require('../../utils/productPricing');
 
 const DEFAULT_OUTPUT_DIR = path.join(__dirname, '..', '..', '..', 'storage', 'facturas');
 const DEFAULT_PUNTO = process.env.SIFEN_PUNTO_EXPEDICION || '001';
@@ -115,9 +116,14 @@ function buildItemsPayload(detalles = [], venta) {
 
   return detalles.map((detalle, index) => {
     const producto = detalle.producto || {};
+    const snapshot = getSaleDetailSnapshot(detalle, venta);
     const cantidad = toNumber(detalle.cantidad, 1);
-    const precioUnitario = toNumber(detalle.precio_unitario, 0);
-    const subtotal = toNumber(detalle.subtotal, cantidad * precioUnitario);
+    const precioUnitario = venta?.moneda?.toUpperCase() === 'USD'
+      ? toNumber(snapshot.unitCurrency, 0)
+      : toNumber(snapshot.unitCurrency ?? snapshot.unitGs, 0);
+    const subtotal = venta?.moneda?.toUpperCase() === 'USD'
+      ? toNumber(snapshot.subtotalCurrency, cantidad * precioUnitario)
+      : toNumber(snapshot.subtotalCurrency ?? snapshot.subtotalGs, cantidad * precioUnitario);
     const tasa = Number(producto.iva_porcentaje || venta?.iva_porcentaje || 10);
     const { base, iva } = splitMontoConIva(subtotal, tasa);
 

@@ -1,4 +1,7 @@
+const path = require('path');
+
 const baseNombre = 'TRIDENT INNOVA E.A.S';
+const defaultSignaturePath = path.join(__dirname, '..', 'public', 'img', 'firma-nota-pedido.png');
 
 module.exports = {
   nombre: baseNombre,
@@ -6,6 +9,9 @@ module.exports = {
   direccion: 'Casa Central: Curupayty 8444, Obligado - Itapúa',
   telefono: '+595 983 784444',
   email: 'info@tridentinnova.com',
+  firmante: process.env.NOTA_PEDIDO_FIRMANTE || 'Leo Takayoshi Takeuchi Takeuchi',
+  cargo_firmante: process.env.NOTA_PEDIDO_CARGO || 'Presidente',
+  firma_path: process.env.NOTA_PEDIDO_FIRMA_PATH || defaultSignaturePath,
   actividades: [
     
   ],

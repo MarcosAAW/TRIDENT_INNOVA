@@ -20,13 +20,17 @@ export const sucursalesModule = {
     { name: 'nombre', label: 'Nombre', type: 'text', required: true, placeholder: 'Casa Central' },
     { name: 'ciudad', label: 'Ciudad', type: 'text', placeholder: 'Asunción' },
     { name: 'direccion', label: 'Dirección', type: 'text', placeholder: 'Ruta Mcal. López 123' },
-    { name: 'telefono', label: 'Teléfono', type: 'text', placeholder: '+595 981 000 000' }
+    { name: 'telefono', label: 'Teléfono', type: 'text', placeholder: '+595 981 000 000' },
+    { name: 'establecimiento', label: 'Establecimiento', type: 'text', required: false, placeholder: '001', maxLength: 3 },
+    { name: 'punto_expedicion', label: 'Punto de expedición', type: 'text', required: false, placeholder: '001', maxLength: 3 }
   ],
   columns: [
     { header: 'Nombre', accessor: (item) => item.nombre || '' },
     { header: 'Ciudad', accessor: (item) => item.ciudad || '' },
     { header: 'Dirección', accessor: (item) => item.direccion || '' },
     { header: 'Teléfono', accessor: (item) => item.telefono || '' },
+    { header: 'Establecimiento', accessor: (item) => item.establecimiento || '' },
+    { header: 'Punto Exp.', accessor: (item) => item.punto_expedicion || '' },
     {
       header: 'Estado',
       render: (item) => item.deleted_at ? '<span class="badge error">Eliminada</span>' : '<span class="badge ok">Activa</span>'
@@ -55,7 +59,9 @@ export const sucursalesModule = {
       nombre: item?.nombre || '',
       ciudad: item?.ciudad || '',
       direccion: item?.direccion || '',
-      telefono: item?.telefono || ''
+      telefono: item?.telefono || '',
+      establecimiento: item?.establecimiento || '',
+      punto_expedicion: item?.punto_expedicion || ''
     };
   },
   actions: {

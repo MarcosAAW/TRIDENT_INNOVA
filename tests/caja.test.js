@@ -38,16 +38,20 @@ describe('Cierre de Caja API', () => {
   });
 
   beforeEach(async () => {
-    await prisma.salidaCaja.deleteMany().catch(() => {});
-    await prisma.cierreCaja.deleteMany().catch(() => {});
-    await prisma.aperturaCaja?.deleteMany?.().catch(() => {});
-    await prisma.venta.deleteMany().catch(() => {});
-    await prisma.usuario.deleteMany().catch(() => {});
+    // Limpieza ordenada: primero salidas, cierres, aperturas, ventas, luego usuarios
+    await prisma.salidaCaja?.deleteMany?.();
+    await prisma.cierreCaja?.deleteMany?.();
+    await prisma.aperturaCaja?.deleteMany?.();
+    await prisma.venta?.deleteMany?.();
+    await prisma.usuario?.deleteMany?.();
+
+    // Generar sufijo único
+    const unique = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
 
     usuario = await prisma.usuario.create({
       data: {
         nombre: 'Caja Tester',
-        usuario: 'caja.tester',
+        usuario: `caja.tester_${unique}`,
         password_hash: 'hash',
         rol: 'ADMIN'
       }
@@ -67,6 +71,7 @@ describe('Cierre de Caja API', () => {
   async function crearVenta(total, { estado = 'COMPLETADA', minuto = 60, moneda = 'PYG', totalMoneda, tipo_cambio } = {}) {
     const data = {
       usuarioId: usuario.id,
+      sucursalId: '00000000-0000-0000-0000-000000000001',
       subtotal: total,
       total,
       estado,

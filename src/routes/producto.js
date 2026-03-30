@@ -12,6 +12,15 @@ const validate = require('../middleware/validate');
 const { TipoProducto } = require('@prisma/client');
 const { requireAuth, authorizeRoles } = require('../middleware/authContext');
 const { requireSucursal } = require('../middleware/sucursalContext');
+const {
+  decorateProductoWithSucursalStock,
+  decorateProductosWithSucursalStock,
+  resolveProductoStock,
+  getProductoStockMap,
+  ensureProductoStockRow,
+  applyProductoStockDelta,
+  toStockNumber
+} = require('../utils/productStock');
 
 const REPORT_LOGO_PATH = path.join(__dirname, '..', 'public', 'img', 'logotridentgrande.png');
 const PRODUCT_IMAGES_DIR = path.join(__dirname, '..', '..', 'storage', 'productos');
@@ -92,6 +101,7 @@ const createProductoSchema = z.object({
   tipo_cambio_precio_compra: optionalDecimal('El tipo de cambio debe ser numérico.'),
   precio_compra_original: optionalDecimal('El precio original debe ser numérico.'),
   stock_actual: z.coerce.number().int().optional(),
+  codigo_dji: z.string().optional(),
   codigo_barra: z.string().optional(),
   categoriaId: z.string().uuid().optional(),
   minimo_stock: z.coerce.number().int().optional(),
@@ -133,7 +143,9 @@ function buildWhere(filters) {
     const searchValue = filters.search;
     where.OR = [
       { nombre: { contains: searchValue, mode: 'insensitive' } },
-      { sku: { contains: searchValue, mode: 'insensitive' } }
+      { sku: { contains: searchValue, mode: 'insensitive' } },
+      { codigo_dji: { contains: searchValue, mode: 'insensitive' } },
+      { codigo_barra: { contains: searchValue, mode: 'insensitive' } }
     ];
   }
 
@@ -305,13 +317,13 @@ router.get('/', async (req, res) => {
 
   const { page = 1, pageSize = 20, critico, ...filters } = parseResult.data;
   const where = buildWhere(filters);
-  where.sucursalId = req.sucursalId;
   const offset = (page - 1) * pageSize;
 
   try {
     if (critico) {
       const productos = await prisma.producto.findMany({ where, orderBy: { created_at: 'desc' } });
-      const serializados = serialize(productos).map(decorateProducto);
+      const conStock = await decorateProductosWithSucursalStock(prisma, productos, req.sucursalId);
+      const serializados = serialize(conStock).map(decorateProducto);
       const criticos = serializados.filter((item) => item.stock_bajo);
       const paginated = criticos.slice(offset, offset + pageSize);
       const total = criticos.length;
@@ -331,7 +343,8 @@ router.get('/', async (req, res) => {
       prisma.producto.count({ where })
     ]);
 
-    const data = serialize(productos).map(decorateProducto);
+    const conStock = await decorateProductosWithSucursalStock(prisma, productos, req.sucursalId);
+    const data = serialize(conStock).map(decorateProducto);
 
     res.json({
       data,
@@ -368,11 +381,12 @@ router.get('/reporte/inventario', authorizeRoles('ADMIN', 'VENDEDOR'), async (re
 
   try {
     const productos = await prisma.producto.findMany({
-      where: includeDeleted ? { sucursalId: req.sucursalId } : { sucursalId: req.sucursalId, deleted_at: null },
+      where: includeDeleted ? {} : { deleted_at: null },
       orderBy: { nombre: 'asc' }
     });
 
-    const data = sortForInventoryReport(serialize(productos).map(decorateProducto));
+    const conStock = await decorateProductosWithSucursalStock(prisma, productos, req.sucursalId);
+    const data = sortForInventoryReport(serialize(conStock).map(decorateProducto));
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="reporte-inventario.pdf"');
@@ -392,13 +406,15 @@ router.get('/reporte/inventario.xlsx', authorizeRoles('ADMIN', 'VENDEDOR'), asyn
 
   try {
     const productos = await prisma.producto.findMany({
-      where: includeDeleted ? { sucursalId: req.sucursalId } : { sucursalId: req.sucursalId, deleted_at: null },
+      where: includeDeleted ? {} : { deleted_at: null },
       orderBy: { nombre: 'asc' }
     });
 
-    const data = sortForInventoryReport(serialize(productos).map(decorateProducto));
+    const conStock = await decorateProductosWithSucursalStock(prisma, productos, req.sucursalId);
+    const data = sortForInventoryReport(serialize(conStock).map(decorateProducto));
     const rows = data.map((p) => ({
       SKU: p.sku || '',
+      'Codigo DJI': p.codigo_dji || '',
       Nombre: p.nombre || '',
       Descripcion: p.descripcion || '',
       Tipo: p.tipo || '',
@@ -426,9 +442,10 @@ router.get('/reporte/inventario.xlsx', authorizeRoles('ADMIN', 'VENDEDOR'), asyn
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const producto = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    const producto = await prisma.producto.findUnique({ where: { id } });
     if (!producto || producto.deleted_at) return res.status(404).json({ error: 'Producto no encontrado' });
-    res.json(decorateProducto(serialize(producto)));
+    const conStock = decorateProductoWithSucursalStock(producto, req.sucursalId, await getProductoStockMap(prisma, [producto.id], req.sucursalId));
+    res.json(decorateProducto(serialize(conStock)));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al obtener producto' });
@@ -438,8 +455,22 @@ router.get('/:id', async (req, res) => {
 router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createProductoSchema), async (req, res) => {
   try {
     const data = normalizePrecioFields(req.validatedBody);
-    const created = await prisma.producto.create({ data: { ...data, sucursalId: req.sucursalId } });
-    res.status(201).json(decorateProducto(serialize(created)));
+    const stockInicial = toStockNumber(data.stock_actual);
+    const created = await prisma.$transaction(async (tx) => {
+      const producto = await tx.producto.create({
+        data: { ...data, stock_actual: stockInicial, sucursalId: null }
+      });
+      await tx.productoStock.create({
+        data: {
+          productoId: producto.id,
+          sucursalId: req.sucursalId,
+          stock_actual: stockInicial
+        }
+      });
+      return producto;
+    });
+    const conStock = decorateProductoWithSucursalStock(created, req.sucursalId, await getProductoStockMap(prisma, [created.id], req.sucursalId));
+    res.status(201).json(decorateProducto(serialize(conStock)));
   } catch (err) {
     if (err instanceof ProductoValidationError) {
       return res.status(400).json({ error: err.message });
@@ -454,12 +485,27 @@ router.put('/:id', authorizeRoles('ADMIN', 'VENDEDOR'), validate(updateProductoS
     const data = normalizePrecioFields(req.validatedBody, { partial: true });
     // No permitir actualizar el id
     delete data.id;
-    const existing = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    const stockActualInput = data.stock_actual;
+    delete data.stock_actual;
+    const existing = await prisma.producto.findUnique({ where: { id } });
     if (!existing || existing.deleted_at) {
-      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+      return res.status(404).json({ error: 'Producto no encontrado' });
     }
-    const updated = await prisma.producto.update({ where: { id }, data });
-    res.json(decorateProducto(serialize(updated)));
+    const updated = await prisma.$transaction(async (tx) => {
+      const productoActualizado = await tx.producto.update({ where: { id }, data });
+      if (stockActualInput !== undefined) {
+        const stockRow = await ensureProductoStockRow(tx, existing, req.sucursalId);
+        const stockAnterior = toStockNumber(stockRow.stock_actual);
+        const stockNuevo = toStockNumber(stockActualInput);
+        const delta = stockNuevo - stockAnterior;
+        if (delta !== 0) {
+          await applyProductoStockDelta(tx, existing, req.sucursalId, delta);
+        }
+      }
+      return tx.producto.findUnique({ where: { id } });
+    });
+    const conStock = decorateProductoWithSucursalStock(updated, req.sucursalId, await getProductoStockMap(prisma, [updated.id], req.sucursalId));
+    res.json(decorateProducto(serialize(conStock)));
   } catch (err) {
     if (err instanceof ProductoValidationError) {
       return res.status(400).json({ error: err.message });
@@ -471,9 +517,9 @@ router.put('/:id', authorizeRoles('ADMIN', 'VENDEDOR'), validate(updateProductoS
 router.post('/:id/imagen', authorizeRoles('ADMIN', 'VENDEDOR'), upload.single('file'), async (req, res) => {
   try {
     const { id } = req.params;
-    const producto = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    const producto = await prisma.producto.findUnique({ where: { id } });
     if (!producto || producto.deleted_at) {
-      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+      return res.status(404).json({ error: 'Producto no encontrado' });
     }
 
     if (!req.file) {
@@ -505,9 +551,9 @@ router.post('/:id/imagen', authorizeRoles('ADMIN', 'VENDEDOR'), upload.single('f
 router.delete('/:id', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.producto.findFirst({ where: { id, sucursalId: req.sucursalId } });
+    const existing = await prisma.producto.findUnique({ where: { id } });
     if (!existing || existing.deleted_at) {
-      return res.status(404).json({ error: 'Producto no encontrado en esta sucursal' });
+      return res.status(404).json({ error: 'Producto no encontrado' });
     }
     const deleted = await prisma.producto.update({ where: { id }, data: { deleted_at: new Date() } });
   res.json({ ok: true, producto: decorateProducto(serialize(deleted)) });
@@ -821,13 +867,14 @@ function drawInventoryTable(doc, productos, startX, usableWidth) {
 
 function buildInventoryColumns(usableWidth) {
   const definitions = [
-    { key: 'sku', label: 'SKU', ratio: 0.10, align: 'left' },
-    { key: 'nombre', label: 'Nombre', ratio: 0.18, align: 'left' },
-    { key: 'descripcion', label: 'Descripción', ratio: 0.22, align: 'left' },
-    { key: 'tipo', label: 'Tipo', ratio: 0.08, align: 'left' },
-    { key: 'stockResumen', label: 'Stock (act/min)', ratio: 0.12, align: 'center' },
-    { key: 'precioVenta', label: 'Precio venta', ratio: 0.12, align: 'right' },
-    { key: 'precioCompra', label: 'Precio compra', ratio: 0.10, align: 'right' },
+    { key: 'sku', label: 'SKU', ratio: 0.09, align: 'left' },
+    { key: 'codigo_dji', label: 'Código DJI', ratio: 0.11, align: 'left' },
+    { key: 'nombre', label: 'Nombre', ratio: 0.16, align: 'left' },
+    { key: 'descripcion', label: 'Descripción', ratio: 0.18, align: 'left' },
+    { key: 'tipo', label: 'Tipo', ratio: 0.07, align: 'left' },
+    { key: 'stockResumen', label: 'Stock (act/min)', ratio: 0.11, align: 'center' },
+    { key: 'precioVenta', label: 'Precio venta', ratio: 0.11, align: 'right' },
+    { key: 'precioCompra', label: 'Precio compra', ratio: 0.09, align: 'right' },
     { key: 'estado', label: 'Estado', ratio: 0.08, align: 'center' }
   ];
 
@@ -846,6 +893,7 @@ function buildInventoryRow(producto, index) {
 
   return {
     sku: producto.sku || '—',
+    codigo_dji: producto.codigo_dji || '—',
     nombre: producto.nombre || '—',
     descripcion: producto.descripcion || '—',
     tipo: producto.tipo || '—',

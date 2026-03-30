@@ -8,6 +8,12 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../../prismaClient');
 const empresaConfig = require('../../config/empresa');
 const { renderFacturaDigitalPdf } = require('./pdfTemplate');
+const { getSaleDetailSnapshot } = require('../../utils/productPricing');
+
+function round(value, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.round(Number(value || 0) * factor) / factor;
+}
 
 const FACTURA_DIGITAL_DIR = path.join(__dirname, '..', '..', '..', 'storage', 'facturas_digitales');
 
@@ -34,26 +40,31 @@ async function generarFacturaDigital(venta, options = {}) {
   const breakdown = computeBreakdown(ventaCompleta);
   const condicionVenta = options.condicion || inferCondicionVenta(ventaCompleta);
 
+  // Tomar establecimiento y punto_expedicion de la sucursal si existen, si no del timbrado/config
+  const sucursal = ventaCompleta.sucursal || {};
+  const establecimiento = sucursal.establecimiento?.trim() || timbrado.establecimiento || '001';
+  const punto_expedicion = sucursal.punto_expedicion?.trim() || timbrado.punto_expedicion || '001';
+
   const baseRecord = await prisma.$transaction(async (tx) => {
-    const sucursalId = ventaCompleta.sucursalId || ventaCompleta.sucursal?.id || null;
+    const sucursalId = ventaCompleta.sucursalId || sucursal.id || null;
     const existente = await tx.facturaDigital.findUnique({ where: { ventaId: ventaCompleta.id } });
-    let secuencia = await resolveSecuencia(tx, existente, timbrado, sucursalId);
+    let secuencia = await resolveSecuencia(tx, existente, { ...timbrado, establecimiento, punto_expedicion }, sucursalId);
     const secuenciaDesdeFactura = parseSecuenciaFromNumero(facturaElectronica?.nro_factura);
     if (typeof secuenciaDesdeFactura === 'number') {
       secuencia = secuenciaDesdeFactura;
     }
 
-    const numeroFactura = facturaElectronica?.nro_factura || existente?.nro_factura || buildNumeroFactura(timbrado, secuencia);
+    const numeroFactura = facturaElectronica?.nro_factura || existente?.nro_factura || buildNumeroFactura({ ...timbrado, establecimiento, punto_expedicion }, secuencia);
     const now = new Date();
-    const qrPayload = facturaElectronica?.qr_data || buildQrPayload(numeroFactura, ventaCompleta, totals, timbrado);
+    const qrPayload = facturaElectronica?.qr_data || buildQrPayload(numeroFactura, ventaCompleta, totals, { ...timbrado, establecimiento, punto_expedicion });
     const qrData = typeof qrPayload === 'string' ? qrPayload : JSON.stringify(qrPayload);
     const numeroControl = facturaElectronica?.qr_data || buildControlCode(numeroFactura, timbrado.numero, totals.total, now);
     const data = {
       ventaId: ventaCompleta.id,
       nro_factura: numeroFactura,
       timbrado: timbrado.numero,
-      establecimiento: timbrado.establecimiento || '001',
-      punto_expedicion: timbrado.punto_expedicion || '001',
+      establecimiento,
+      punto_expedicion,
       secuencia,
       condicion_venta: condicionVenta,
       fecha_emision: now,
@@ -102,10 +113,15 @@ async function generarFacturaDigital(venta, options = {}) {
   });
   const fileInfo = await generarPdf(baseRecord, ventaCompleta, totals, breakdown, qrBuffer, timbrado, facturaElectronica);
   const hash = await hashFile(fileInfo.absolutePath);
+  // Si ya existe un pdf_path externo (http/https), no lo sobrescribas
+  let pdfPathToSave = fileInfo.webPath;
+  if (baseRecord.pdf_path && /^https?:\/\//i.test(baseRecord.pdf_path)) {
+    pdfPathToSave = baseRecord.pdf_path;
+  }
   const actualizado = await prisma.facturaDigital.update({
     where: { id: baseRecord.id },
     data: {
-      pdf_path: fileInfo.webPath,
+      pdf_path: pdfPathToSave,
       hash_pdf: hash
     }
   });
@@ -194,19 +210,21 @@ async function generarPdf(registro, venta, totals, breakdown, qrBuffer, timbrado
 function computeTotals(venta) {
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
   const tipoCambio = Number(venta?.tipo_cambio) || 0;
-  const factor = venta?.moneda?.toUpperCase() === 'USD' && tipoCambio > 0 ? 1 / tipoCambio : 1;
+  const isUsd = venta?.moneda?.toUpperCase() === 'USD' && tipoCambio > 0;
 
   const subtotalGs = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
   const descuentoGs = Number(venta?.descuento_total) || 0;
-  const subtotal = subtotalGs * factor;
-  const descuento = descuentoGs * factor;
+  const subtotal = isUsd
+    ? round(detalles.reduce((acc, detalle) => acc + Number(getSaleDetailSnapshot(detalle, venta).subtotalCurrency || 0), 0), 4)
+    : subtotalGs;
+  const descuento = isUsd ? (tipoCambio > 0 ? descuentoGs / tipoCambio : 0) : descuentoGs;
   const total = Math.max(subtotal - descuento, 0);
 
   const ivaPorcentaje = Number(venta?.iva_porcentaje) || 10;
   const divisor = ivaPorcentaje === 5 ? 21 : 11;
   const iva = total > 0 ? total / divisor : 0;
 
-  return { subtotal, descuento, total, iva, factor };
+  return { subtotal, descuento, total, iva, factor: isUsd ? 1 / tipoCambio : 1 };
 }
 
 function computeBreakdown(venta) {
@@ -219,9 +237,10 @@ function computeBreakdown(venta) {
 
   return detalles.reduce(
     (acc, detalle) => {
-      const cantidad = Number(detalle.cantidad) || 0;
-      const precio = Number(detalle.precio_unitario) || 0;
-      const subtotalBrutoItem = Number(detalle.subtotal) || cantidad * precio;
+      const snapshot = getSaleDetailSnapshot(detalle, venta);
+      const subtotalBrutoItem = venta?.moneda?.toUpperCase() === 'USD'
+        ? Number(snapshot.subtotalCurrency || 0)
+        : Number((snapshot.subtotalCurrency ?? snapshot.subtotalGs) || 0);
       const subtotal = Number((subtotalBrutoItem * factorDescuento * factorMoneda).toFixed(2));
       const iva = resolveDetalleIva(detalle, venta);
       if (iva === 5) {

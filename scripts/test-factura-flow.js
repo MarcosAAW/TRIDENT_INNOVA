@@ -41,19 +41,34 @@ async function main() {
   console.log('Conectando a la base de datos...');
   await prisma.$connect();
 
-  const usuario = await pickUsuario();
+  // Login como admin
+  console.log('Iniciando sesión como admin...');
+  const loginRes = await request(app)
+    .post('/auth/login')
+    .send({ usuario: 'admin', password: 'admin123' });
+  if (loginRes.status !== 200) {
+    console.error('Error al hacer login:', loginRes.body);
+    throw new Error(`Login falló con status ${loginRes.status}`);
+  }
+  const admin = loginRes.body.usuario;
+  if (!admin?.id) throw new Error('No se obtuvo el usuario admin tras login.');
+
   const cliente = await pickCliente();
   const producto = await pickProducto();
 
   console.log('Creando venta de prueba...');
   const ventaPayload = {
-    usuarioId: usuario.id,
+    usuarioId: admin.id,
     clienteId: cliente?.id,
     iva_porcentaje: 10,
     detalles: [{ productoId: producto.id, cantidad: 1 }]
   };
 
-  const ventaRes = await request(app).post('/ventas').send(ventaPayload);
+  const ventaRes = await request(app)
+    .post('/ventas')
+    .set('x-user-id', admin.id)
+    .set('x-sucursal-id', admin.sucursalId || 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    .send(ventaPayload);
   if (ventaRes.status !== 201) {
     console.error('Error al crear la venta:', ventaRes.body);
     throw new Error(`Creación de venta falló con status ${ventaRes.status}`);
@@ -63,7 +78,11 @@ async function main() {
   console.log('Venta creada:', ventaId);
 
   console.log('Generando factura digital...');
-  const facturaRes = await request(app).post(`/ventas/${ventaId}/facturar`).send();
+  const facturaRes = await request(app)
+    .post(`/ventas/${ventaId}/facturar`)
+    .set('x-user-id', admin.id)
+    .set('x-sucursal-id', admin.sucursalId || 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    .send();
   if (facturaRes.status !== 200) {
     console.error('Error al facturar:', facturaRes.body);
     throw new Error(`Facturación falló con status ${facturaRes.status}`);
@@ -88,7 +107,10 @@ async function main() {
   }
 
   console.log('Descargando PDF vía API...');
-  const pdfRes = await request(app).get(`/facturas-digitales/${facturaDigital.id}/pdf`);
+  const pdfRes = await request(app)
+    .get(`/facturas-digitales/${facturaDigital.id}/pdf`)
+    .set('x-user-id', admin.id)
+    .set('x-sucursal-id', admin.sucursalId || 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   if (pdfRes.status !== 200) {
     throw new Error(`Descarga de PDF falló con status ${pdfRes.status}`);
   }

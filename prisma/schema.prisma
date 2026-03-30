@@ -36,8 +36,21 @@ enum EstadoFactura {
   RECHAZADO
 }
 
+enum EstadoNotaPedido {
+  BORRADOR
+  EMITIDA
+  RECIBIDA
+  COMPRADA
+  ANULADA
+}
+
+enum TipoNotaPedido {
+  GENERAL
+  REPUESTOS
+}
+
 model Producto {
-  id             String           @id @default(uuid())
+  id             String           @id @default(uuid()) @db.Uuid
   sku            String           @unique
   nombre         String
   descripcion    String?
@@ -51,9 +64,10 @@ model Producto {
   moneda_precio_compra   String?  @default("PYG")
   tipo_cambio_precio_compra Decimal? @db.Decimal(12,4)
   stock_actual   Int              @default(0)
+  codigo_dji     String?
   codigo_barra   String?          @unique
   categoria      Categoria?       @relation(fields: [categoriaId], references: [id])
-  categoriaId    String?          @map("categoria_id")
+  categoriaId    String?          @map("categoria_id") @db.Uuid
   minimo_stock   Int?
   unidad         String?
   imagen_url     String?
@@ -65,14 +79,61 @@ model Producto {
   deleted_at     DateTime?
 
   movimientos    MovimientoStock[]
+  stocks_sucursal ProductoStock[]
   detalles_venta DetalleVenta[]
   detalles_compra DetalleCompra[]
+  detalles_presupuesto DetallePresupuesto[]
+  detalles_nota_pedido DetalleNotaPedido[]
 
   @@map("producto")
 }
 
+model Presupuesto {
+  id               String    @id @default(uuid()) @db.Uuid
+  numero           String
+  cliente          Cliente?  @relation(fields: [clienteId], references: [id])
+  clienteId        String?   @map("cliente_id") @db.Uuid
+  usuario          Usuario   @relation(fields: [usuarioId], references: [id])
+  usuarioId        String    @map("usuario_id") @db.Uuid
+  sucursal         Sucursal? @relation(fields: [sucursalId], references: [id])
+  sucursalId       String?   @map("sucursal_id") @db.Uuid
+  fecha            DateTime  @default(now())
+  validez_hasta    DateTime?
+  moneda           String    @default("PYG")
+  tipo_cambio      Decimal?  @db.Decimal(12,4)
+  subtotal         Decimal   @db.Decimal(12,2)
+  descuento_total  Decimal?  @db.Decimal(12,2)
+  impuesto_total   Decimal?  @db.Decimal(12,2)
+  total            Decimal   @db.Decimal(12,2)
+  total_moneda     Decimal?  @db.Decimal(12,2)
+  estado           String    @default("BORRADOR")
+  notas            String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+  deleted_at       DateTime?
+
+  detalles         DetallePresupuesto[]
+
+  @@unique([numero, sucursalId], name: "presupuesto_numero_sucursal_unique")
+  @@map("presupuesto")
+}
+
+model DetallePresupuesto {
+  id              String       @id @default(uuid()) @db.Uuid
+  presupuesto     Presupuesto  @relation(fields: [presupuestoId], references: [id])
+  presupuestoId   String       @map("presupuesto_id") @db.Uuid
+  producto        Producto?    @relation(fields: [productoId], references: [id])
+  productoId      String?      @map("producto_id") @db.Uuid
+  cantidad        Int
+  precio_unitario Decimal      @db.Decimal(12,2)
+  subtotal        Decimal      @db.Decimal(12,2)
+  iva_porcentaje  Int          @default(10)
+
+  @@map("detalle_presupuesto")
+}
+
 model Categoria {
-  id          String     @id @default(uuid())
+  id          String     @id @default(uuid()) @db.Uuid
   nombre      String
   descripcion String?
   created_at  DateTime   @default(now())
@@ -85,7 +146,7 @@ model Categoria {
 }
 
 model Cliente {
-  id                 String    @id @default(uuid())
+  id                 String    @id @default(uuid()) @db.Uuid
   nombre_razon_social String
   ruc                String?   @unique
   direccion          String?
@@ -100,12 +161,13 @@ model Cliente {
 
   ventas             Venta[]
   recibos            Recibo[]
+  presupuestos       Presupuesto[]
 
   @@map("cliente")
 }
 
 model Proveedor {
-  id                String    @id @default(uuid())
+  id                String    @id @default(uuid()) @db.Uuid
   nombre_razon_social String
   ruc               String?   @unique
   contacto          String?
@@ -117,6 +179,7 @@ model Proveedor {
   deleted_at        DateTime?
 
   compras           Compra[]
+  notas_pedido      NotaPedido[]
 
   @@map("proveedor")
 }
@@ -139,16 +202,20 @@ model Usuario {
   salidas_caja  SalidaCaja[] @relation("UsuarioSalidaCaja")
   sucursales    UsuarioSucursal[]
   recibos       Recibo[]
+  presupuestos  Presupuesto[]
+  notas_pedido  NotaPedido[]
 
   @@map("usuario")
 }
 
 model Sucursal {
-  id         String    @id @default(uuid())
+  id         String    @id @default(uuid()) @db.Uuid
   nombre     String
   ciudad     String?
   direccion  String?
   telefono   String?
+  establecimiento String? // Código de establecimiento para SET/factpy
+  punto_expedicion String? // Código de punto de expedición para SET/factpy
   created_at DateTime  @default(now())
   updated_at DateTime  @updatedAt
   deleted_at DateTime?
@@ -156,22 +223,40 @@ model Sucursal {
   usuarios   UsuarioSucursal[]
   ventas     Venta[]
   facturas_electronicas FacturaElectronica[]
+  notas_credito         NotaCreditoElectronica[]
   facturas_digitales    FacturaDigital[]
   aperturas  AperturaCaja[]
   cierres    CierreCaja[]
   salidas    SalidaCaja[]
   pagos      Pago[]
+  productos_stock ProductoStock[]
   recibos    Recibo[]
   productos  Producto[]
   clientes   Cliente[]
+  presupuestos Presupuesto[]
+  notas_pedido NotaPedido[]
 
   @@map("sucursal")
+}
+
+model ProductoStock {
+  id          String    @id @default(uuid()) @db.Uuid
+  producto    Producto  @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  productoId  String    @map("producto_id") @db.Uuid
+  sucursal    Sucursal  @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
+  sucursalId  String    @map("sucursal_id") @db.Uuid
+  stock_actual Int      @default(0)
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+
+  @@unique([productoId, sucursalId], name: "producto_stock_producto_sucursal_unique")
+  @@map("producto_stock")
 }
 model UsuarioSucursal {
   usuario     Usuario  @relation(fields: [usuarioId], references: [id])
   usuarioId   String   @map("usuario_id") @db.Uuid
   sucursal    Sucursal @relation(fields: [sucursalId], references: [id])
-  sucursalId  String   @map("sucursal_id")
+  sucursalId  String   @map("sucursal_id") @db.Uuid
   rol         String?
   creado_en   DateTime @default(now())
 
@@ -180,13 +265,13 @@ model UsuarioSucursal {
 }
 
 model Venta {
-  id                   String    @id @default(uuid())
+  id                   String    @id @default(uuid()) @db.Uuid
   cliente              Cliente?  @relation(fields: [clienteId], references: [id])
-  clienteId            String?   @map("cliente_id")
+  clienteId            String?   @map("cliente_id") @db.Uuid
   usuario              Usuario   @relation(fields: [usuarioId], references: [id])
   usuarioId            String    @map("usuario_id") @db.Uuid
   sucursal             Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId           String?   @map("sucursal_id")
+  sucursalId           String?   @map("sucursal_id") @db.Uuid
   fecha                DateTime  @default(now())
   subtotal             Decimal   @db.Decimal(12,2)
   descuento_total      Decimal?  @db.Decimal(12,2)
@@ -204,6 +289,7 @@ model Venta {
   es_credito           Boolean   @default(false)
   fecha_vencimiento    DateTime?
   saldo_pendiente      Decimal?  @db.Decimal(12,2)
+  credito_config       Json?
   created_at           DateTime  @default(now())
   updated_at           DateTime  @updatedAt
   deleted_at           DateTime?
@@ -211,27 +297,34 @@ model Venta {
   detalles             DetalleVenta[]
   pagos                Pago[]
   aplicaciones_recibo  ReciboDetalle[]
+  notas_credito        NotaCreditoElectronica[]
 
   @@map("venta")
 }
 
 model DetalleVenta {
-  id             String   @id @default(uuid())
-  venta          Venta    @relation(fields: [ventaId], references: [id])
-  ventaId        String   @map("venta_id")
-  producto       Producto @relation(fields: [productoId], references: [id])
-  productoId     String   @map("producto_id")
-  cantidad       Int
-  precio_unitario Decimal @db.Decimal(12,2)
-  subtotal       Decimal  @db.Decimal(12,2)
+  id                     String    @id @default(uuid()) @db.Uuid
+  venta                  Venta     @relation(fields: [ventaId], references: [id])
+  ventaId                String    @map("venta_id") @db.Uuid
+  producto               Producto  @relation(fields: [productoId], references: [id])
+  productoId             String    @map("producto_id") @db.Uuid
+  cantidad               Int
+  precio_unitario        Decimal   @db.Decimal(12,2)
+  subtotal               Decimal   @db.Decimal(12,2)
+  moneda_precio_unitario String?   @map("moneda_precio_unitario") @db.VarChar(3)
+  precio_unitario_moneda Decimal?  @map("precio_unitario_moneda") @db.Decimal(12,4)
+  subtotal_moneda        Decimal?  @map("subtotal_moneda") @db.Decimal(12,4)
+  tipo_cambio_aplicado   Decimal?  @map("tipo_cambio_aplicado") @db.Decimal(12,4)
 
   @@map("detalle_venta")
 }
 
 model Compra {
-  id           String    @id @default(uuid())
+  id           String    @id @default(uuid()) @db.Uuid
   proveedor    Proveedor? @relation(fields: [proveedorId], references: [id])
-  proveedorId  String?   @map("proveedor_id")
+  proveedorId  String?   @map("proveedor_id") @db.Uuid
+  notaPedido   NotaPedido? @relation(fields: [notaPedidoId], references: [id])
+  notaPedidoId String?   @unique @map("nota_pedido_id") @db.Uuid
   fecha        DateTime  @default(now())
   subtotal     Decimal   @db.Decimal(12,2)
   total        Decimal   @db.Decimal(12,2)
@@ -246,23 +339,68 @@ model Compra {
 }
 
 model DetalleCompra {
-  id             String   @id @default(uuid())
+  id             String   @id @default(uuid()) @db.Uuid
   compra         Compra   @relation(fields: [compraId], references: [id])
-  compraId       String   @map("compra_id")
+  compraId       String   @map("compra_id") @db.Uuid
   producto       Producto @relation(fields: [productoId], references: [id])
-  productoId     String   @map("producto_id")
+  productoId     String   @map("producto_id") @db.Uuid
   cantidad       Int
   precio_unitario Decimal @db.Decimal(12,2)
 
   @@map("detalle_compra")
 }
 
+model NotaPedido {
+  id              String            @id @default(uuid()) @db.Uuid
+  numero          String
+  proveedor       Proveedor         @relation(fields: [proveedorId], references: [id])
+  proveedorId     String            @map("proveedor_id") @db.Uuid
+  usuario         Usuario           @relation(fields: [usuarioId], references: [id])
+  usuarioId       String            @map("usuario_id") @db.Uuid
+  sucursal        Sucursal?         @relation(fields: [sucursalId], references: [id])
+  sucursalId      String?           @map("sucursal_id") @db.Uuid
+  fecha           DateTime          @default(now())
+  estado          EstadoNotaPedido  @default(BORRADOR)
+  tipo            TipoNotaPedido    @default(GENERAL)
+  equipo_destino  String?
+  observaciones   String?
+  pdf_path        String?
+  created_at      DateTime          @default(now())
+  updated_at      DateTime          @updatedAt
+  deleted_at      DateTime?
+
+  detalles        DetalleNotaPedido[]
+  compra          Compra?
+
+  @@unique([numero, sucursalId], name: "nota_pedido_numero_sucursal_unique")
+  @@map("nota_pedido")
+}
+
+model DetalleNotaPedido {
+  id               String      @id @default(uuid()) @db.Uuid
+  notaPedido       NotaPedido  @relation(fields: [notaPedidoId], references: [id])
+  notaPedidoId     String      @map("nota_pedido_id") @db.Uuid
+  producto         Producto?   @relation(fields: [productoId], references: [id])
+  productoId       String?     @map("producto_id") @db.Uuid
+  codigo_articulo  String
+  codigo_dji       String?
+  sku              String?
+  descripcion      String
+  cantidad         Int
+  equipo_destino   String?
+  observacion      String?
+  created_at       DateTime    @default(now())
+  updated_at       DateTime    @updatedAt
+
+  @@map("detalle_nota_pedido")
+}
+
 model FacturaElectronica {
-  id             String       @id @default(uuid())
+  id             String       @id @default(uuid()) @db.Uuid
   venta          Venta?       @relation(fields: [ventaId], references: [id])
-  ventaId        String?      @map("venta_id") @unique
+  ventaId        String?      @map("venta_id") @unique @db.Uuid
   sucursal       Sucursal?    @relation(fields: [sucursalId], references: [id])
-  sucursalId     String?      @map("sucursal_id")
+  sucursalId     String?      @map("sucursal_id") @db.Uuid
   nro_factura    String?      @unique
   timbrado       String?
   fecha_emision  DateTime?
@@ -275,16 +413,72 @@ model FacturaElectronica {
   ambiente       String?
   created_at     DateTime      @default(now())
   updated_at     DateTime      @updatedAt
+  notas_credito  NotaCreditoElectronica[]
 
   @@map("factura_electronica")
 }
 
+model NotaCreditoElectronica {
+  id                    String              @id @default(uuid()) @db.Uuid
+  venta                 Venta               @relation(fields: [ventaId], references: [id])
+  ventaId               String              @map("venta_id") @db.Uuid
+  factura_electronica   FacturaElectronica  @relation(fields: [facturaElectronicaId], references: [id])
+  facturaElectronicaId  String              @map("factura_electronica_id") @db.Uuid
+  sucursal              Sucursal?           @relation(fields: [sucursalId], references: [id])
+  sucursalId            String?             @map("sucursal_id") @db.Uuid
+  nro_nota              String              @unique
+  timbrado              String
+  establecimiento       String
+  punto_expedicion      String
+  secuencia             Int
+  motivo                String
+  tipo_ajuste           String              @default("TOTAL")
+  fecha_emision         DateTime            @default(now())
+  moneda                String              @default("PYG")
+  tipo_cambio           Decimal?            @db.Decimal(12,4)
+  total                 Decimal             @db.Decimal(12,2)
+  total_moneda          Decimal?            @db.Decimal(12,2)
+  cdc                   String?
+  xml_path              String?
+  pdf_path              String?
+  qr_data               String?
+  estado                EstadoFactura       @default(PENDIENTE)
+  respuesta_set         Json?
+  intentos              Int                 @default(0)
+  ambiente              String?
+  created_at            DateTime            @default(now())
+  updated_at            DateTime            @updatedAt
+  deleted_at            DateTime?
+  detalles              NotaCreditoDetalle[]
+
+  @@unique([timbrado, establecimiento, punto_expedicion, secuencia], name: "nota_credito_electronica_secuencia_unica")
+  @@map("nota_credito_electronica")
+}
+
+model NotaCreditoDetalle {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  nota_credito          NotaCreditoElectronica @relation(fields: [notaCreditoId], references: [id])
+  notaCreditoId         String                 @map("nota_credito_id") @db.Uuid
+  detalleVentaId        String?                @map("detalle_venta_id") @db.Uuid
+  productoId            String?                @map("producto_id") @db.Uuid
+  descripcion           String
+  codigo_producto       String?
+  cantidad              Int
+  precio_unitario       Decimal                @db.Decimal(14,4)
+  subtotal              Decimal                @db.Decimal(12,2)
+  iva_porcentaje        Int                    @default(10)
+  created_at            DateTime               @default(now())
+  updated_at            DateTime               @updatedAt
+
+  @@map("nota_credito_detalle")
+}
+
 model FacturaDigital {
-  id                String    @id @default(uuid())
+  id                String    @id @default(uuid()) @db.Uuid
   venta             Venta?    @relation(fields: [ventaId], references: [id])
-  ventaId           String?   @map("venta_id") @unique
+  ventaId           String?   @map("venta_id") @unique @db.Uuid
   sucursal          Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId        String?   @map("sucursal_id")
+  sucursalId        String?   @map("sucursal_id") @db.Uuid
   nro_factura       String    @unique
   timbrado          String
   establecimiento   String
@@ -318,9 +512,9 @@ model FacturaDigital {
 }
 
 model MovimientoStock {
-  id            String        @id @default(uuid())
+  id            String        @id @default(uuid()) @db.Uuid
   producto      Producto      @relation(fields: [productoId], references: [id])
-  productoId    String        @map("producto_id")
+  productoId    String        @map("producto_id") @db.Uuid
   tipo          TipoMovimiento
   cantidad      Int
   motivo        String?
@@ -334,11 +528,11 @@ model MovimientoStock {
 }
 
 model Pago {
-  id        String   @id @default(uuid())
+  id        String   @id @default(uuid()) @db.Uuid
   venta     Venta    @relation(fields: [ventaId], references: [id])
-  ventaId   String   @map("venta_id")
+  ventaId   String   @map("venta_id") @db.Uuid
   sucursal  Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId String?  @map("sucursal_id")
+  sucursalId String?  @map("sucursal_id") @db.Uuid
   fecha_pago DateTime @default(now())
   monto     Decimal  @db.Decimal(12,2)
   metodo    String
@@ -354,7 +548,7 @@ model CierreCaja {
   apertura            AperturaCaja? @relation(fields: [aperturaId], references: [id])
   aperturaId          String?     @map("apertura_id") @db.Uuid @unique
   sucursal            Sucursal?   @relation(fields: [sucursalId], references: [id])
-  sucursalId          String?     @map("sucursal_id")
+  sucursalId          String?     @map("sucursal_id") @db.Uuid
   saldo_inicial       Decimal     @db.Decimal(12,2) @default(0)
   fecha_apertura      DateTime?   @map("fecha_apertura")
   fecha_cierre        DateTime    @default(now()) @map("fecha_cierre")
@@ -384,7 +578,7 @@ model SalidaCaja {
   usuario     Usuario   @relation("UsuarioSalidaCaja", fields: [usuarioId], references: [id])
   usuarioId   String    @map("usuario_id") @db.Uuid
   sucursal    Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId  String?   @map("sucursal_id")
+  sucursalId  String?   @map("sucursal_id") @db.Uuid
   descripcion String
   monto       Decimal     @db.Decimal(12,2)
   fecha       DateTime    @default(now())
@@ -401,7 +595,7 @@ model AperturaCaja {
   usuario        Usuario   @relation(fields: [usuarioId], references: [id])
   usuarioId      String    @map("usuario_id") @db.Uuid
   sucursal       Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId     String?   @map("sucursal_id")
+  sucursalId     String?   @map("sucursal_id") @db.Uuid
   fecha_apertura DateTime  @default(now()) @map("fecha_apertura")
   fecha_cierre   DateTime? @map("fecha_cierre")
   saldo_inicial  Decimal   @db.Decimal(12,2) @default(0)
@@ -416,7 +610,7 @@ model AperturaCaja {
 }
 
 model Archivo {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
   tipo_entidad String
   entidad_id String
   nombre     String
@@ -429,7 +623,7 @@ model Archivo {
 }
 
 model Certificado {
-  id            String   @id @default(uuid())
+  id            String   @id @default(uuid()) @db.Uuid
   huella        String   @unique
   ruta_cifrada  String
   valido_desde  DateTime?
@@ -442,7 +636,7 @@ model Certificado {
 }
 
 model Almacen {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
   nombre     String
   direccion  String?
   created_at DateTime @default(now())
@@ -451,14 +645,14 @@ model Almacen {
 }
 
 model Recibo {
-  id          String    @id @default(uuid())
+  id          String    @id @default(uuid()) @db.Uuid
   numero      String?   @unique
   cliente     Cliente?  @relation(fields: [clienteId], references: [id])
-  clienteId   String?   @map("cliente_id")
+  clienteId   String?   @map("cliente_id") @db.Uuid
   usuario     Usuario   @relation(fields: [usuarioId], references: [id])
   usuarioId   String    @map("usuario_id") @db.Uuid
   sucursal    Sucursal? @relation(fields: [sucursalId], references: [id])
-  sucursalId  String?   @map("sucursal_id")
+  sucursalId  String?   @map("sucursal_id") @db.Uuid
   fecha       DateTime  @default(now())
   total       Decimal   @db.Decimal(12,2)
   total_moneda Decimal? @db.Decimal(12,2)
@@ -477,11 +671,11 @@ model Recibo {
 }
 
 model ReciboDetalle {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
   recibo     Recibo   @relation(fields: [reciboId], references: [id])
-  reciboId   String   @map("recibo_id")
+  reciboId   String   @map("recibo_id") @db.Uuid
   venta      Venta    @relation(fields: [ventaId], references: [id])
-  ventaId    String   @map("venta_id")
+  ventaId    String   @map("venta_id") @db.Uuid
   monto      Decimal  @db.Decimal(12,2)
   monto_moneda Decimal? @db.Decimal(12,2)
   saldo_previo Decimal? @db.Decimal(12,2)
@@ -491,7 +685,7 @@ model ReciboDetalle {
 }
 
 model AuditLog {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
   usuario_id String?  @map("usuario_id") @db.Uuid
   accion     String
   tabla      String

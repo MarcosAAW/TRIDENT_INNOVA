@@ -9,13 +9,17 @@ class FakePrisma {
   _initialState() {
     this.state = {
       producto: [],
+      productoStock: [],
       usuario: [],
       cliente: [],
+      sucursal: [],
       venta: [],
       detalleVenta: [],
       movimientoStock: [],
       facturaElectronica: [],
       facturaDigital: [],
+      notaCreditoElectronica: [],
+      notaCreditoDetalle: [],
       aperturaCaja: [],
       cierreCaja: [],
       salidaCaja: []
@@ -31,6 +35,14 @@ class FakePrisma {
       deleteMany: async () => this._productoDeleteMany()
     };
 
+    this.productoStock = {
+      findMany: async (args = {}) => this._productoStockFindMany(args),
+      create: async ({ data }) => this._productoStockCreate(data),
+      update: async ({ where, data }) => this._productoStockUpdate(where, data),
+      upsert: async ({ where, update, create }) => this._productoStockUpsert(where, update, create),
+      deleteMany: async () => this._productoStockDeleteMany()
+    };
+
     this.usuario = {
       create: async ({ data }) => this._usuarioCreate(data),
       deleteMany: async () => this._usuarioDeleteMany()
@@ -41,6 +53,12 @@ class FakePrisma {
       findUnique: async ({ where }) => this._clienteFindUnique(where),
       findMany: async () => this._clienteFindMany(),
       deleteMany: async () => this._clienteDeleteMany()
+    };
+
+    this.sucursal = {
+      create: async ({ data }) => this._sucursalCreate(data),
+      findUnique: async ({ where }) => this._sucursalFindUnique(where),
+      deleteMany: async () => this._sucursalDeleteMany()
     };
 
     this.venta = {
@@ -77,6 +95,13 @@ class FakePrisma {
       findUnique: async ({ where }) => this._facturaDigitalFindUnique(where),
       findFirst: async (args = {}) => this._facturaDigitalFindFirst(args),
       deleteMany: async () => this._facturaDigitalDeleteMany()
+    };
+
+    this.notaCreditoElectronica = {
+      create: async ({ data }) => this._notaCreditoCreate(data),
+      update: async ({ where, data }) => this._notaCreditoUpdate(where, data),
+      findFirst: async (args = {}) => this._notaCreditoFindFirst(args),
+      deleteMany: async () => this._notaCreditoDeleteMany()
     };
 
     this.aperturaCaja = {
@@ -213,6 +238,12 @@ class FakePrisma {
     if (where.id && Array.isArray(where.id.in)) {
       results = results.filter((item) => where.id.in.includes(item.id));
     }
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
+    }
+    if (where.deleted_at === null) {
+      results = results.filter((item) => item.deleted_at === null);
+    }
     return this._clone(results);
   }
 
@@ -225,8 +256,15 @@ class FakePrisma {
       descripcion: data.descripcion ?? null,
       tipo: data.tipo,
       precio_venta: this._toNumber(data.precio_venta),
+      precio_venta_original: data.precio_venta_original != null ? this._toNumber(data.precio_venta_original) : null,
+      moneda_precio_venta: data.moneda_precio_venta ?? 'PYG',
+      tipo_cambio_precio_venta: data.tipo_cambio_precio_venta != null ? this._toNumber(data.tipo_cambio_precio_venta) : null,
       precio_compra: data.precio_compra != null ? this._toNumber(data.precio_compra) : null,
+      precio_compra_original: data.precio_compra_original != null ? this._toNumber(data.precio_compra_original) : null,
+      moneda_precio_compra: data.moneda_precio_compra ?? null,
+      tipo_cambio_precio_compra: data.tipo_cambio_precio_compra != null ? this._toNumber(data.tipo_cambio_precio_compra) : null,
       stock_actual: data.stock_actual ?? 0,
+      sucursalId: data.sucursalId ?? null,
       codigo_barra: data.codigo_barra ?? null,
       categoriaId: data.categoriaId ?? null,
       minimo_stock: data.minimo_stock ?? null,
@@ -263,6 +301,82 @@ class FakePrisma {
   _productoDeleteMany() {
     const count = this.state.producto.length;
     this.state.producto = [];
+    return { count };
+  }
+
+  _productoStockFindMany({ where = {}, select } = {}) {
+    let results = this.state.productoStock;
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
+    }
+    if (where.productoId && Array.isArray(where.productoId.in)) {
+      results = results.filter((item) => where.productoId.in.includes(item.productoId));
+    }
+
+    return this._clone(
+      results.map((item) => {
+        if (!select) {
+          return item;
+        }
+
+        return Object.keys(select).reduce((acc, key) => {
+          if (select[key]) {
+            acc[key] = item[key];
+          }
+          return acc;
+        }, {});
+      })
+    );
+  }
+
+  _productoStockCreate(data) {
+    const now = this._nowISO();
+    const record = {
+      id: data.id || randomUUID(),
+      productoId: data.productoId,
+      sucursalId: data.sucursalId,
+      stock_actual: this._toNumber(data.stock_actual ?? 0),
+      created_at: data.created_at ?? now,
+      updated_at: data.updated_at ?? now
+    };
+    this.state.productoStock.push(record);
+    return this._clone(record);
+  }
+
+  _productoStockUpdate(where, data) {
+    const record = this.state.productoStock.find((item) => item.id === where.id);
+    if (!record) throw new Error('PRODUCTO_STOCK_NO_ENCONTRADO');
+
+    Object.entries(data).forEach(([key, value]) => {
+      if (value && typeof value === 'object' && 'decrement' in value) {
+        record[key] = (record[key] ?? 0) - this._toNumber(value.decrement);
+      } else if (value && typeof value === 'object' && 'increment' in value) {
+        record[key] = (record[key] ?? 0) + this._toNumber(value.increment);
+      } else {
+        record[key] = value;
+      }
+    });
+
+    record.updated_at = this._nowISO();
+    return this._clone(record);
+  }
+
+  _productoStockUpsert(where, update, create) {
+    const composite = where.productoId_sucursalId || {};
+    const record = this.state.productoStock.find(
+      (item) => item.productoId === composite.productoId && item.sucursalId === composite.sucursalId
+    );
+
+    if (record) {
+      return this._productoStockUpdate({ id: record.id }, update);
+    }
+
+    return this._productoStockCreate(create);
+  }
+
+  _productoStockDeleteMany() {
+    const count = this.state.productoStock.length;
+    this.state.productoStock = [];
     return { count };
   }
 
@@ -324,6 +438,36 @@ class FakePrisma {
     return { count };
   }
 
+  _sucursalCreate(data) {
+    const now = this._nowISO();
+    const record = {
+      id: data.id || randomUUID(),
+      nombre: data.nombre,
+      ciudad: data.ciudad ?? null,
+      direccion: data.direccion ?? null,
+      telefono: data.telefono ?? null,
+      establecimiento: data.establecimiento ?? null,
+      punto_expedicion: data.punto_expedicion ?? null,
+      created_at: data.created_at ?? now,
+      updated_at: data.updated_at ?? now,
+      deleted_at: data.deleted_at ?? null
+    };
+    this.state.sucursal.push(record);
+    return this._clone(record);
+  }
+
+  _sucursalFindUnique(where = {}) {
+    const keys = Object.keys(where);
+    const record = this.state.sucursal.find((item) => keys.some((key) => item[key] === where[key]));
+    return record ? this._clone(record) : null;
+  }
+
+  _sucursalDeleteMany() {
+    const count = this.state.sucursal.length;
+    this.state.sucursal = [];
+    return { count };
+  }
+
   // Venta -------------------------------------------------------------------
 
   _ventaCreate(data) {
@@ -332,6 +476,7 @@ class FakePrisma {
       id: data.id || randomUUID(),
       usuarioId: data.usuarioId,
       clienteId: data.clienteId ?? null,
+      sucursalId: data.sucursalId ?? null,
       fecha: data.fecha ? new Date(data.fecha).toISOString() : now,
       subtotal: this._toNumber(data.subtotal),
       descuento_total: data.descuento_total != null ? this._toNumber(data.descuento_total) : null,
@@ -342,6 +487,11 @@ class FakePrisma {
       moneda: data.moneda ?? 'PYG',
       tipo_cambio: data.tipo_cambio != null ? this._toNumber(data.tipo_cambio) : null,
       iva_porcentaje: data.iva_porcentaje != null ? Number(data.iva_porcentaje) : 10,
+      condicion_venta: data.condicion_venta ?? 'CONTADO',
+      es_credito: data.es_credito ?? false,
+      saldo_pendiente: data.saldo_pendiente != null ? this._toNumber(data.saldo_pendiente) : null,
+      fecha_vencimiento: data.fecha_vencimiento ? new Date(data.fecha_vencimiento).toISOString() : null,
+      credito_config: data.credito_config ?? null,
       factura_electronicaId: data.factura_electronicaId ?? null,
       created_at: data.created_at ?? now,
       updated_at: data.updated_at ?? now,
@@ -374,6 +524,9 @@ class FakePrisma {
           return detail;
         });
     }
+    if (include.sucursal) {
+      cloned.sucursal = this._clone(this.state.sucursal.find((item) => item.id === record.sucursalId)) || null;
+    }
     if (include.factura_electronica) {
       cloned.factura_electronica =
         this._clone(
@@ -386,6 +539,11 @@ class FakePrisma {
       cloned.factura_digital =
         this._clone(this.state.facturaDigital.find((factura) => factura.ventaId === record.id)) || null;
     }
+    if (include.notas_credito) {
+      cloned.notas_credito = this.state.notaCreditoElectronica
+        .filter((nota) => nota.ventaId === record.id && !nota.deleted_at)
+        .map((nota) => this._clone(nota));
+    }
     return cloned;
   }
 
@@ -394,6 +552,12 @@ class FakePrisma {
 
     if (where.usuarioId) {
       results = results.filter((item) => item.usuarioId === where.usuarioId);
+    }
+    if (where.id) {
+      results = results.filter((item) => item.id === where.id);
+    }
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
     }
     if (where.deleted_at === null) {
       results = results.filter((item) => !item.deleted_at);
@@ -433,6 +597,9 @@ class FakePrisma {
             return detail;
           });
       }
+      if (include.sucursal) {
+        cloned.sucursal = this._clone(this.state.sucursal.find((item) => item.id === record.sucursalId)) || null;
+      }
       if (include.factura_electronica) {
         cloned.factura_electronica =
           this._clone(
@@ -444,6 +611,11 @@ class FakePrisma {
       if (include.factura_digital) {
         cloned.factura_digital =
           this._clone(this.state.facturaDigital.find((factura) => factura.ventaId === record.id)) || null;
+      }
+      if (include.notas_credito) {
+        cloned.notas_credito = this.state.notaCreditoElectronica
+          .filter((nota) => nota.ventaId === record.id && !nota.deleted_at)
+          .map((nota) => this._clone(nota));
       }
       return cloned;
     });
@@ -489,7 +661,13 @@ class FakePrisma {
       productoId: data.productoId,
       cantidad: this._toNumber(data.cantidad),
       precio_unitario: this._toNumber(data.precio_unitario),
-      subtotal: data.subtotal != null ? this._toNumber(data.subtotal) : this._toNumber(data.cantidad) * this._toNumber(data.precio_unitario)
+      subtotal: data.subtotal != null ? this._toNumber(data.subtotal) : this._toNumber(data.cantidad) * this._toNumber(data.precio_unitario),
+      moneda_precio_unitario: data.moneda_precio_unitario ?? 'PYG',
+      precio_unitario_moneda: data.precio_unitario_moneda != null ? this._toNumber(data.precio_unitario_moneda) : this._toNumber(data.precio_unitario),
+      subtotal_moneda: data.subtotal_moneda != null
+        ? this._toNumber(data.subtotal_moneda)
+        : (data.subtotal != null ? this._toNumber(data.subtotal) : this._toNumber(data.cantidad) * this._toNumber(data.precio_unitario)),
+      tipo_cambio_aplicado: data.tipo_cambio_aplicado != null ? this._toNumber(data.tipo_cambio_aplicado) : null
     };
     this.state.detalleVenta.push(record);
     return this._clone(record);
@@ -937,6 +1115,106 @@ class FakePrisma {
     return { count };
   }
 
+  _notaCreditoCreate(data) {
+    const now = this._nowISO();
+    const detallesCreate = Array.isArray(data?.detalles?.create) ? data.detalles.create : [];
+    const record = {
+      id: data.id || randomUUID(),
+      ventaId: data.ventaId,
+      facturaElectronicaId: data.facturaElectronicaId,
+      sucursalId: data.sucursalId ?? null,
+      nro_nota: data.nro_nota,
+      timbrado: data.timbrado,
+      establecimiento: data.establecimiento,
+      punto_expedicion: data.punto_expedicion,
+      secuencia: this._toNumber(data.secuencia),
+      motivo: data.motivo,
+      tipo_ajuste: data.tipo_ajuste ?? 'TOTAL',
+      fecha_emision: data.fecha_emision ? new Date(data.fecha_emision).toISOString() : now,
+      moneda: data.moneda ?? 'PYG',
+      tipo_cambio: data.tipo_cambio != null ? this._toNumber(data.tipo_cambio) : null,
+      total: this._toNumber(data.total),
+      total_moneda: data.total_moneda != null ? this._toNumber(data.total_moneda) : null,
+      cdc: data.cdc ?? null,
+      xml_path: data.xml_path ?? null,
+      pdf_path: data.pdf_path ?? null,
+      qr_data: data.qr_data ?? null,
+      estado: data.estado ?? 'PENDIENTE',
+      respuesta_set: data.respuesta_set ?? null,
+      intentos: this._toNumber(data.intentos ?? 0),
+      ambiente: data.ambiente ?? null,
+      created_at: data.created_at ?? now,
+      updated_at: data.updated_at ?? now,
+      deleted_at: data.deleted_at ?? null
+    };
+    this.state.notaCreditoElectronica.push(record);
+
+    detallesCreate.forEach((detalle) => {
+      this.state.notaCreditoDetalle.push({
+        id: detalle.id || randomUUID(),
+        notaCreditoId: record.id,
+        detalleVentaId: detalle.detalleVentaId ?? null,
+        productoId: detalle.productoId ?? null,
+        descripcion: detalle.descripcion,
+        codigo_producto: detalle.codigo_producto ?? null,
+        cantidad: this._toNumber(detalle.cantidad),
+        precio_unitario: this._toNumber(detalle.precio_unitario),
+        subtotal: this._toNumber(detalle.subtotal),
+        iva_porcentaje: this._toNumber(detalle.iva_porcentaje ?? 10),
+        created_at: now,
+        updated_at: now
+      });
+    });
+
+    return this._clone(record);
+  }
+
+  _notaCreditoUpdate(where = {}, data = {}) {
+    const record = this.state.notaCreditoElectronica.find((item) => item.id === where.id);
+    if (!record) throw new Error('NOTA_CREDITO_NO_ENCONTRADA');
+
+    Object.entries(data).forEach(([key, value]) => {
+      if (value instanceof Date) {
+        record[key] = value.toISOString();
+      } else {
+        record[key] = value;
+      }
+    });
+
+    record.updated_at = this._nowISO();
+    return this._clone(record);
+  }
+
+  _notaCreditoFindFirst({ where = {}, orderBy } = {}) {
+    let results = this.state.notaCreditoElectronica;
+
+    if (where.timbrado) {
+      results = results.filter((item) => item.timbrado === where.timbrado);
+    }
+    if (where.establecimiento) {
+      results = results.filter((item) => item.establecimiento === where.establecimiento);
+    }
+    if (where.punto_expedicion) {
+      results = results.filter((item) => item.punto_expedicion === where.punto_expedicion);
+    }
+    if (where.deleted_at === null) {
+      results = results.filter((item) => !item.deleted_at);
+    }
+
+    if (orderBy?.secuencia === 'desc') {
+      results = [...results].sort((a, b) => Number(b.secuencia) - Number(a.secuencia));
+    }
+
+    return results.length ? this._clone(results[0]) : null;
+  }
+
+  _notaCreditoDeleteMany() {
+    const count = this.state.notaCreditoElectronica.length;
+    this.state.notaCreditoElectronica = [];
+    this.state.notaCreditoDetalle = [];
+    return { count };
+  }
+
   // FacturaDigital --------------------------------------------------------
 
   _facturaDigitalCreate(data) {
@@ -944,6 +1222,7 @@ class FakePrisma {
     const record = {
       id: data.id || randomUUID(),
       ventaId: data.ventaId ?? null,
+      sucursalId: data.sucursalId ?? null,
       nro_factura: data.nro_factura,
       timbrado: data.timbrado,
       establecimiento: data.establecimiento || '001',
@@ -1010,6 +1289,12 @@ class FakePrisma {
 
   _facturaDigitalFindFirst({ where = {}, orderBy } = {}) {
     let results = this.state.facturaDigital;
+    if (where.id) {
+      results = results.filter((item) => item.id === where.id);
+    }
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
+    }
     if (where.timbrado) {
       results = results.filter((item) => item.timbrado === where.timbrado);
     }

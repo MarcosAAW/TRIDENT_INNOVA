@@ -31,6 +31,9 @@ router.get('/:id/pdf', async (req, res) => {
     if (!factura || !factura.pdf_path) {
       return res.status(404).json({ error: 'Factura digital no encontrada.' });
     }
+    if (isExternalUrl(factura.pdf_path)) {
+      return res.redirect(factura.pdf_path);
+    }
     const absolutePath = resolveAbsoluteFromWeb(factura.pdf_path);
     try {
       await fs.access(absolutePath);
@@ -94,6 +97,10 @@ router.post('/:id/enviar', async (req, res) => {
 function resolveAbsoluteFromWeb(webPath) {
   const normalized = webPath.replace(/^\/+/, '');
   return path.join(ROOT_DIR, normalized);
+}
+
+function isExternalUrl(value) {
+  return /^https?:\/\//i.test(String(value || ''));
 }
 
 module.exports = router;

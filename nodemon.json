@@ -1,0 +1,15 @@
+{
+  "watch": [
+    "src"
+  ],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "storage/**",
+    "backups/**",
+    "docs/**",
+    "prisma/migrations/**",
+    "tests/**",
+    "coverage/**",
+    ".git/**"
+  ]
+}

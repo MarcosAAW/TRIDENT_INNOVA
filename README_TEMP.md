@@ -17,12 +17,14 @@
 - `GET /recibos/:id`
 - Todas requieren `x-user-id` y `x-sucursal-id` válidos.
 
-## Factura digital
+## Factura digital legacy
+- Compatibilidad sólo para comprobantes históricos previos a FactPy.
 - Generación incluye `sucursalId` y secuencia por sucursal.
 - Endpoints `/facturas-digitales/:id/pdf` y `/facturas-digitales/:id/enviar` filtran por sucursal y requieren auth+sucursal.
+- En producción la ruta no se monta por defecto; para habilitarla explícitamente usar `FACTURA_DIGITAL_LEGACY_ENABLED=true`.
 
 ## Factura electrónica vía FactPy (API)
-- Endpoint principal: `POST /ventas/:id/facturar` (auth + sucursal) crea/actualiza `FacturaElectronica` con número placeholder `001-001-<id7>` y timbrado `12545678-01`, genera PDF/XML locales y la factura digital; si hay `FACTPY_RECORD_ID`, arma el payload FactPy y lo envía ([src/routes/venta.js](src/routes/venta.js#L526-L705)).
+- Endpoint principal: `POST /ventas/:id/facturar` (auth + sucursal) crea/actualiza `FacturaElectronica` con número placeholder `001-001-<id7>` y timbrado `12545678-01`, genera PDF/XML locales y, si hay `FACTPY_RECORD_ID`, arma el payload FactPy y lo envía ([src/routes/venta.js](src/routes/venta.js#L526-L705)).
 - Payload que enviamos a FactPy: `receiptid` = venta.id, `establecimiento`/`punto` del timbrado de empresa, `numero` = secuencia (7 dígitos), `cliente` (ruc/nombre), `items` (desc, cantidad, precioUnitario), `pagos` y `totalPago` ([src/routes/venta.js](src/routes/venta.js#L1504-L1544)).
 - Respuesta FactPy al emitir: guardamos en `FacturaElectronica.respuesta_set` el objeto completo, más `receiptid` del payload; si trae `kude` o `xmlLink`, los persistimos en `pdf_path`/`xml_path`; si trae `cdc`, se guarda en `qr_data`; estado se marca `ENVIADO` o `RECHAZADO` según `status` ([src/routes/venta.js](src/routes/venta.js#L600-L665)).
 - Polling de estados: `POST /factpy/poll` (auth + sucursal) busca facturas `ENVIADO`/`PENDIENTE`, arma `receiptid` desde `respuesta_set` o `ventaId`, consulta FactPy y actualiza `estado` a `ACEPTADO`/`RECHAZADO` si el texto incluye “aprob”/“rechaz”; también copia `cdc` a `qr_data` y `documento` a `nro_factura` cuando vienen en la respuesta ([src/routes/factpy.js](src/routes/factpy.js#L12-L180)).

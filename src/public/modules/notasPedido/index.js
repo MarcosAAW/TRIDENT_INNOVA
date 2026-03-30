@@ -1,0 +1,1 @@
+export { notasPedidoModule } from './config.js';

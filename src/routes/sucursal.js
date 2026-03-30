@@ -12,7 +12,9 @@ const baseSchema = {
   nombre: z.string().trim().min(1, 'El nombre es obligatorio'),
   ciudad: z.string().trim().optional(),
   direccion: z.string().trim().optional(),
-  telefono: z.string().trim().optional()
+  telefono: z.string().trim().optional(),
+  establecimiento: z.string().trim().min(1, 'El establecimiento es obligatorio').max(3).optional(),
+  punto_expedicion: z.string().trim().min(1, 'El punto de expedición es obligatorio').max(3).optional()
 };
 
 const listQuerySchema = z.object({
@@ -31,6 +33,8 @@ function sanitizeSucursalPayload(data = {}) {
   if (typeof payload.ciudad === 'string') payload.ciudad = payload.ciudad.trim();
   if (typeof payload.direccion === 'string') payload.direccion = payload.direccion.trim();
   if (typeof payload.telefono === 'string') payload.telefono = payload.telefono.trim();
+  if (typeof payload.establecimiento === 'string') payload.establecimiento = payload.establecimiento.trim();
+  if (typeof payload.punto_expedicion === 'string') payload.punto_expedicion = payload.punto_expedicion.trim();
   return payload;
 }
 

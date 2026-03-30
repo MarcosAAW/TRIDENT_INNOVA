@@ -71,6 +71,32 @@ function renderTotalAmount(venta) {
   return base;
 }
 
+function getPrimaryNotaCredito(venta) {
+  const notas = Array.isArray(venta?.notas_credito) ? venta.notas_credito : [];
+  return notas.length ? notas[0] : null;
+}
+
+function getNotaCreditoLabel(nota) {
+  const estado = String(nota?.estado || '').toUpperCase();
+  const prefix = String(nota?.tipo_ajuste || 'TOTAL').toUpperCase() === 'PARCIAL' ? 'NC parcial' : 'NC total';
+  if (estado === 'RECHAZADO') return `${prefix} rechazada`;
+  if (estado === 'ENVIADO' || estado === 'ACEPTADO' || estado === 'PAGADA') return `${prefix} emitida`;
+  return `${prefix} pendiente`;
+}
+
+function renderNotaCreditoBadge(venta) {
+  const nota = getPrimaryNotaCredito(venta);
+  if (!nota) return '';
+  const estado = String(nota.estado || '').toUpperCase();
+  if (estado === 'RECHAZADO') {
+    return `<span class="badge error">${escapeHtml(getNotaCreditoLabel(nota))}</span>`;
+  }
+  if (estado === 'ENVIADO' || estado === 'ACEPTADO' || estado === 'PAGADA') {
+    return `<span class="badge warn">${escapeHtml(getNotaCreditoLabel(nota))}</span>`;
+  }
+  return `<span class="badge muted">${escapeHtml(getNotaCreditoLabel(nota))}</span>`;
+}
+
 let ventasResumenNode = null;
 
 function ensureVentasResumenNode() {
@@ -222,8 +248,12 @@ function downloadReportXlsx(filters, rangeInfo, showMessage) {
   }
 }
 
-function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta }) {
+function openNotaCreditoDialog({ venta }) {
   return new Promise((resolve) => {
+    const detallesVenta = Array.isArray(venta?.detalles) ? venta.detalles : [];
+    const moneda = (venta?.moneda || 'PYG').toUpperCase();
+    const tipoCambio = Number(venta?.tipo_cambio || 0);
+
     const overlay = document.createElement('div');
     overlay.style.position = 'fixed';
     overlay.style.inset = '0';
@@ -238,7 +268,242 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta }) {
     modal.style.color = '#e2e8f0';
     modal.style.padding = '20px';
     modal.style.borderRadius = '10px';
-    modal.style.minWidth = '320px';
+    modal.style.width = 'min(760px, calc(100vw - 32px))';
+    modal.style.maxHeight = 'calc(100vh - 40px)';
+    modal.style.overflowY = 'auto';
+    modal.style.boxShadow = '0 10px 30px rgba(0,0,0,0.4)';
+
+    const title = document.createElement('h3');
+    title.textContent = 'Emitir nota de crédito';
+    title.style.margin = '0 0 12px 0';
+    modal.appendChild(title);
+
+    const resume = document.createElement('div');
+    resume.style.fontSize = '13px';
+    resume.style.color = '#cbd5e1';
+    resume.style.marginBottom = '12px';
+    const totalVenta = formatCurrency(venta?.total || 0, 'PYG');
+    const totalMoneda = moneda === 'USD' && Number(venta?.total_moneda || 0) > 0
+      ? ` · ${formatCurrency(venta.total_moneda, 'USD')}`
+      : '';
+    resume.textContent = `Factura ${venta?.factura_electronica?.nro_factura || 'sin número'} · Total ${totalVenta}${totalMoneda}`;
+    modal.appendChild(resume);
+
+    const modeLabel = document.createElement('label');
+    modeLabel.textContent = 'Tipo de ajuste';
+    const modeSelect = document.createElement('select');
+    modeSelect.innerHTML = '<option value="TOTAL">Total</option><option value="PARCIAL">Parcial por ítems</option>';
+    modeSelect.style.width = '100%';
+    modeSelect.style.margin = '6px 0 12px 0';
+    modeSelect.style.padding = '10px';
+    modeSelect.style.borderRadius = '8px';
+    modeSelect.style.border = '1px solid #334155';
+    modeSelect.style.background = '#020617';
+    modeSelect.style.color = '#e2e8f0';
+    modal.appendChild(modeLabel);
+    modal.appendChild(modeSelect);
+
+    const motivoLabel = document.createElement('label');
+    motivoLabel.textContent = 'Motivo';
+    const motivoInput = document.createElement('textarea');
+    motivoInput.value = `Ajuste de la factura ${venta?.factura_electronica?.nro_factura || ''}`.trim();
+    motivoInput.rows = 3;
+    motivoInput.style.width = '100%';
+    motivoInput.style.margin = '6px 0 12px 0';
+    motivoInput.style.padding = '10px';
+    motivoInput.style.borderRadius = '8px';
+    motivoInput.style.border = '1px solid #334155';
+    motivoInput.style.background = '#020617';
+    motivoInput.style.color = '#e2e8f0';
+    modal.appendChild(motivoLabel);
+    modal.appendChild(motivoInput);
+
+    const partialWrap = document.createElement('div');
+    partialWrap.style.display = 'none';
+    partialWrap.style.marginBottom = '16px';
+    partialWrap.innerHTML = '<strong>Ítems a acreditar</strong>';
+
+    const info = document.createElement('div');
+    info.style.fontSize = '12px';
+    info.style.color = '#94a3b8';
+    info.style.margin = '6px 0 10px 0';
+    info.textContent = 'Marcá los ítems y la cantidad exacta a descontar.';
+    partialWrap.appendChild(info);
+
+    const table = document.createElement('table');
+    table.style.width = '100%';
+    table.style.borderCollapse = 'collapse';
+    table.innerHTML = '<thead><tr><th></th><th>Producto</th><th>Vendida</th><th>Acreditar</th><th>Subtotal</th></tr></thead><tbody></tbody>';
+    const tbody = table.querySelector('tbody');
+    const rows = detallesVenta.map((detalle, idx) => {
+      const tr = document.createElement('tr');
+      const maxQty = Number(detalle?.cantidad || 0);
+      const priceUnit = maxQty > 0 ? Number(detalle?.precio_unitario || Number(detalle?.subtotal || 0) / maxQty) : 0;
+      const checkboxCell = document.createElement('td');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkboxCell.appendChild(checkbox);
+      const qtyInput = document.createElement('input');
+      qtyInput.type = 'number';
+      qtyInput.min = '0';
+      qtyInput.max = String(maxQty);
+      qtyInput.step = '1';
+      qtyInput.value = '0';
+      qtyInput.style.width = '90px';
+      qtyInput.style.padding = '6px';
+      qtyInput.style.borderRadius = '6px';
+      qtyInput.style.border = '1px solid #334155';
+      qtyInput.style.background = '#020617';
+      qtyInput.style.color = '#e2e8f0';
+
+      const subtotalCell = document.createElement('td');
+      const updateRowSubtotal = () => {
+        const qty = Math.max(0, Math.min(maxQty, Number(qtyInput.value) || 0));
+        subtotalCell.textContent = formatCurrency(round(priceUnit * qty, 2), 'PYG');
+      };
+
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked && Number(qtyInput.value) <= 0) {
+          qtyInput.value = '1';
+        }
+        if (!checkbox.checked) {
+          qtyInput.value = '0';
+        }
+        updateRowSubtotal();
+        updateSummary();
+      });
+
+      qtyInput.addEventListener('input', () => {
+        const qty = Math.max(0, Math.min(maxQty, Number(qtyInput.value) || 0));
+        qtyInput.value = String(qty);
+        checkbox.checked = qty > 0;
+        updateRowSubtotal();
+        updateSummary();
+      });
+
+      const nameCell = document.createElement('td');
+      nameCell.textContent = detalle?.producto?.nombre || `Ítem ${idx + 1}`;
+      const soldCell = document.createElement('td');
+      soldCell.textContent = String(maxQty);
+      const qtyCell = document.createElement('td');
+      qtyCell.appendChild(qtyInput);
+      tr.appendChild(checkboxCell);
+      tr.appendChild(nameCell);
+      tr.appendChild(soldCell);
+      tr.appendChild(qtyCell);
+      tr.appendChild(subtotalCell);
+      tbody.appendChild(tr);
+      updateRowSubtotal();
+      return { detalle, checkbox, qtyInput, priceUnit };
+    });
+    partialWrap.appendChild(table);
+
+    const summary = document.createElement('div');
+    summary.style.marginTop = '10px';
+    summary.style.fontSize = '13px';
+    summary.style.color = '#cbd5e1';
+    partialWrap.appendChild(summary);
+
+    function updateSummary() {
+      const totalGs = round(
+        rows.reduce((acc, row) => acc + round((Number(row.qtyInput.value) || 0) * row.priceUnit, 2), 0),
+        2
+      );
+      if (moneda === 'USD' && tipoCambio > 0) {
+        summary.textContent = `Total parcial: ${formatCurrency(totalGs, 'PYG')} · ${formatCurrency(round(totalGs / tipoCambio, 2), 'USD')}`;
+      } else {
+        summary.textContent = `Total parcial: ${formatCurrency(totalGs, 'PYG')}`;
+      }
+    }
+    updateSummary();
+    modal.appendChild(partialWrap);
+
+    modeSelect.addEventListener('change', () => {
+      partialWrap.style.display = modeSelect.value === 'PARCIAL' ? 'block' : 'none';
+    });
+
+    const actions = document.createElement('div');
+    actions.style.display = 'flex';
+    actions.style.justifyContent = 'flex-end';
+    actions.style.gap = '10px';
+    const btnCancel = document.createElement('button');
+    btnCancel.textContent = 'Cancelar';
+    btnCancel.style.padding = '8px 12px';
+    btnCancel.style.border = 'none';
+    btnCancel.style.borderRadius = '6px';
+    btnCancel.style.background = '#334155';
+    btnCancel.style.color = '#e2e8f0';
+    const btnOk = document.createElement('button');
+    btnOk.textContent = 'Emitir';
+    btnOk.style.padding = '8px 12px';
+    btnOk.style.border = 'none';
+    btnOk.style.borderRadius = '6px';
+    btnOk.style.background = '#f59e0b';
+    btnOk.style.color = '#020617';
+    actions.appendChild(btnCancel);
+    actions.appendChild(btnOk);
+    modal.appendChild(actions);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.body.removeChild(overlay);
+      resolve(result);
+    };
+
+    btnCancel.addEventListener('click', () => close(null));
+    btnOk.addEventListener('click', () => {
+      const motivo = String(motivoInput.value || '').trim();
+      if (motivo.length < 5) {
+        window.alert('El motivo debe tener al menos 5 caracteres.');
+        return;
+      }
+
+      if (modeSelect.value === 'PARCIAL') {
+        const detalles = rows
+          .map((row) => ({
+            detalleVentaId: row.detalle.id,
+            cantidad: Number(row.qtyInput.value) || 0
+          }))
+          .filter((row) => row.cantidad > 0);
+        if (!detalles.length) {
+          window.alert('Seleccioná al menos un ítem para la nota parcial.');
+          return;
+        }
+        close({ motivo, tipo_ajuste: 'PARCIAL', detalles });
+        return;
+      }
+
+      close({ motivo, tipo_ajuste: 'TOTAL' });
+    });
+  });
+}
+
+// Adecuación: ahora acepta un objeto venta para soportar cuotas
+function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
+  return new Promise((resolve) => {
+    const esVentaUsd = (monedaVenta || '').toUpperCase() === 'USD';
+    const saldoGs = round(Number(saldo) || 0, 2);
+    const saldoMoneda = esVentaUsd && tipoCambioVenta > 0
+      ? round(saldoGs / Number(tipoCambioVenta), 2)
+      : saldoGs;
+
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(0,0,0,0.45)';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.zIndex = '9999';
+
+    const modal = document.createElement('div');
+    modal.style.background = '#0f172a';
+    modal.style.color = '#e2e8f0';
+    modal.style.padding = '20px';
+    modal.style.borderRadius = '10px';
+    modal.style.minWidth = '420px';
     modal.style.boxShadow = '0 10px 30px rgba(0,0,0,0.4)';
 
     const title = document.createElement('h3');
@@ -246,92 +511,145 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta }) {
     title.style.margin = '0 0 12px 0';
     modal.appendChild(title);
 
-    const fieldMoneda = document.createElement('div');
-    fieldMoneda.style.marginBottom = '10px';
-    const labelMoneda = document.createElement('label');
-    labelMoneda.textContent = 'Moneda de cobro';
-    labelMoneda.style.display = 'block';
-    labelMoneda.style.marginBottom = '4px';
-    const selectMoneda = document.createElement('select');
-    selectMoneda.style.width = '100%';
-    selectMoneda.style.padding = '8px';
-    selectMoneda.style.borderRadius = '6px';
-    selectMoneda.style.border = '1px solid #1f2937';
+    const resumenSaldo = document.createElement('div');
+    resumenSaldo.style.fontSize = '13px';
+    resumenSaldo.style.color = '#cbd5e1';
+    resumenSaldo.style.marginBottom = '12px';
+    let saldoTexto = '';
+    if (esVentaUsd) {
+      saldoTexto = `Saldo pendiente: ${formatCurrency(saldoMoneda, 'USD')}`;
+      if (tipoCambioVenta > 0) {
+        saldoTexto += ` · ${formatCurrency(saldoGs, 'PYG')} (tc ${tipoCambioVenta})`;
+      }
+    } else {
+      saldoTexto = `Saldo pendiente: ${formatCurrency(saldoGs, 'PYG')}`;
+    }
+    resumenSaldo.textContent = saldoTexto;
+    modal.appendChild(resumenSaldo);
+
+    // Si la venta es a cuotas, mostrar detalle de cuotas pendientes
+    let cuotasSeleccionadas = [];
+    let cuotasPendientes = [];
+    let cuotasInfoNode = null;
+    if (venta && venta.credito && venta.credito.tipo === 'CUOTAS' && Array.isArray(venta.credito.cuotas)) {
+      cuotasPendientes = venta.credito.cuotas.filter((c) => !c.pagada);
+      cuotasInfoNode = document.createElement('div');
+      cuotasInfoNode.style.marginBottom = '16px';
+      cuotasInfoNode.innerHTML = `<strong>Cuotas pendientes:</strong>`;
+      const table = document.createElement('table');
+      table.style.width = '100%';
+      table.style.marginTop = '6px';
+      table.innerHTML = `<thead><tr><th></th><th>N°</th><th>Monto</th><th>Vence</th><th>Estado</th></tr></thead><tbody></tbody>`;
+      const tbody = table.querySelector('tbody');
+      cuotasPendientes.forEach((cuota, idx) => {
+        const tr = document.createElement('tr');
+        const tdCheck = document.createElement('td');
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = false;
+        check.addEventListener('change', () => {
+          if (check.checked) {
+            cuotasSeleccionadas.push(cuota.numero);
+          } else {
+            cuotasSeleccionadas = cuotasSeleccionadas.filter((n) => n !== cuota.numero);
+          }
+          updateMontoSugerido();
+        });
+        tdCheck.appendChild(check);
+        tr.appendChild(tdCheck);
+        const montoCuota = esVentaUsd ? formatCurrency(cuota.monto, 'USD') : formatCurrency(cuota.monto, 'PYG');
+        tr.innerHTML += `<td>${cuota.numero}</td><td>${montoCuota}</td><td>${formatDate(cuota.fecha_vencimiento)}</td><td>${cuota.pagada ? 'Pagada' : 'Pendiente'}</td>`;
+        tr.children[0].replaceWith(tdCheck);
+        tbody.appendChild(tr);
+      });
+      cuotasInfoNode.appendChild(table);
+      modal.appendChild(cuotasInfoNode);
+    }
+
+    // Contenedor de pago único (no multi-pago para cuotas)
+    const pagoContainer = document.createElement('div');
+    pagoContainer.style.display = 'flex';
+    pagoContainer.style.flexDirection = 'column';
+    pagoContainer.style.gap = '10px';
+    modal.appendChild(pagoContainer);
+
+    // Moneda
+    const monedaLabel = document.createElement('label');
+    monedaLabel.textContent = 'Moneda';
+    const monedaSelect = document.createElement('select');
     ['PYG', 'USD'].forEach((val) => {
       const opt = document.createElement('option');
       opt.value = val;
-      opt.textContent = val === 'USD' ? 'Dólares (USD)' : 'Guaraníes (PYG)';
-      if (val === monedaVenta) opt.selected = true;
-      selectMoneda.appendChild(opt);
+      opt.textContent = val === 'USD' ? 'USD' : 'PYG';
+      if ((monedaVenta || 'PYG') === val) opt.selected = true;
+      monedaSelect.appendChild(opt);
     });
-    fieldMoneda.appendChild(labelMoneda);
-    fieldMoneda.appendChild(selectMoneda);
-    modal.appendChild(fieldMoneda);
+    pagoContainer.appendChild(monedaLabel);
+    pagoContainer.appendChild(monedaSelect);
 
-    const fieldCambio = document.createElement('div');
-    fieldCambio.style.marginBottom = '10px';
-    const labelCambio = document.createElement('label');
-    labelCambio.textContent = 'Tipo de cambio (Gs por USD)';
-    labelCambio.style.display = 'block';
-    labelCambio.style.marginBottom = '4px';
-    const inputCambio = document.createElement('input');
-    inputCambio.type = 'number';
-    inputCambio.step = '0.0001';
-    inputCambio.min = '0';
-    inputCambio.value = tipoCambioVenta > 0 ? String(tipoCambioVenta) : '';
-    inputCambio.style.width = '100%';
-    inputCambio.style.padding = '8px';
-    inputCambio.style.borderRadius = '6px';
-    inputCambio.style.border = '1px solid #1f2937';
-    fieldCambio.appendChild(labelCambio);
-    fieldCambio.appendChild(inputCambio);
-    modal.appendChild(fieldCambio);
+    // Tipo de cambio (solo USD)
+    const cambioLabel = document.createElement('label');
+    cambioLabel.textContent = 'Tipo cambio';
+    const cambioInput = document.createElement('input');
+    cambioInput.type = 'number';
+    cambioInput.step = '0.0001';
+    cambioInput.min = '0';
+    cambioInput.value = tipoCambioVenta > 0 ? tipoCambioVenta : '';
+    if ((monedaVenta || 'PYG') !== 'USD') {
+      cambioLabel.style.display = 'none';
+      cambioInput.style.display = 'none';
+    }
+    monedaSelect.addEventListener('change', (e) => {
+      if (e.target.value === 'USD') {
+        cambioLabel.style.display = '';
+        cambioInput.style.display = '';
+      } else {
+        cambioLabel.style.display = 'none';
+        cambioInput.style.display = 'none';
+      }
+      updateMontoSugerido();
+    });
+    pagoContainer.appendChild(cambioLabel);
+    pagoContainer.appendChild(cambioInput);
 
-    const fieldMonto = document.createElement('div');
-    fieldMonto.style.marginBottom = '10px';
-    const labelMonto = document.createElement('label');
-    labelMonto.textContent = 'Monto a cobrar';
-    labelMonto.style.display = 'block';
-    labelMonto.style.marginBottom = '4px';
-    const inputMonto = document.createElement('input');
-    inputMonto.type = 'number';
-    inputMonto.min = '0';
-    inputMonto.step = '0.01';
-    inputMonto.style.width = '100%';
-    inputMonto.style.padding = '8px';
-    inputMonto.style.borderRadius = '6px';
-    inputMonto.style.border = '1px solid #1f2937';
-    fieldMonto.appendChild(labelMonto);
-    fieldMonto.appendChild(inputMonto);
-    modal.appendChild(fieldMonto);
+    // Monto sugerido
+    const montoLabel = document.createElement('label');
+    montoLabel.textContent = 'Monto';
+    const montoInput = document.createElement('input');
+    montoInput.type = 'number';
+    montoInput.step = '0.01';
+    montoInput.min = '0';
+    montoInput.value = esVentaUsd ? saldoMoneda : saldoGs;
+    pagoContainer.appendChild(montoLabel);
+    pagoContainer.appendChild(montoInput);
 
-    const saldoInfo = document.createElement('div');
-    saldoInfo.style.fontSize = '12px';
-    saldoInfo.style.margin = '4px 0 12px';
-    saldoInfo.style.color = '#cbd5e1';
-    modal.appendChild(saldoInfo);
-
-    const fieldMetodo = document.createElement('div');
-    fieldMetodo.style.marginBottom = '12px';
-    const labelMetodo = document.createElement('label');
-    labelMetodo.textContent = 'Método de cobro';
-    labelMetodo.style.display = 'block';
-    labelMetodo.style.marginBottom = '4px';
-    const selectMetodo = document.createElement('select');
-    selectMetodo.style.width = '100%';
-    selectMetodo.style.padding = '8px';
-    selectMetodo.style.borderRadius = '6px';
-    selectMetodo.style.border = '1px solid #1f2937';
-    ['efectivo', 'transferencia', 'tarjeta', 'cheque', 'otros'].forEach((val) => {
+    // Método
+    const metodoLabel = document.createElement('label');
+    metodoLabel.textContent = 'Método';
+    const metodoSelect = document.createElement('select');
+    ['efectivo', 'transferencia', 'tarjeta'].forEach((val) => {
       const opt = document.createElement('option');
       opt.value = val;
       opt.textContent = val.charAt(0).toUpperCase() + val.slice(1);
-      selectMetodo.appendChild(opt);
+      metodoSelect.appendChild(opt);
     });
-    fieldMetodo.appendChild(labelMetodo);
-    fieldMetodo.appendChild(selectMetodo);
-    modal.appendChild(fieldMetodo);
+    pagoContainer.appendChild(metodoLabel);
+    pagoContainer.appendChild(metodoSelect);
 
+    // Función para actualizar el monto sugerido según cuotas seleccionadas
+    function updateMontoSugerido() {
+      if (cuotasPendientes.length && cuotasSeleccionadas.length) {
+        const total = cuotasPendientes
+          .filter((c) => cuotasSeleccionadas.includes(c.numero))
+          .reduce((acc, c) => acc + Number(c.monto || 0), 0);
+        montoInput.value = round(total, 2);
+        return;
+      }
+
+      montoInput.value = monedaSelect.value === 'USD' ? saldoMoneda : saldoGs;
+    }
+
+    // Acciones
     const actions = document.createElement('div');
     actions.style.display = 'flex';
     actions.style.justifyContent = 'flex-end';
@@ -357,53 +675,52 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta }) {
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
-    function updateSaldoInfo() {
-      const moneda = selectMoneda.value;
-      const cambio = Number(inputCambio.value);
-      const saldoEnMoneda = moneda === 'USD' && cambio > 0 ? round(saldo / cambio, 2) : saldo;
-      saldoInfo.textContent = `Saldo pendiente: ${formatCurrency(saldoEnMoneda, moneda)}`;
-      if (moneda === 'USD') {
-        saldoInfo.textContent += ` (equiv. Gs ${formatCurrency(saldo, 'PYG')})`;
-        fieldCambio.style.display = 'block';
-      } else {
-        fieldCambio.style.display = 'none';
-      }
-      if (!inputMonto.value) {
-        inputMonto.value = saldoEnMoneda;
-      }
-    }
-
-    selectMoneda.addEventListener('change', updateSaldoInfo);
-    updateSaldoInfo();
-
-    function close(result) {
-      overlay.remove();
-      resolve(result);
-    }
-
-    btnCancel.addEventListener('click', () => close(null));
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) close(null);
+    btnCancel.addEventListener('click', () => {
+      document.body.removeChild(overlay);
+      resolve(null);
     });
-
     btnOk.addEventListener('click', () => {
-      const monedaCobro = selectMoneda.value;
-      let tipoCambio = Number(inputCambio.value);
-      if (monedaCobro === 'USD') {
-        if (!Number.isFinite(tipoCambio) || tipoCambio <= 0) {
-          alert('Ingresá un tipo de cambio válido.');
+      // Validar monto y cuotas seleccionadas
+      let pagos = [];
+      if (cuotasPendientes.length) {
+        if (!cuotasSeleccionadas.length) {
+          alert('Seleccioná al menos una cuota a pagar.');
           return;
         }
+        const esUsd = monedaSelect.value === 'USD';
+        const total = cuotasPendientes
+          .filter((c) => cuotasSeleccionadas.includes(c.numero))
+          .reduce((acc, c) => acc + Number(c.monto || 0), 0);
+        let monto = Number(montoInput.value);
+        if (esUsd) {
+          if (Math.abs(monto - total) > 1) {
+            alert('El monto en USD debe coincidir con la suma de las cuotas seleccionadas.');
+            return;
+          }
+        } else {
+          if (Math.abs(monto - total) > 1) {
+            alert('El monto debe coincidir con el total de las cuotas seleccionadas.');
+            return;
+          }
+        }
+        pagos = [{
+          monedaCobro: esUsd ? 'USD' : 'PYG',
+          tipoCambio: esUsd ? Number(cambioInput.value) : undefined,
+          monto,
+          metodo: metodoSelect.value,
+          cuotas: cuotasSeleccionadas.slice() // Enviar las cuotas seleccionadas
+        }];
       } else {
-        tipoCambio = null;
+        pagos = [{
+          monedaCobro: (monedaVenta || 'PYG').toUpperCase(),
+          tipoCambio: (monedaVenta || '').toUpperCase() === 'USD' ? Number(cambioInput.value) : undefined,
+          monto: Number(montoInput.value),
+          metodo: metodoSelect.value,
+          cuotas: []
+        }];
       }
-      const monto = toNumber(inputMonto.value);
-      if (!Number.isFinite(monto) || monto <= 0) {
-        alert('Ingresá un monto válido.');
-        return;
-      }
-      const metodo = selectMetodo.value || 'efectivo';
-      close({ monedaCobro, tipoCambio, monto, metodo });
+      document.body.removeChild(overlay);
+      resolve({ pagos });
     });
   });
 }
@@ -508,14 +825,18 @@ export const ventasModule = {
       shouldRender: ({ item }) => {
         if (!item || item.deleted_at) return false;
         const estado = String(item.estado || '').toUpperCase();
-        const yaFacturada = Boolean(item.factura_digital?.id);
+        const yaFacturada = Boolean(item.factura_electronica?.id);
+        // Ocultar si es contado (no crédito) y no tiene factura electrónica (es ticket)
+        const rawCond = String(item.condicion_venta || item.condicion || '');
+        const isCredito = rawCond.toUpperCase().includes('CREDITO') || item.es_credito;
+        if (!isCredito && !yaFacturada) return false;
         return estado !== 'ANULADA' && estado !== 'FACTURADO' && !yaFacturada;
       },
       isDisabled: ({ item }) => {
         if (!item) return true;
         const estado = String(item.estado || '').toUpperCase();
         if (estado === 'ANULADA') return true;
-        if (item.factura_digital?.id) return true;
+        if (item.factura_electronica?.id) return true;
         return false;
       }
     },
@@ -523,8 +844,30 @@ export const ventasModule = {
       action: 'anular',
       label: 'Anular',
       className: 'btn danger small',
-      shouldRender: ({ item }) => !item.deleted_at,
-      isDisabled: ({ item }) => item.estado && item.estado.toUpperCase() === 'ANULADA'
+      shouldRender: ({ item }) => {
+        if (!item || item.deleted_at) return false;
+        if (item.factura_electronica?.id) return false;
+        return !getPrimaryNotaCredito(item);
+      },
+      isDisabled: ({ item }) => {
+        if (!item) return true;
+        if (item.estado && item.estado.toUpperCase() === 'ANULADA') return true;
+        if (item.factura_electronica?.id) return true;
+        return Boolean(getPrimaryNotaCredito(item));
+      }
+    },
+    {
+      action: 'nota_credito',
+      label: 'Nota crédito',
+      className: 'btn ghost small',
+      shouldRender: ({ item }) => {
+        if (!item || item.deleted_at) return false;
+        const estado = String(item.estado || '').toUpperCase();
+        if (estado === 'ANULADA' || estado === 'TICKET') return false;
+        if (!item.factura_electronica?.id) return false;
+        return !Array.isArray(item.notas_credito) || !item.notas_credito.length;
+      },
+      isDisabled: ({ item }) => !item || !item.factura_electronica?.id
     },
     {
       action: 'cobrar',
@@ -558,6 +901,14 @@ export const ventasModule = {
         showMessage('Esta venta ya fue anulada.', 'info');
         return;
       }
+      if (getPrimaryNotaCredito(item)) {
+        showMessage('Esta venta ya fue regularizada con nota de crédito.', 'info');
+        return;
+      }
+      if (item.factura_electronica?.id) {
+        showMessage('Las ventas facturadas no se anulan desde aquí. Debes emitir una nota de crédito.', 'warn');
+        return;
+      }
       const confirmation = window.confirm('¿Anular esta venta? Se repondrá el stock de los productos.');
       if (!confirmation) return;
       try {
@@ -567,6 +918,54 @@ export const ventasModule = {
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo anular la venta.', 'error');
+      }
+    },
+    async nota_credito({ id, item, showMessage, reload }) {
+      if (!item?.factura_electronica?.id) {
+        showMessage('La venta no tiene factura electrónica asociada.', 'warn');
+        return;
+      }
+      if (Array.isArray(item.notas_credito) && item.notas_credito.length) {
+        showMessage('La venta ya tiene una nota de crédito emitida.', 'info');
+        return;
+      }
+
+      const dialogResult = await openNotaCreditoDialog({ venta: item });
+      if (!dialogResult) return;
+
+      const motivoLimpio = String(dialogResult.motivo || '').trim();
+      if (motivoLimpio.length < 5) {
+        showMessage('El motivo debe tener al menos 5 caracteres.', 'warn');
+        return;
+      }
+
+      const confirmed = window.confirm(
+        dialogResult.tipo_ajuste === 'PARCIAL'
+          ? 'Se emitirá una nota de crédito parcial para los ítems seleccionados. ¿Deseas continuar?'
+          : 'Se emitirá una nota de crédito total para esta venta. Esta operación no debe repetirse. ¿Deseas continuar?'
+      );
+      if (!confirmed) return;
+
+      try {
+        const response = await request(`/ventas/${id}/nota-credito`, {
+          method: 'POST',
+          body: dialogResult.tipo_ajuste === 'PARCIAL'
+            ? { motivo: motivoLimpio, tipo_ajuste: 'PARCIAL', detalles: dialogResult.detalles }
+            : { motivo: motivoLimpio, tipo_ajuste: 'TOTAL' }
+        });
+        showMessage('Nota de crédito emitida correctamente.', 'success');
+        const pdfUrl = response?.pdf_url;
+        if (pdfUrl) {
+          const finalUrl = /^https?:\/\//i.test(pdfUrl) ? pdfUrl : urlWithSession(pdfUrl);
+          const win = window.open(finalUrl, '_blank');
+          if (!win) {
+            showMessage('La nota fue emitida. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
+          }
+        }
+        await reload();
+      } catch (error) {
+        console.error(error);
+        showMessage(error.message || 'No se pudo emitir la nota de crédito.', 'error');
       }
     },
     async cobrar({ item, showMessage, reload }) {
@@ -579,41 +978,52 @@ export const ventasModule = {
       const dialogResult = await openCobroDialog({
         saldo,
         monedaVenta: (item.moneda || 'PYG').toUpperCase(),
-        tipoCambioVenta: Number(item.tipo_cambio) || 0
+        tipoCambioVenta: Number(item.tipo_cambio) || 0,
+        venta: item
       });
 
-      if (!dialogResult) return;
+      if (!dialogResult || !Array.isArray(dialogResult.pagos) || !dialogResult.pagos.length) return;
 
-      const { monedaCobro, tipoCambio, monto, metodo } = dialogResult;
-      const montoGs = monedaCobro === 'USD' ? monto * tipoCambio : monto;
-      if (montoGs > saldo) {
-        const continuar = window.confirm('El monto supera el saldo pendiente. ¿Continuar de todas formas?');
-        if (!continuar) return;
-      }
       try {
-        const recibo = await request('/recibos', {
-          method: 'POST',
-          body: {
-            clienteId: item.clienteId,
-            metodo: metodo.trim(),
-            moneda: monedaCobro,
-            tipo_cambio: monedaCobro === 'USD' ? tipoCambio : undefined,
+        const payload = {
+          clienteId: item.clienteId,
+          pagos: dialogResult.pagos.map((pago) => ({
+            metodo: (pago.metodo || 'efectivo').trim(),
+            moneda: pago.monedaCobro || 'PYG',
+            tipo_cambio: pago.monedaCobro === 'USD' ? pago.tipoCambio : undefined,
             ventas: [
               {
                 ventaId: item.id,
-                monto
+                monto: pago.monto,
+                cuotas: Array.isArray(pago.cuotas) ? pago.cuotas : [] // Enviar cuotas seleccionadas
               }
             ]
+          }))
+        };
+
+        const reciboResponse = await request('/recibos', { method: 'POST', body: payload });
+        const recibos = Array.isArray(reciboResponse?.recibos)
+          ? reciboResponse.recibos
+          : reciboResponse && reciboResponse.id
+          ? [reciboResponse]
+          : [];
+
+        if (!recibos.length) {
+          showMessage('No se pudo registrar el recibo.', 'error');
+          return;
+        }
+
+        showMessage('Recibo registrado correctamente.', 'success');
+        recibos.forEach((rec) => {
+          if (rec?.id) {
+            const pdfUrl = urlWithSession(`/recibos/${rec.id}/pdf`);
+            const win = window.open(pdfUrl, '_blank');
+            if (!win) {
+              showMessage('Recibo generado. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
+            }
           }
         });
-        showMessage('Recibo registrado correctamente.', 'success');
-        if (recibo?.id) {
-          const pdfUrl = urlWithSession(`/recibos/${recibo.id}/pdf`);
-          const win = window.open(pdfUrl, '_blank');
-          if (!win) {
-            showMessage('Recibo generado. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
-          }
-        }
+
         await reload();
       } catch (error) {
         console.error(error);
@@ -649,14 +1059,54 @@ export const ventasModule = {
         if (item.deleted_at || (item.estado && item.estado.toUpperCase() === 'ANULADA')) {
           return '<span class="badge error">Anulada</span>';
         }
-        return `<span class="badge ok">${escapeHtml(item.estado || '-')}</span>`;
+        const estadoBase = `<span class="badge ok">${escapeHtml(item.estado || '-')}</span>`;
+        const notaBadge = renderNotaCreditoBadge(item);
+        return notaBadge ? `<div>${estadoBase} ${notaBadge}</div>` : estadoBase;
       }
     },
     {
       header: 'Condición',
       render: (item) => {
-        const isCredito = String(item.condicion_venta || item.condicion || '').toUpperCase().includes('CREDITO');
-        return isCredito ? '<span class="badge warn">Crédito</span>' : '<span class="badge ok">Contado</span>';
+        const raw = String(item.condicion_venta || item.condicion || '');
+        const isCredito = raw.toUpperCase().includes('CREDITO') || item.es_credito;
+        if (!isCredito) {
+          return '<span class="badge ok">Contado</span>';
+        }
+
+        const credito = item.credito || {};
+        let resumen = '';
+        let tooltip = '';
+        const monedaVenta = String(item.moneda || 'PYG').toUpperCase() === 'USD' ? 'USD' : 'PYG';
+        if (credito.tipo === 'CUOTAS') {
+          const n = credito.cantidad_cuotas || (Array.isArray(credito.cuotas) ? credito.cuotas.length : null);
+          let pagadas = 0;
+          let vencidas = 0;
+          const hoy = new Date();
+          if (Array.isArray(credito.cuotas)) {
+            pagadas = credito.cuotas.filter(c => c.pagada || c.estado === 'PAGADA').length;
+            vencidas = credito.cuotas.filter(c => !c.pagada && new Date(c.fecha_vencimiento) < hoy).length;
+            tooltip = credito.cuotas.map(c => `#${c.numero}: ${formatCurrency(c.monto, monedaVenta)} - ${formatDate(c.fecha_vencimiento)}${c.pagada ? ' (Pagada)' : (new Date(c.fecha_vencimiento) < hoy ? ' (Vencida)' : '')}`).join('\n');
+          }
+          resumen = `Cuotas: ${n || '-'} (${pagadas}/${n || '-'} pagadas)`;
+          if (vencidas > 0) {
+            resumen += ` <span class='badge error' title='Cuotas vencidas'>${vencidas} vencida${vencidas > 1 ? 's' : ''}</span>`;
+          }
+        } else if (credito.tipo === 'PLAZO' || item.fecha_vencimiento) {
+          resumen = `Plazo: ${formatDate(credito.fecha_vencimiento || item.fecha_vencimiento)}`;
+        }
+        const saldo = Number(item.saldo_pendiente ?? 0);
+        if (saldo > 0) {
+          if (monedaVenta === 'USD') {
+            const tipoCambio = Number(item.tipo_cambio || 0);
+            const saldoUsd = tipoCambio > 0 ? round(saldo / tipoCambio, 2) : 0;
+            resumen += ` · Saldo: ${formatCurrency(saldoUsd, 'USD')}`;
+            resumen += ` · ${formatCurrency(saldo, 'PYG')}`;
+          } else {
+            resumen += ` · Saldo: ${formatCurrency(saldo, 'PYG')}`;
+          }
+        }
+
+        return `<div><span class="badge warn" title="${escapeHtml(tooltip)}">Crédito</span> <span title="${escapeHtml(tooltip)}">${resumen}</span></div>`;
       }
     },
     {
@@ -694,15 +1144,29 @@ export const ventasModule = {
       render: (item) => `${Array.isArray(item.detalles) ? item.detalles.length : 0}`
     },
     {
-      header: 'Factura digital',
+      header: 'Factura electronica',
       render: (item) => {
         const isAnulada = item.deleted_at || (item.estado && item.estado.toUpperCase() === 'ANULADA');
         if (isAnulada) {
           return '<span class="badge error">Anulada</span>';
         }
-        const factura = item.factura_digital;
-        if (factura?.id) {
-          return `<button type="button" class="btn ghost small" data-docs-id="${item.id}">Ver PDF</button>`;
+        const notaCredito = Array.isArray(item.notas_credito) ? item.notas_credito[0] : null;
+        const esTicket = String(item.estado || '').toUpperCase() === 'TICKET';
+        const factura = item.factura_electronica;
+        if (esTicket) {
+          return `<button type="button" class="btn ghost small" data-docs-id="${item.id}" data-docs-type="ticket">Ver ticket</button>`;
+        }
+        if (factura?.id && factura?.pdf_path) {
+          const facturaButton = `<button type="button" class="btn ghost small" data-docs-id="${item.id}" data-docs-type="factura">Ver factura</button>`;
+          const notaButton = notaCredito?.pdf_path
+            ? ` <button type="button" class="btn ghost small" data-docs-id="${item.id}" data-docs-type="nota_credito">Ver NC</button>`
+            : notaCredito?.id
+              ? ` <span class="badge ${String(notaCredito.estado || '').toUpperCase() === 'RECHAZADO' ? 'error' : 'warn'}">${escapeHtml(getNotaCreditoLabel(notaCredito))}</span>`
+              : '';
+          return `${facturaButton}${notaButton}`;
+        }
+        if (notaCredito?.pdf_path) {
+          return `<button type="button" class="btn ghost small" data-docs-id="${item.id}" data-docs-type="nota_credito">Ver NC</button>`;
         }
         return '<span class="badge muted">Pendiente</span>';
       }
@@ -727,10 +1191,16 @@ export const ventasModule = {
     });
     const endpoint = query ? `${this.endpoint}?${query}` : this.endpoint;
     const response = await request(endpoint);
-    const data = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+    const data = Array.isArray(response?.data)
+      ? response.data
+      : Array.isArray(response?.ventas)
+        ? response.ventas
+        : Array.isArray(response)
+          ? response
+          : [];
     const sorted = data.slice().sort((a, b) => new Date(b.fecha || b.created_at || 0) - new Date(a.fecha || a.created_at || 0));
     ventasState.lastList = sorted;
-    ventasState.lastResumen = response?.meta?.resumen || null;
+    ventasState.lastResumen = response?.meta?.resumen || response?.resumen || null;
     const currentPage = Number(page ?? filters?.page) || 1;
     const currentPageSize = Number(pageSize ?? filters?.pageSize) || this.pageSize || 10;
     ventasState.currentPage = currentPage;
@@ -752,31 +1222,69 @@ export const ventasModule = {
   }
 };
 
-// Permite abrir factura digital y recibos asociados a la venta
+// Permite abrir factura electronica y recibos asociados a la venta
 if (typeof window !== 'undefined') {
-  window.__openDocsVenta = async function openDocsVenta(ventaId) {
+  window.__openDocsVenta = async function openDocsVenta(ventaId, tipo) {
     if (!ventaId) return;
     const venta = ventasState.lastList.find((v) => v.id === ventaId);
-    if (!venta || !venta.factura_digital?.id) return;
+    if (!venta) return;
 
-    // Abrir factura digital
-    const facturaUrl = urlWithSession(`/facturas-digitales/${encodeURIComponent(venta.factura_digital.id)}/pdf`);
-    const facturaWin = window.open(facturaUrl, '_blank');
-    if (!facturaWin) {
-      alert('No se pudo abrir la factura. Desbloquea ventanas emergentes.');
-    }
-
-    // Si es crédito o tiene saldo, abrir recibos asociados
-    try {
-      const recibos = await request(`/recibos?ventaId=${encodeURIComponent(ventaId)}`);
-      const lista = Array.isArray(recibos) ? recibos : Array.isArray(recibos?.data) ? recibos.data : [];
-      lista.forEach((rec) => {
-        if (rec?.id) {
-          window.open(urlWithSession(`/recibos/${encodeURIComponent(rec.id)}/pdf`), '_blank');
+    if (tipo === 'factura' && venta.factura_electronica?.id) {
+      const factura = venta.factura_electronica;
+      const pdfPath = factura?.pdf_path;
+      if (pdfPath && /^https?:\/\//i.test(pdfPath)) {
+        const win = window.open(pdfPath, '_blank');
+        if (!win) {
+          alert('No se pudo abrir la factura. Desbloquea ventanas emergentes.');
         }
-      });
-    } catch (err) {
-      console.error('[Recibos] No se pudieron abrir.', err);
+      } else {
+        const facturaUrl = pdfPath
+          ? urlWithSession(pdfPath)
+          : null;
+        if (!facturaUrl) {
+          alert('No se encontró un PDF de factura disponible.');
+          return;
+        }
+        const facturaWin = window.open(facturaUrl, '_blank');
+        if (!facturaWin) {
+          alert('No se pudo abrir la factura. Desbloquea ventanas emergentes.');
+        }
+      }
+      // Si es crédito o tiene saldo, abrir recibos asociados
+      try {
+        const recibos = await request(`/recibos?ventaId=${encodeURIComponent(ventaId)}`);
+        const lista = Array.isArray(recibos) ? recibos : Array.isArray(recibos?.data) ? recibos.data : [];
+        lista.forEach((rec) => {
+          if (rec?.id) {
+            window.open(urlWithSession(`/recibos/${encodeURIComponent(rec.id)}/pdf`), '_blank');
+          }
+        });
+      } catch (err) {
+        console.error('[Recibos] No se pudieron abrir.', err);
+      }
+      return;
+    }
+    if (tipo === 'ticket') {
+      const ticketUrl = urlWithSession(`/ventas/${encodeURIComponent(venta.id)}/ticket/pdf`);
+      const ticketWin = window.open(ticketUrl, '_blank');
+      if (!ticketWin) {
+        alert('No se pudo abrir el ticket. Desbloquea ventanas emergentes.');
+      }
+      return;
+    }
+    if (tipo === 'nota_credito') {
+      const notaCredito = Array.isArray(venta.notas_credito) ? venta.notas_credito[0] : null;
+      const pdfPath = notaCredito?.pdf_path;
+      if (!pdfPath) {
+        alert('La nota de crédito no tiene PDF disponible todavía.');
+        return;
+      }
+      const finalUrl = /^https?:\/\//i.test(pdfPath) ? pdfPath : urlWithSession(pdfPath);
+      const noteWin = window.open(finalUrl, '_blank');
+      if (!noteWin) {
+        alert('No se pudo abrir la nota de crédito. Desbloquea ventanas emergentes.');
+      }
+      return;
     }
   };
 
@@ -785,7 +1293,8 @@ if (typeof window !== 'undefined') {
     if (target && target.matches('button[data-docs-id]')) {
       event.preventDefault();
       const ventaId = target.getAttribute('data-docs-id');
-      window.__openDocsVenta(ventaId);
+      const tipo = target.getAttribute('data-docs-type');
+      window.__openDocsVenta(ventaId, tipo);
     }
   });
 }

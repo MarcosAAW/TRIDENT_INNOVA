@@ -109,6 +109,7 @@ export function sanitizeProductoPayload(payload) {
   });
 
   if (!body.descripcion) delete body.descripcion;
+  if (!body.codigo_dji) delete body.codigo_dji;
   if (!body.unidad) delete body.unidad;
   if (!body.codigo_barra) delete body.codigo_barra;
   if (!body.imagen_url) delete body.imagen_url;

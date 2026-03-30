@@ -1,0 +1,2 @@
+ALTER INDEX "nota_credito_electronica_secuencia_unica"
+RENAME TO "nota_credito_electronica_timbrado_establecimiento_punto_exp_key";

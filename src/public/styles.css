@@ -411,6 +411,30 @@ button {
   grid-template-columns: 1fr;
 }
 
+.panel-body.form-focus-mode {
+  grid-template-columns: 1fr;
+}
+
+.panel-body.presupuestos {
+  gap: clamp(1.2rem, 3vw, 1.8rem);
+}
+
+.panel-body.presupuestos:not(.presupuesto-expanded) {
+  grid-template-columns: minmax(360px, 430px) minmax(0, 1fr);
+}
+
+.panel-body.presupuestos.is-form-collapsed {
+  grid-template-columns: 1fr;
+}
+
+.panel-body.presupuesto-expanded {
+  grid-template-columns: 1fr;
+}
+
+.panel-body.nota-pedido-expanded {
+  grid-template-columns: 1fr;
+}
+
 .panel-body.is-form-collapsed .form-card {
   display: none;
 }
@@ -433,16 +457,48 @@ button {
   font-size: 1.35rem;
 }
 
+.form-card.presupuestos-form {
+  max-width: min(1040px, 100%);
+  margin: 0 auto;
+}
+
+.panel-body.presupuestos:not(.presupuesto-expanded) .form-card.presupuestos-form {
+  max-width: 100%;
+  margin: 0;
+}
+
+.form-card.notas-pedido-form {
+  max-width: min(1180px, 100%);
+  margin: 0 auto;
+}
+
 .form-fields {
   display: grid;
   gap: var(--gap-sm);
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
+.form-card.presupuestos-form .form-fields {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.form-card.notas-pedido-form .form-fields {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: start;
+}
+
 .form-field {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+}
+
+.form-field.span-2 {
+  grid-column: span 2;
+}
+
+.form-field.full-span {
+  grid-column: 1 / -1;
 }
 
 .form-field > span {
@@ -484,6 +540,184 @@ button {
 .form-field textarea {
   resize: vertical;
   min-height: 100px;
+}
+
+.items-builder {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.items-builder-row {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: minmax(260px, 2.2fr) minmax(0, 1fr) minmax(120px, 1fr) minmax(120px, 0.9fr) auto;
+  align-items: center;
+}
+
+.items-builder-row--secondary {
+  grid-template-columns: minmax(140px, 0.7fr) repeat(4, minmax(0, 1fr));
+  margin-top: -0.3rem;
+}
+
+.items-builder-row input,
+.items-builder-row select {
+  width: 100%;
+}
+
+.items-builder__search {
+  position: relative;
+}
+
+.items-builder__suggestions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  background: linear-gradient(145deg, rgba(10, 15, 30, 0.98), rgba(16, 24, 46, 0.97));
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  display: none;
+}
+
+.suggestion-btn {
+  width: 100%;
+  display: block;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.suggestion-btn:hover,
+.suggestion-btn:focus-visible {
+  background: rgba(249, 115, 22, 0.08);
+  border-color: rgba(249, 115, 22, 0.4);
+  outline: none;
+}
+
+.cliente-search {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.cliente-search__suggestions {
+  margin-top: 0.1rem;
+}
+
+
+.items-list {
+  background: rgba(8, 16, 32, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.items-table {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.items-row {
+  display: grid;
+  grid-template-columns: 2.4fr 0.9fr 1fr 0.9fr auto;
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.4rem 0.35rem;
+  border-radius: 10px;
+}
+
+.items-row.header {
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.items-row:not(.header):hover {
+  background: rgba(249, 115, 22, 0.06);
+}
+
+.nota-pedido-estado-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
+}
+
+.nota-pedido-estado-cell .btn {
+  white-space: nowrap;
+}
+
+.notas-pedido-form .form-field.span-2 {
+  grid-column: span 2;
+}
+
+.notas-pedido-builder {
+  gap: 0.9rem;
+}
+
+.notas-pedido-builder__top {
+  grid-template-columns: minmax(320px, 2.4fr) minmax(170px, 1fr) 120px minmax(220px, 1.2fr) auto;
+}
+
+.notas-pedido-builder__bottom {
+  grid-template-columns: minmax(280px, 1.1fr) minmax(320px, 1.4fr);
+  margin-top: 0;
+}
+
+.notas-pedido-builder__list {
+  overflow-x: auto;
+}
+
+.notas-pedido-builder .items-row {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(280px, 2fr) 90px minmax(240px, 1.5fr) auto;
+}
+
+@media (max-width: 1180px) {
+  .form-card.notas-pedido-form .form-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .panel-body.presupuestos:not(.presupuesto-expanded) .form-card.presupuestos-form .form-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-body.presupuestos:not(.presupuesto-expanded) .items-builder-row,
+  .panel-body.presupuestos:not(.presupuesto-expanded) .items-builder-row--secondary,
+  .panel-body.presupuestos:not(.presupuesto-expanded) .items-row {
+    grid-template-columns: 1fr;
+  }
+
+  .notas-pedido-builder__top {
+    grid-template-columns: minmax(260px, 1.8fr) minmax(150px, 1fr) 100px minmax(180px, 1fr) auto;
+  }
+}
+
+@media (max-width: 860px) {
+  .form-card.notas-pedido-form .form-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .notas-pedido-form .form-field.span-2 {
+    grid-column: span 1;
+  }
+
+  .notas-pedido-builder__top,
+  .notas-pedido-builder__bottom,
+  .notas-pedido-builder .items-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .caja-resumen {
@@ -1292,6 +1526,68 @@ tbody button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
+}
+
+.pos-cuotas-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.pos-cuotas-inline input {
+  width: 120px;
+}
+
+.pos-cuotas-list {
+  margin-top: 0.35rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: var(--radius-md);
+  background: rgba(8, 16, 32, 0.45);
+  overflow: auto;
+}
+
+.pos-cuotas-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 360px;
+}
+
+.pos-cuotas-table th,
+.pos-cuotas-table td {
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.pos-cuotas-table th {
+  font-weight: 700;
+  color: rgba(226, 232, 240, 0.92);
+  background: rgba(15, 23, 42, 0.66);
+  position: sticky;
+  top: 0;
+}
+
+.pos-cuotas-table td:first-child {
+  width: 72px;
+  text-align: center;
+  color: rgba(226, 232, 240, 0.88);
+  font-weight: 600;
+}
+
+.pos-cuotas-table input[type='number'],
+.pos-cuotas-table input[type='date'] {
+  width: 100%;
+  background: rgba(8, 16, 32, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.45rem;
+  color: #fff;
+}
+
+.pos-cuotas-table input:focus {
+  outline: 1px solid rgba(59, 130, 246, 0.65);
+  border-color: rgba(59, 130, 246, 0.65);
 }
 
 .pos-summary-totals {

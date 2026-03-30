@@ -42,14 +42,14 @@ Notas sobre facturación SET:
 - Catálogo geográfico oficial: ejecutar `npm run sifen:catalog` para convertir el XLSX descargado desde e-Kuatia a `docs/sifen/codigos-geograficos.json`. Utilizado por `src/services/sifen/geoCodes.js` para mapear automáticamente departamento/distrito/ciudad en el XML.
 - Próximos pasos: agregar eventos (cancelación/inutilización), programar consultas periódicas al estado del CDC y exponer en el panel botones para reintentar el envío o descargar el XML firmado.
 
-## Factura digital temporal (PDF)
-- Mientras el cliente completa la certificación SIFEN se agregó un flujo de **factura digital PDF** que replica el talonario físico con timbrado vigente.
+## Factura digital legacy (PDF)
+- Este flujo quedó sólo como compatibilidad para comprobantes históricos previos a FactPy; ya no forma parte del circuito normal de ventas.
 - Nuevo modelo `FacturaDigital` en Prisma/SQL para persistir numeración, totales, QR/código de control y paths de PDFs (`storage/facturas_digitales`).
 - Servicio central: `src/services/facturaDigital/index.js` calcula la próxima secuencia por timbrado/punto, valida vigencia del timbrado, genera el PDF (template `pdfTemplate.js`) y guarda hash SHA256 para control de integridad.
 - Configuración editable en `src/config/empresa.js` (datos corporativos y timbrado). Variables `.env`: `FACTURA_DIGITAL_TIMBRADO`, `FACTURA_DIGITAL_ESTABLECIMIENTO`, `FACTURA_DIGITAL_PUNTO`, `FACTURA_DIGITAL_VIGENCIA_INICIO`, `FACTURA_DIGITAL_VIGENCIA_FIN`.
 - Para el envío automático se creó `src/services/email/facturaDigitalMailer.js` (usa `nodemailer`). Configurar `.env` con `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `FACTURA_DIGITAL_BASE_URL`.
 - Endpoints nuevos: `GET /facturas-digitales/:id/pdf` (descarga autenticada) y `POST /facturas-digitales/:id/enviar` (reenviar correo opcionalmente indicando `destinatario`).
-- El endpoint `POST /ventas/:id/facturar` valida que el timbrado esté vigente, genera la factura digital y, si hay correo + SMTP configurado, dispara el envío automático. A falta de SMTP queda en estado `PENDIENTE` y puede reenviarse manualmente.
+- En producción la ruta legacy no se monta por defecto; para reactivarla explícitamente usar `FACTURA_DIGITAL_LEGACY_ENABLED=true`.
 - Pendientes: dashboard para ver estados/envíos, colas de reintento y respaldo automatizado de `storage/facturas_digitales`.
 
 Si quieres que automáticemente genere `init.sql` o el scaffold (NestJS + Prisma + endpoints básicos), indícalo y lo creo.

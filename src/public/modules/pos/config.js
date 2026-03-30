@@ -1,16 +1,86 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency, formatNumber, formatDate } from '../common/format.js';
 import { loadSession } from '../auth/session.js';
+import { resolveProductUnitPricing } from '../common/pricing.js';
 
 const IVA_OPTIONS = [
   { value: 10, label: 'IVA 10%' },
-  { value: 5, label: 'IVA 5%' }
+  { value: 5, label: 'IVA 5%' },
+  { value: 0, label: 'Exentas (0%)' }
 ];
 
 const IVA_DIVISOR = {
   10: 11,
-  5: 21
+  5: 21,
+  0: null
 };
+
+function getIvaLabel(value) {
+  const numeric = Number(value);
+  if (numeric === 0) return 'IVA Exentas (0%)';
+  if (!Number.isFinite(numeric)) return 'IVA 10%';
+  return `IVA ${numeric}%`;
+}
+
+function numberToWordsEs(num) {
+  const units = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve'];
+  const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+  const hundreds = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+
+  const toWordsBelowThousand = (n) => {
+    if (n === 0) return '';
+    if (n < 10) return units[n];
+    if (n < 20) return teens[n - 10];
+    if (n < 100) {
+      const ten = Math.trunc(n / 10);
+      const unit = n % 10;
+      if (n === 20) return 'veinte';
+      const suffix = unit ? ` y ${units[unit]}` : '';
+      return `${tens[ten]}${suffix}`;
+    }
+    if (n === 100) return 'cien';
+    const hundred = Math.trunc(n / 100);
+    const remainder = n % 100;
+    const rest = remainder ? ` ${toWordsBelowThousand(remainder)}` : '';
+    return `${hundreds[hundred]}${rest}`;
+  };
+
+  const toWords = (n) => {
+    if (n === 0) return 'cero';
+    let result = '';
+    const billions = Math.trunc(n / 1_000_000_000);
+    const millions = Math.trunc((n % 1_000_000_000) / 1_000_000);
+    const thousands = Math.trunc((n % 1_000_000) / 1000);
+    const remainder = n % 1000;
+
+    if (billions) {
+      result += `${toWords(billions)} mil millones`;
+    }
+    if (millions) {
+      result += `${result ? ' ' : ''}${millions === 1 ? 'un millon' : `${toWords(millions)} millones`}`;
+    }
+    if (thousands) {
+      result += `${result ? ' ' : ''}${thousands === 1 ? 'mil' : `${toWordsBelowThousand(thousands)} mil`}`;
+    }
+    if (remainder) {
+      result += `${result ? ' ' : ''}${toWordsBelowThousand(remainder)}`;
+    }
+    return result.trim();
+  };
+
+  return toWords(Math.trunc(Math.abs(num)));
+}
+
+function montoEnLetras(monto, moneda) {
+  const safeMonto = Number.isFinite(Number(monto)) ? Math.abs(Number(monto)) : 0;
+  const entero = Math.trunc(safeMonto);
+  const centavos = Math.round((safeMonto - entero) * 100);
+  const monedaNombre = String(moneda || 'PYG').toUpperCase() === 'USD' ? 'dolares' : 'guaranies';
+  const textoNumero = numberToWordsEs(entero);
+  const textoCentavos = centavos.toString().padStart(2, '0');
+  return `${textoNumero} ${monedaNombre} con ${textoCentavos}/100`;
+}
 
 const posState = {
   cliente: null,
@@ -21,8 +91,12 @@ const posState = {
   tipoCambio: null,
   condicionVenta: 'CONTADO',
   fechaVencimiento: null,
+  creditTipo: 'PLAZO',
+  cantidadCuotas: 3,
+  cuotas: [],
   comprobante: 'FACTURA',
   lastSale: null,
+  lastCreditoConfig: null,
   loading: false,
   productSearch: {
     term: '',
@@ -108,9 +182,24 @@ function ensureDom(container) {
             </select>
           </div>
           <div class="pos-summary-row" id="pos-credit-row" hidden>
-            <label for="pos-fecha-venc">Vencimiento (crédito)</label>
+            <label for="pos-credit-type">Modalidad crédito</label>
+            <select id="pos-credit-type">
+              <option value="PLAZO">Plazo</option>
+              <option value="CUOTAS">Cuotas</option>
+            </select>
+          </div>
+          <div class="pos-summary-row" id="pos-credit-plazo-row" hidden>
+            <label for="pos-fecha-venc">Vencimiento (plazo)</label>
             <input type="date" id="pos-fecha-venc">
           </div>
+          <div class="pos-summary-row" id="pos-credit-cuotas-row" hidden>
+            <label for="pos-cantidad-cuotas">Cuotas</label>
+            <div class="pos-cuotas-inline">
+              <input type="number" id="pos-cantidad-cuotas" min="1" step="1" value="3">
+              <button type="button" class="btn ghost small" id="pos-cuotas-generar">Generar plan</button>
+            </div>
+          </div>
+          <div class="pos-cuotas-list" id="pos-cuotas-list" hidden></div>
           <div class="pos-summary-totals" id="pos-summary-totals"></div>
         </div>
         <div class="pos-actions">
@@ -157,6 +246,12 @@ function ensureDom(container) {
     condicionSelect: layout?.querySelector('#pos-condicion') || null,
     comprobanteSelect: layout?.querySelector('#pos-comprobante') || null,
     creditRow: layout?.querySelector('#pos-credit-row') || null,
+    creditTypeSelect: layout?.querySelector('#pos-credit-type') || null,
+    creditPlazoRow: layout?.querySelector('#pos-credit-plazo-row') || null,
+    creditCuotasRow: layout?.querySelector('#pos-credit-cuotas-row') || null,
+    cantidadCuotasInput: layout?.querySelector('#pos-cantidad-cuotas') || null,
+    cuotasList: layout?.querySelector('#pos-cuotas-list') || null,
+    cuotasGenerateButton: layout?.querySelector('#pos-cuotas-generar') || null,
     fechaVencInput: layout?.querySelector('#pos-fecha-venc') || null,
     feedback: layout?.querySelector('#pos-feedback') || null,
     confirmButton: layout?.querySelector('#pos-confirm') || null,
@@ -257,64 +352,64 @@ function attachEventListeners() {
 
   if (posDom.clientResults) {
     posDom.clientResults.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-pos-select-client]');
-    if (!button) return;
-    const clientId = button.dataset.posSelectClient;
-    const cliente = posState.clientSearch.results.find((item) => item.id === clientId);
-    if (cliente) {
-      posState.cliente = cliente;
+      const button = event.target.closest('[data-pos-select-client]');
+      if (!button) return;
+      const clientId = button.dataset.posSelectClient;
+      const client = posState.clientSearch.results.find((item) => item.id === clientId);
+      if (!client) return;
+      posState.cliente = client;
       posState.clientSearch.results = [];
-      posDom.clientSearchInput.value = '';
       renderClientSection();
       renderClientResults();
       focusProductSearch();
-    }
-  });
+    });
   }
 
   if (posDom.clientClearButton) {
     posDom.clientClearButton.addEventListener('click', () => {
       posState.cliente = null;
       renderClientSection();
+      clearClientSearch();
+      focusClientSearch();
     });
   }
 
   if (posDom.productResults) {
     posDom.productResults.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-pos-add-product]');
-    if (!button) return;
-    const productId = button.dataset.posAddProduct;
-    const product = posState.productSearch.results.find((item) => item.id === productId);
-    if (product) {
-      addProductToCart(product);
-    }
-  });
+      const button = event.target.closest('[data-pos-add-product]');
+      if (!button) return;
+      const productId = button.dataset.posAddProduct;
+      const product = posState.productSearch.results.find((item) => item.id === productId);
+      if (product) {
+        addProductToCart(product);
+      }
+    });
   }
 
   if (posDom.cartList) {
     posDom.cartList.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-pos-cart-action]');
-    if (!button) return;
-    const productId = button.dataset.posCartId;
-    const action = button.dataset.posCartAction;
-    if (action === 'remove') {
-      removeProductFromCart(productId);
-    }
-    if (action === 'increment') {
-      adjustCartQuantity(productId, 1);
-    }
-    if (action === 'decrement') {
-      adjustCartQuantity(productId, -1);
-    }
-  });
+      const button = event.target.closest('[data-pos-cart-action]');
+      if (!button) return;
+      const productId = button.dataset.posCartId;
+      const action = button.dataset.posCartAction;
+      if (action === 'remove') {
+        removeProductFromCart(productId);
+      }
+      if (action === 'increment') {
+        adjustCartQuantity(productId, 1);
+      }
+      if (action === 'decrement') {
+        adjustCartQuantity(productId, -1);
+      }
+    });
 
     posDom.cartList.addEventListener('input', (event) => {
-    const input = event.target.closest('input[data-pos-cart-qty]');
-    if (!input) return;
-    const productId = input.dataset.posCartId;
-    const value = Number(input.value);
-    setCartQuantity(productId, value);
-  });
+      const input = event.target.closest('input[data-pos-cart-qty]');
+      if (!input) return;
+      const productId = input.dataset.posCartId;
+      const value = Number(input.value);
+      setCartQuantity(productId, value);
+    });
   }
 
   if (posDom.discountInput) {
@@ -351,6 +446,7 @@ function attachEventListeners() {
       if (posDom.discountUnit) {
         posDom.discountUnit.textContent = posState.moneda === 'USD' ? 'USD' : 'Gs.';
       }
+      renderCart();
       renderSummary();
     });
   }
@@ -376,6 +472,7 @@ function attachEventListeners() {
       } else {
         posState.tipoCambio = null;
       }
+      renderCart();
       renderSummary();
     });
   }
@@ -385,6 +482,56 @@ function attachEventListeners() {
       posState.condicionVenta = event.target.value === 'CREDITO' ? 'CREDITO' : 'CONTADO';
       toggleCreditFields();
       renderSummary();
+    });
+  }
+
+  if (posDom.creditTypeSelect) {
+    posDom.creditTypeSelect.addEventListener('change', (event) => {
+      const next = event.target.value === 'CUOTAS' ? 'CUOTAS' : 'PLAZO';
+      posState.creditTipo = next;
+      if (next === 'PLAZO') {
+        posState.cuotas = [];
+        posState.cantidadCuotas = 3;
+      } else {
+        const totals = computeTotals();
+        if (totals.total > 0) {
+          generateCuotasPlan();
+        }
+      }
+      toggleCreditFields();
+      renderSummary();
+    });
+  }
+
+  if (posDom.cantidadCuotasInput) {
+    posDom.cantidadCuotasInput.addEventListener('input', (event) => {
+      const value = Math.max(1, Math.round(Number(event.target.value) || 1));
+      posState.cantidadCuotas = value;
+    });
+  }
+
+  if (posDom.cuotasGenerateButton) {
+    posDom.cuotasGenerateButton.addEventListener('click', () => {
+      generateCuotasPlan();
+      renderSummary();
+    });
+  }
+
+  if (posDom.cuotasList) {
+    posDom.cuotasList.addEventListener('input', (event) => {
+      const row = event.target.closest('[data-pos-cuota-idx]');
+      if (!row) return;
+      const idx = Number(row.dataset.posCuotaIdx);
+      if (!Number.isFinite(idx) || idx < 0) return;
+      const cuota = posState.cuotas[idx];
+      if (!cuota) return;
+      if (event.target.matches('input[data-pos-cuota-monto]')) {
+        const monto = round2(event.target.value);
+        cuota.monto = monto;
+      }
+      if (event.target.matches('input[data-pos-cuota-fecha]')) {
+        cuota.fecha_vencimiento = event.target.value || '';
+      }
     });
   }
 
@@ -454,8 +601,8 @@ async function fetchProducts(term) {
       nombre: item.nombre,
       sku: item.sku,
       precio_venta: Number(item.precio_venta) || 0,
+      precio_venta_original: item.precio_venta_original != null ? Number(item.precio_venta_original) : null,
       stock_actual: Number(item.stock_actual) || 0,
-      minimo_stock: Number(item.minimo_stock) || 0,
       moneda_precio_venta: item.moneda_precio_venta || 'PYG'
     }));
     if (token !== productSearchToken) return;
@@ -469,6 +616,28 @@ async function fetchProducts(term) {
       renderProductResults();
     }
   }
+}
+
+function getPosProductPricing(product, options = {}) {
+  return resolveProductUnitPricing(product, {
+    targetCurrency: options.targetCurrency || posState.moneda,
+    exchangeRate: options.exchangeRate !== undefined ? options.exchangeRate : posState.tipoCambio
+  });
+}
+
+function getCartItemPricing(item) {
+  return getPosProductPricing({
+    precio_venta: item.precioGs,
+    precio_venta_original: item.precioOriginalUsd,
+    moneda_precio_venta: item.monedaPrecioVenta
+  });
+}
+
+function renderCatalogPrice(product) {
+  if (String(product?.moneda_precio_venta || 'PYG').toUpperCase() === 'USD' && Number(product?.precio_venta_original) > 0) {
+    return `<div>${formatCurrency(product.precio_venta_original, 'USD')}</div><small>${formatCurrency(product.precio_venta, 'PYG')}</small>`;
+  }
+  return formatCurrency(product?.precio_venta || 0, 'PYG');
 }
 
 function scheduleClientSearch(term) {
@@ -535,7 +704,9 @@ function addProductToCart(product) {
       productoId: product.id,
       nombre: product.nombre,
       sku: product.sku,
-      precio: Number(product.precio_venta) || 0,
+      precioGs: Number(product.precio_venta) || 0,
+      precioOriginalUsd: product.precio_venta_original != null ? Number(product.precio_venta_original) : null,
+      monedaPrecioVenta: product.moneda_precio_venta || 'PYG',
       stock: maxStock,
       cantidad: 1
     });
@@ -576,19 +747,31 @@ function setCartQuantity(productId, quantity) {
 
 function clearCart() {
   posState.cart = [];
+  posState.cliente = null;
   posState.descuento = 0;
   posState.ivaPorcentaje = 10;
   posState.moneda = 'PYG';
   posState.tipoCambio = null;
   posState.condicionVenta = 'CONTADO';
   posState.fechaVencimiento = null;
+  posState.creditTipo = 'PLAZO';
+  posState.cantidadCuotas = 3;
+  posState.cuotas = [];
   posState.lastSale = null;
+  posState.lastCreditoConfig = null;
   if (posDom.discountInput) posDom.discountInput.value = '';
   if (posDom.ivaSelect) posDom.ivaSelect.value = '10';
   if (posDom.condicionSelect) posDom.condicionSelect.value = 'CONTADO';
+  if (posDom.comprobanteSelect) posDom.comprobanteSelect.value = 'FACTURA';
   if (posDom.fechaVencInput) posDom.fechaVencInput.value = '';
+  if (posDom.creditTypeSelect) posDom.creditTypeSelect.value = 'PLAZO';
+  if (posDom.cantidadCuotasInput) posDom.cantidadCuotasInput.value = 3;
+  if (posDom.cuotasList) posDom.cuotasList.innerHTML = '';
+  clearClientSearch();
   renderCurrencyControls();
   toggleCreditFields();
+  renderClientSection();
+  renderClientResults();
   renderCart();
   renderSummary();
   renderLastSale();
@@ -680,7 +863,7 @@ function renderProductResults() {
                 <small>SKU: ${escapeHtml(item.sku || '-')}</small>
                 <small>Stock: ${formatNumber(item.stock_actual, 0)}</small>
               </div>
-              <div class="price">${formatCurrency(item.precio_venta, item.moneda_precio_venta || 'PYG')}</div>
+              <div class="price">${renderCatalogPrice(item)}</div>
               <button type="button" class="btn ghost small" data-pos-add-product="${item.id}">Agregar</button>
             </li>
           `
@@ -702,8 +885,16 @@ function renderCart() {
       ${posState.cart
         .map(
           (item) => {
-            const subtotal = item.cantidad * item.precio;
+            const pricing = getCartItemPricing(item);
+            const subtotal = round2(item.cantidad * pricing.unitGs);
             const stockLabel = item.stock ? `${formatNumber(item.stock, 0)} en stock` : 'Sin stock disponible';
+            const isUsdSale = posState.moneda === 'USD' && Number(posState.tipoCambio) > 0;
+            const amountLabel = isUsdSale && pricing.unitCurrency != null
+              ? formatCurrency(pricing.unitCurrency, 'USD')
+              : formatCurrency(pricing.unitGs, 'PYG');
+            const subtotalLabel = isUsdSale && pricing.unitCurrency != null
+              ? `${formatCurrency(round2(pricing.unitCurrency * item.cantidad), 'USD')} · ${formatCurrency(subtotal, 'PYG')}`
+              : formatCurrency(subtotal, 'PYG');
             return `
               <li>
                 <div class="meta">
@@ -717,8 +908,8 @@ function renderCart() {
                     <button type="button" class="btn ghost small" data-pos-cart-action="increment" data-pos-cart-id="${item.productoId}">+</button>
                   </div>
                   <div class="amount">
-                    <span>${formatCurrency(item.precio, 'PYG')}</span>
-                    <small>Subtotal: ${formatCurrency(subtotal, 'PYG')}</small>
+                    <span>${amountLabel}</span>
+                    <small>Subtotal: ${subtotalLabel}</small>
                   </div>
                   <button type="button" class="btn danger small" data-pos-cart-action="remove" data-pos-cart-id="${item.productoId}">Quitar</button>
                 </div>
@@ -733,27 +924,82 @@ function renderCart() {
 }
 
 function computeTotals() {
-  const subtotal = posState.cart.reduce((acc, item) => acc + item.precio * item.cantidad, 0);
   const requiereCambio = posState.moneda === 'USD';
   const tipoCambioValido = Number(posState.tipoCambio) > 0;
   const tc = requiereCambio && tipoCambioValido ? Number(posState.tipoCambio) : null;
+  let subtotal = 0;
+  let subtotalMoneda = 0;
+
+  posState.cart.forEach((item) => {
+    const pricing = getCartItemPricing(item);
+    subtotal += pricing.unitGs * item.cantidad;
+    if (requiereCambio && tc && pricing.unitCurrency != null) {
+      subtotalMoneda += pricing.unitCurrency * item.cantidad;
+    }
+  });
+
+  subtotal = round2(subtotal);
+  subtotalMoneda = round2(subtotalMoneda);
 
   const descuentoEntrada = Math.max(posState.descuento || 0, 0);
-  const descuentoGs = tc ? Math.min(descuentoEntrada * tc, subtotal) : Math.min(descuentoEntrada, subtotal);
-  const descuentoMoneda = tc ? descuentoGs / tc : descuentoGs;
+  const descuentoMoneda = tc ? Math.min(descuentoEntrada, subtotalMoneda) : Math.min(descuentoEntrada, subtotal);
+  const descuentoGs = tc ? round2(descuentoMoneda * tc) : descuentoMoneda;
 
   const base = Math.max(subtotal - descuentoGs, 0);
-  const divisor = IVA_DIVISOR[posState.ivaPorcentaje] || IVA_DIVISOR[10];
-  const ivaCalculado = base > 0 ? base / divisor : 0;
+  const divisor = IVA_DIVISOR[posState.ivaPorcentaje];
+  const ivaCalculado = divisor && base > 0 ? base / divisor : 0;
   const total = base;
   return {
     subtotal,
+    subtotalMoneda,
     descuento: descuentoGs,
     descuentoMoneda,
     base,
     ivaCalculado,
-    total
+    total,
+    totalMoneda: tc ? round2(Math.max(subtotalMoneda - descuentoMoneda, 0)) : null
   };
+}
+
+function toDateInputValue(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const iso = d.toISOString();
+  return iso.slice(0, 10);
+}
+
+function addDays(date, days) {
+  const base = date instanceof Date ? date : new Date(date);
+  const result = new Date(base.getTime());
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function spreadCuotas(total, count) {
+  const n = Math.max(1, Math.round(count) || 1);
+  const totalCents = Math.round(total * 100);
+  const baseCents = Math.round(totalCents / n);
+  const cuotas = [];
+  let remainingCents = totalCents;
+  const start = new Date();
+  for (let i = 0; i < n; i += 1) {
+    const isLast = i === n - 1;
+    const montoCents = isLast ? remainingCents : baseCents;
+    const monto = montoCents / 100;
+    remainingCents -= montoCents;
+    const fecha = addDays(start, 30 * (i + 1));
+    cuotas.push({
+      numero: i + 1,
+      monto: Math.round(monto * 100) / 100,
+      fecha_vencimiento: toDateInputValue(fecha)
+    });
+  }
+  return cuotas;
+}
+
+function round2(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
 }
 
 function renderCurrencyControls() {
@@ -776,52 +1022,28 @@ function renderCurrencyControls() {
   }
 }
 
-function toggleCreditFields() {
-  if (!posDom) return;
-  if (posDom.comprobanteSelect) {
-    posDom.comprobanteSelect.value = posState.comprobante;
-  }
-  const forceContado = posState.comprobante === 'TICKET';
-  if (forceContado) {
-    posState.condicionVenta = 'CONTADO';
-    posState.fechaVencimiento = null;
-  }
-  const isCredito = posState.condicionVenta === 'CREDITO';
-  if (posDom.condicionSelect) {
-    posDom.condicionSelect.value = posState.condicionVenta;
-    posDom.condicionSelect.disabled = forceContado;
-  }
-  if (posDom.creditRow) {
-    posDom.creditRow.hidden = !isCredito;
-  }
-  if (!isCredito) {
-    posState.fechaVencimiento = null;
-    if (posDom.fechaVencInput) {
-      posDom.fechaVencInput.value = '';
-    }
-  }
-}
-
 function renderSummary() {
   if (!posDom || !posDom.summaryTotals) return;
+
   const totals = computeTotals();
   const requiereCambio = posState.moneda === 'USD';
   const tipoCambioValido = requiereCambio && Number(posState.tipoCambio) > 0;
   const cambio = tipoCambioValido ? Number(posState.tipoCambio) : null;
   const toUsd = (monto) => (cambio ? monto / cambio : 0);
-  const subtotalUsd = requiereCambio && cambio ? toUsd(totals.subtotal) : 0;
+  const subtotalUsd = requiereCambio && cambio ? totals.subtotalMoneda : 0;
   const descuentoUsd = requiereCambio && cambio ? totals.descuentoMoneda : toUsd(totals.descuento);
   const ivaUsd = requiereCambio && cambio ? toUsd(totals.ivaCalculado) : 0;
-  const totalUsd = requiereCambio && cambio ? toUsd(totals.total) : 0;
+  const totalUsd = requiereCambio && cambio ? (totals.totalMoneda || 0) : 0;
   const isCredito = posState.condicionVenta === 'CREDITO';
-
   const showUsd = requiereCambio && cambio;
   const currencyMain = showUsd ? 'USD' : 'PYG';
+  const planCurrency = posState.moneda === 'USD' && cambio ? 'USD' : 'PYG';
+  const planTotalBase = planCurrency === 'USD' ? totalUsd : totals.total;
 
   let summaryHtml = `
     <div class="row"><span>Subtotal</span><strong>${formatCurrency(showUsd ? subtotalUsd : totals.subtotal, currencyMain)}</strong></div>
     <div class="row"><span>Descuento</span><strong>${formatCurrency(showUsd ? descuentoUsd : totals.descuento, currencyMain)}</strong></div>
-    <div class="row"><span>IVA (${posState.ivaPorcentaje}%)</span><strong>${formatCurrency(showUsd ? ivaUsd : totals.ivaCalculado, currencyMain)}</strong></div>
+    <div class="row"><span>${getIvaLabel(posState.ivaPorcentaje)}</span><strong>${formatCurrency(showUsd ? ivaUsd : totals.ivaCalculado, currencyMain)}</strong></div>
     <div class="row total"><span>Total</span><strong>${formatCurrency(showUsd ? totalUsd : totals.total, currencyMain)}</strong></div>
     <div class="row"><span>Condición</span><strong>${isCredito ? 'Crédito' : 'Contado'}</strong></div>
   `;
@@ -837,9 +1059,22 @@ function renderSummary() {
   }
 
   if (isCredito) {
+    const isPlazo = posState.creditTipo === 'PLAZO';
     summaryHtml += `
-      <div class="row"><span>Vencimiento</span><strong>${posState.fechaVencimiento || 'Sin definir'}</strong></div>
+      <div class="row"><span>Modalidad</span><strong>${isPlazo ? 'Plazo' : 'Cuotas'}</strong></div>
     `;
+    if (isPlazo) {
+      summaryHtml += `
+        <div class="row"><span>Vencimiento</span><strong>${posState.fechaVencimiento || 'Sin definir'}</strong></div>
+      `;
+    } else {
+      const cuotas = Array.isArray(posState.cuotas) ? posState.cuotas : [];
+      const cuotasTotal = round2(cuotas.reduce((acc, c) => acc + Number(c.monto || 0), 0));
+      summaryHtml += `
+        <div class="row"><span>Cuotas</span><strong>${cuotas.length || posState.cantidadCuotas || 0}</strong></div>
+        <div class="row"><span>Total cuotas</span><strong>${formatCurrency(cuotasTotal || planTotalBase, planCurrency)}</strong></div>
+      `;
+    }
   }
 
   posDom.summaryTotals.innerHTML = summaryHtml;
@@ -851,9 +1086,131 @@ function renderSummary() {
   if (posDom.ticketButton) {
     posDom.ticketButton.hidden = !posState.lastSale || !lastSaleEsTicket;
   }
-  renderCurrencyControls();
-  toggleCreditFields();
   updateActionStates();
+}
+
+function toggleCreditFields() {
+  if (!posDom) return;
+  if (posDom.comprobanteSelect) {
+    posDom.comprobanteSelect.value = posState.comprobante;
+  }
+  const forceContado = posState.comprobante === 'TICKET';
+  if (forceContado) {
+    posState.condicionVenta = 'CONTADO';
+    posState.fechaVencimiento = null;
+    posState.creditTipo = 'PLAZO';
+    posState.cuotas = [];
+  }
+  const isCredito = posState.condicionVenta === 'CREDITO';
+  if (posDom.condicionSelect) {
+    posDom.condicionSelect.value = posState.condicionVenta;
+    posDom.condicionSelect.disabled = forceContado;
+  }
+  if (posDom.creditRow) {
+    posDom.creditRow.hidden = !isCredito;
+    posDom.creditRow.style.display = isCredito ? '' : 'none';
+  }
+  if (posDom.creditTypeSelect) {
+    posDom.creditTypeSelect.value = posState.creditTipo;
+  }
+
+  // Si no es crédito, ocultamos todo lo relacionado y salimos
+  if (!isCredito) {
+    if (posDom.creditPlazoRow) { posDom.creditPlazoRow.hidden = true; posDom.creditPlazoRow.style.display = 'none'; }
+    if (posDom.creditCuotasRow) { posDom.creditCuotasRow.hidden = true; posDom.creditCuotasRow.style.display = 'none'; }
+    if (posDom.cuotasList) { posDom.cuotasList.hidden = true; posDom.cuotasList.style.display = 'none'; }
+    posState.fechaVencimiento = null;
+    posState.cuotas = [];
+    posState.cantidadCuotas = 3;
+    posState.creditTipo = 'PLAZO';
+    renderCuotasList();
+    renderSummary();
+    return;
+  }
+
+  const isPlazo = posState.creditTipo === 'PLAZO';
+  const isCuotas = posState.creditTipo === 'CUOTAS';
+
+  if (posDom.creditPlazoRow) {
+    posDom.creditPlazoRow.hidden = !isPlazo;
+    posDom.creditPlazoRow.style.display = isPlazo ? '' : 'none';
+  }
+  if (posDom.creditCuotasRow) {
+    posDom.creditCuotasRow.hidden = !isCuotas;
+    posDom.creditCuotasRow.style.display = isCuotas ? '' : 'none';
+  }
+  if (posDom.cuotasList) {
+    posDom.cuotasList.hidden = !isCuotas;
+    posDom.cuotasList.style.display = isCuotas ? '' : 'none';
+  }
+
+  if (posDom.fechaVencInput && isPlazo) {
+    posDom.fechaVencInput.value = posState.fechaVencimiento || '';
+  }
+  if (posDom.cantidadCuotasInput) {
+    posDom.cantidadCuotasInput.value = posState.cantidadCuotas || 1;
+  }
+  renderCuotasList();
+  renderSummary();
+}
+
+function renderCuotasList() {
+  if (!posDom || !posDom.cuotasList) return;
+  const show = posState.condicionVenta === 'CREDITO' && posState.creditTipo === 'CUOTAS';
+  posDom.cuotasList.hidden = !show;
+  if (!show) {
+    posDom.cuotasList.innerHTML = '';
+    return;
+  }
+  const cuotas = Array.isArray(posState.cuotas) ? posState.cuotas : [];
+  if (!cuotas.length) {
+    posDom.cuotasList.innerHTML = '<p class="empty">Genera un plan de cuotas.</p>';
+    return;
+  }
+  const rows = cuotas
+    .map(
+      (cuota, idx) => `
+        <tr data-pos-cuota-idx="${idx}">
+          <td>#${idx + 1}</td>
+          <td><input type="number" min="0" step="0.01" data-pos-cuota-monto value="${round2(cuota.monto)}"></td>
+          <td><input type="date" data-pos-cuota-fecha value="${cuota.fecha_vencimiento || ''}"></td>
+        </tr>
+      `
+    )
+    .join('');
+  posDom.cuotasList.innerHTML = `
+    <table class="pos-cuotas-table">
+      <thead><tr><th>Nro</th><th>Monto</th><th>Vencimiento</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function generateCuotasPlan() {
+  const totals = computeTotals();
+  const cambio = posState.moneda === 'USD' && Number(posState.tipoCambio) > 0 ? Number(posState.tipoCambio) : null;
+  const total = cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const n = Math.max(1, posState.cantidadCuotas || 1);
+  if (!Number.isFinite(total) || total <= 0) {
+    setFeedback('Agrega productos antes de generar cuotas.', 'error');
+    return;
+  }
+  posState.creditTipo = 'CUOTAS';
+  posState.cuotas = spreadCuotas(total, n);
+  renderCuotasList();
+}
+
+function validateCuotas(totals, cambio) {
+  const expected = posState.moneda === 'USD' && cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const cuotas = Array.isArray(posState.cuotas) ? posState.cuotas : [];
+  if (!cuotas.length) return 'Genera el plan de cuotas antes de continuar.';
+  const sum = round2(cuotas.reduce((acc, c) => acc + Number(c.monto || 0), 0));
+  if (Math.abs(sum - expected) > 0.01) {
+    return 'La suma de cuotas debe igualar el total de la venta.';
+  }
+  const missingDate = cuotas.some((c) => !c.fecha_vencimiento);
+  if (missingDate) return 'Completa las fechas de vencimiento de todas las cuotas.';
+  return null;
 }
 
 function renderLastSale() {
@@ -917,6 +1274,7 @@ async function confirmSale() {
     return;
   }
   const totals = computeTotals();
+  const cambio = posState.moneda === 'USD' && Number(posState.tipoCambio) > 0 ? Number(posState.tipoCambio) : null;
   if (totals.descuento > totals.subtotal) {
     setFeedback('El descuento no puede superar al subtotal.', 'error');
     updateActionStates();
@@ -935,11 +1293,25 @@ async function confirmSale() {
     focusClientSearch();
     return;
   }
-  if (isCredito && !posState.fechaVencimiento) {
-    setFeedback('Ingresa la fecha de vencimiento del crédito.', 'error');
+  const isPlazo = isCredito && posState.creditTipo === 'PLAZO';
+  const isCuotas = isCredito && posState.creditTipo === 'CUOTAS';
+  if (isPlazo && !posState.fechaVencimiento) {
+    setFeedback('Ingresa la fecha de vencimiento para el plazo.', 'error');
     updateActionStates();
     if (posDom?.fechaVencInput) posDom.fechaVencInput.focus();
     return;
+  }
+  if (isCuotas) {
+    const errorCuotas = validateCuotas(totals, cambio);
+    if (errorCuotas) {
+      setFeedback(errorCuotas, 'error');
+      updateActionStates();
+      if (posDom?.cuotasList) {
+        const firstInput = posDom.cuotasList.querySelector('input');
+        if (firstInput) firstInput.focus();
+      }
+      return;
+    }
   }
 
   if (posState.moneda === 'USD') {
@@ -955,6 +1327,29 @@ async function confirmSale() {
   setPosLoading(true, 'Guardando...');
 
   try {
+    let creditoPayload = undefined;
+    if (isCredito) {
+      if (isPlazo) {
+        creditoPayload = {
+          tipo: 'PLAZO',
+          fecha_vencimiento: posState.fechaVencimiento || undefined
+        };
+      }
+      if (isCuotas) {
+        creditoPayload = {
+          tipo: 'CUOTAS',
+          cantidad_cuotas: Math.max(1, posState.cuotas.length || posState.cantidadCuotas || 1),
+          cuotas: (posState.cuotas || []).map((c, idx) => ({
+            numero: idx + 1,
+            monto: round2(c.monto),
+            fecha_vencimiento: c.fecha_vencimiento
+          }))
+        };
+      }
+    }
+
+    posState.lastCreditoConfig = creditoPayload || null;
+
     const payload = {
       usuarioId: session.id,
       clienteId: posState.cliente?.id || undefined,
@@ -965,7 +1360,8 @@ async function confirmSale() {
       tipo_cambio: posState.moneda === 'USD' ? posState.tipoCambio : undefined,
       condicion_venta: posState.condicionVenta,
       estado: comprobanteEsTicket ? 'TICKET' : undefined,
-      fecha_vencimiento: isCredito ? posState.fechaVencimiento : undefined,
+      fecha_vencimiento: isCredito && isPlazo ? posState.fechaVencimiento : undefined,
+      credito: creditoPayload,
       detalles: posState.cart.map((item) => ({
         productoId: item.productoId,
         cantidad: item.cantidad
@@ -989,7 +1385,14 @@ async function confirmSale() {
     }
     posState.cart = [];
     posState.descuento = 0;
-    posDom.discountInput.value = '';
+    posState.creditTipo = 'PLAZO';
+    posState.cantidadCuotas = 3;
+    posState.cuotas = [];
+    posState.lastCreditoConfig = creditoPayload || null;
+    if (posDom.discountInput) posDom.discountInput.value = '';
+    if (posDom.creditTypeSelect) posDom.creditTypeSelect.value = 'PLAZO';
+    if (posDom.cantidadCuotasInput) posDom.cantidadCuotasInput.value = 3;
+    if (posDom.cuotasList) posDom.cuotasList.innerHTML = '';
     renderCart();
     renderSummary();
   } catch (error) {
@@ -1014,16 +1417,27 @@ async function generateInvoice() {
   }
   try {
     setFeedback('Generando factura digital...', 'info');
+    const facturarBody = {};
+    if (posState.lastSale?.condicion_venta) {
+      facturarBody.condicion_pago = posState.lastSale.condicion_venta;
+    }
+    if (posState.lastCreditoConfig) {
+      facturarBody.credito = posState.lastCreditoConfig;
+      if (posState.lastCreditoConfig.fecha_vencimiento && !facturarBody.fecha_vencimiento) {
+        facturarBody.fecha_vencimiento = posState.lastCreditoConfig.fecha_vencimiento;
+      }
+    } else if (posState.lastSale?.fecha_vencimiento) {
+      facturarBody.fecha_vencimiento = posState.lastSale.fecha_vencimiento;
+    }
+
     const response = await request(`/ventas/${posState.lastSale.id}/facturar`, {
-      method: 'POST'
+      method: 'POST',
+      body: facturarBody
     });
     const venta = response?.venta || response;
-    const facturaDigital = venta?.factura_digital;
     const facturaElectronica = response?.factura || venta?.factura_electronica;
-    const pdfUrl = facturaDigital?.id
-      ? urlWithSession(`/facturas-digitales/${encodeURIComponent(facturaDigital.id)}/pdf`)
-      : facturaElectronica?.pdf_path;
-    const facturaTipo = facturaDigital ? 'digital' : 'electrónica';
+    const pdfUrl = getFacturaPdfUrl(facturaElectronica);
+    const facturaTipo = 'electrónica';
     if (!venta) {
       throw new Error('No se recibió la venta generada.');
     }
@@ -1036,7 +1450,7 @@ async function generateInvoice() {
         setFeedback(`Factura ${facturaTipo} generada. El PDF se abrió en una nueva pestaña.`, 'success');
       }
     } else {
-      openInvoiceWindow(venta, facturaDigital || facturaElectronica);
+      openInvoiceWindow(venta, facturaElectronica);
       setFeedback(`Factura ${facturaTipo} generada. Puedes imprimirla desde la ventana emergente.`, 'success');
     }
     posState.lastSale = venta;
@@ -1053,6 +1467,17 @@ async function generateInvoice() {
   }
 }
 
+function getFacturaPdfUrl(facturaElectronica) {
+  const electronicaPdfPath = facturaElectronica?.pdf_path;
+  if (electronicaPdfPath) {
+    return /^https?:\/\//i.test(electronicaPdfPath)
+      ? electronicaPdfPath
+      : urlWithSession(electronicaPdfPath);
+  }
+
+  return null;
+}
+
 async function generateTicket() {
   if (!posState.lastSale) {
     setFeedback('Registra una venta antes de imprimir el ticket.', 'info');
@@ -1066,11 +1491,17 @@ async function generateTicket() {
   const defaultLabel = posDom?.ticketButton?.dataset?.defaultLabel || 'Imprimir ticket';
   if (posDom?.ticketButton) {
     posDom.ticketButton.disabled = true;
-    posDom.ticketButton.textContent = 'Generando...';
+    posDom.ticketButton.textContent = 'Abriendo...';
   }
   try {
-    openTicketWindow(posState.lastSale);
-    setFeedback('Ticket listo para imprimir.', 'success');
+    const ticketUrl = urlWithSession(`/ventas/${encodeURIComponent(posState.lastSale.id)}/ticket/pdf`);
+    const win = window.open(ticketUrl, '_blank');
+    if (!win) {
+      setFeedback('No se pudo abrir el ticket. Desbloquea las ventanas emergentes.', 'warn');
+    } else {
+      win.focus();
+      setFeedback('Ticket PDF abierto en una nueva pestaña.', 'success');
+    }
   } catch (error) {
     console.error(error);
     setFeedback(error.message || 'No se pudo generar el ticket.', 'error');
@@ -1162,8 +1593,9 @@ function openInvoiceWindow(venta, factura) {
         <div class="totals">
           <div><span>Subtotal</span><span>${formatCurrency(totals.subtotal, 'PYG')}</span></div>
           <div><span>Descuento</span><span>${formatCurrency(totals.descuento, 'PYG')}</span></div>
-          <div><span>IVA ${venta?.iva_porcentaje || 10}%</span><span>${formatCurrency(totals.iva, 'PYG')}</span></div>
+          <div><span>${getIvaLabel(venta?.iva_porcentaje || 10)}</span><span>${formatCurrency(totals.iva, 'PYG')}</span></div>
           <div class="total"><span>Total</span><span>${formatCurrency(totals.total, 'PYG')}</span></div>
+          <div class="row"><span>Total en letras</span><span>${escapeHtml(montoEnLetras(totals.total, venta?.moneda || 'PYG'))}</span></div>
         </div>
       </main>
       <footer>
@@ -1180,122 +1612,15 @@ function openInvoiceWindow(venta, factura) {
   win.document.close();
 }
 
-function openTicketWindow(venta) {
-  const win = window.open('', '', 'width=420,height=900');
-  if (!win) {
-    throw new Error('No se pudo abrir la ventana de impresión. Revisa el bloqueo de pop-ups.');
-  }
-
-  const cliente = venta?.cliente;
-  const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
-  const totals = computeInvoiceTotals(venta);
-  const fechaEmision = venta?.created_at || new Date().toISOString();
-  const monedaVenta = String(venta?.moneda || 'PYG').toUpperCase();
-  const totalMoneda = monedaVenta === 'USD' && Number(venta?.total_moneda)
-    ? Number(venta.total_moneda)
-    : Number(venta?.total) || 0;
-  const empresaNombre = venta?.sucursal?.nombre || 'TRIDENT INNOVA E.A.S';
-  const sucursalCiudad = venta?.sucursal?.ciudad || 'Sucursal';
-  const sucursalDir = venta?.sucursal?.direccion || '';
-  const ticketSerie = venta?.id ? venta.id.slice(0, 8).toUpperCase() : 'TICKET';
-
-  const detalleFilas = detalles
-    .map(
-      (item) => `
-        <tr>
-          <td>
-            <div class="prod">${escapeHtml(item.producto?.nombre || 'Producto')}</div>
-            <div class="meta">Cant: ${formatNumber(item.cantidad)} · ${formatCurrency(Number(item.precio_unitario) || 0, 'PYG')}</div>
-          </td>
-          <td class="right">${formatCurrency(Number(item.subtotal) || 0, 'PYG')}</td>
-        </tr>
-      `
-    )
-    .join('');
-
-  win.document.open();
-  win.document.write(`<!DOCTYPE html>
-  <html lang="es">
-    <head>
-      <meta charset="utf-8">
-      <title>Ticket ${ticketSerie}</title>
-      <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 16px; background: #0f172a; color: #e2e8f0; }
-        .ticket { max-width: 360px; margin: 0 auto; background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.35); }
-        header { text-align: center; margin-bottom: 12px; }
-        header img { height: 56px; object-fit: contain; margin-bottom: 8px; filter: drop-shadow(0 3px 8px rgba(0,0,0,0.35)); }
-        header h1 { margin: 0; font-size: 16px; letter-spacing: 0.04em; }
-        header p { margin: 2px 0; font-size: 12px; color: #94a3b8; }
-        .meta { font-size: 12px; color: #cbd5e1; }
-        .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 12px 0; }
-        .chip { background: #1f2937; border: 1px solid #273449; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { font-size: 12px; padding: 8px 4px; }
-        th { text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: #cbd5e1; }
-        td.right { text-align: right; }
-        tr + tr td { border-top: 1px dashed #1f2937; }
-        .prod { font-weight: 600; }
-        .totals { margin-top: 12px; border-top: 1px dashed #1f2937; padding-top: 12px; }
-        .totals .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; }
-        .totals .row.total { font-size: 15px; font-weight: 700; color: #f97316; }
-        footer { text-align: center; margin-top: 12px; font-size: 11px; color: #94a3b8; }
-        .badge { display: inline-flex; align-items: center; gap: 6px; background: #0ea5e9; color: #0b1021; padding: 5px 10px; border-radius: 999px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; font-size: 11px; }
-        .divider { margin: 12px 0; border-top: 1px dashed #1f2937; }
-      </style>
-    </head>
-    <body>
-      <div class="ticket">
-        <header>
-          <img src="/img/logotridentgrande.png" alt="Logo" onerror="this.style.display='none';" />
-          <h1>${escapeHtml(empresaNombre)}</h1>
-          <p>${escapeHtml(sucursalCiudad)}</p>
-          ${sucursalDir ? `<p>${escapeHtml(sucursalDir)}</p>` : ''}
-          <div class="meta">Ticket ${escapeHtml(ticketSerie)} · ${escapeHtml(formatDate(fechaEmision))}</div>
-        </header>
-        <div class="grid">
-          <div class="chip">Cliente<br><strong>${escapeHtml(cliente?.nombre_razon_social || 'Cliente eventual')}</strong></div>
-          <div class="chip">Condición<br><strong>${escapeHtml(venta?.condicion_venta || 'CONTADO')}</strong></div>
-          <div class="chip">Moneda<br><strong>${escapeHtml(monedaVenta)}</strong></div>
-          <div class="chip">Vendedor<br><strong>${escapeHtml(venta?.usuario?.nombre || '—')}</strong></div>
-        </div>
-        <table>
-          <thead>
-            <tr><th>Detalle</th><th class="right">Importe</th></tr>
-          </thead>
-          <tbody>
-            ${detalleFilas || '<tr><td colspan="2">Sin items</td></tr>'}
-          </tbody>
-        </table>
-        <div class="totals">
-          <div class="row"><span>Subtotal</span><span>${formatCurrency(totals.subtotal, 'PYG')}</span></div>
-          <div class="row"><span>Descuento</span><span>${formatCurrency(totals.descuento, 'PYG')}</span></div>
-          <div class="row"><span>IVA ${venta?.iva_porcentaje || 10}%</span><span>${formatCurrency(totals.iva, 'PYG')}</span></div>
-          <div class="row total"><span>Total (${monedaVenta})</span><span>${formatCurrency(totalMoneda, monedaVenta)}</span></div>
-        </div>
-        <div class="divider"></div>
-        <footer>
-          <div class="badge">Venta al contado</div>
-          <div>Gracias por tu compra</div>
-        </footer>
-      </div>
-      <script>
-        window.addEventListener('load', function () {
-          window.focus();
-          window.print();
-        });
-      </script>
-    </body>
-  </html>`);
-  win.document.close();
-}
-
 function computeInvoiceTotals(venta) {
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
   const subtotal = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
   const descuento = Number(venta?.descuento_total) || 0;
   const total = Number(venta?.total) || Math.max(subtotal - descuento, 0);
-  const divisor = IVA_DIVISOR[Number(venta?.iva_porcentaje) || 10] || IVA_DIVISOR[10];
-  const iva = total > 0 ? total / divisor : 0;
+  const parsedIva = Number(venta?.iva_porcentaje);
+  const ivaPorcentaje = Number.isFinite(parsedIva) ? parsedIva : 10;
+  const divisor = IVA_DIVISOR[ivaPorcentaje];
+  const iva = divisor && total > 0 ? total / divisor : 0;
   return { subtotal, descuento, total, iva };
 }
 
@@ -1378,10 +1703,15 @@ function updateActionStates() {
   const hasClearable = hasCart || Boolean(posState.cliente) || (posState.descuento || 0) > 0;
   const requiereTipoCambio = posState.moneda === 'USD';
   const tipoCambioValido = Number(posState.tipoCambio) > 0;
+  const cambio = requiereTipoCambio && tipoCambioValido ? Number(posState.tipoCambio) : null;
   const isCredito = posState.condicionVenta === 'CREDITO';
   const hasCliente = Boolean(posState.cliente);
+  const isPlazo = isCredito && posState.creditTipo === 'PLAZO';
+  const isCuotas = isCredito && posState.creditTipo === 'CUOTAS';
+  const totals = computeTotals();
   const hasVencimiento = !!posState.fechaVencimiento;
-  const creditoOk = !isCredito || (hasCliente && hasVencimiento);
+  const cuotasValid = !isCuotas || validateCuotas(totals, cambio) === null;
+  const creditoOk = !isCredito || (hasCliente && (!isPlazo || hasVencimiento) && cuotasValid);
   const canConfirm = hasCart && (!requiereTipoCambio || tipoCambioValido) && creditoOk;
 
   if (posDom.confirmButton) {

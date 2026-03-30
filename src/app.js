@@ -16,6 +16,9 @@ const factpyRoutes = require('./routes/factpy');
 const pagoRoutes = require('./routes/pago');
 const reciboRoutes = require('./routes/recibo');
 const sucursalRoutes = require('./routes/sucursal');
+const presupuestoRoutes = require('./routes/presupuesto');
+const proveedorRoutes = require('./routes/proveedor');
+const notaPedidoRoutes = require('./routes/notaPedido');
 const errorHandler = require('./middleware/errorHandler');
 const { attachUser } = require('./middleware/authContext');
 
@@ -36,13 +39,27 @@ app.use('/usuarios', usuarioRoutes);
 app.use('/auth', authRoutes);
 app.use('/cierres-caja', cierreCajaRoutes);
 app.use('/salidas-caja', salidaCajaRoutes);
-app.use('/facturas-digitales', facturaDigitalRoutes);
+if (shouldMountLegacyFacturaDigitalRoutes()) {
+	app.use('/facturas-digitales', facturaDigitalRoutes);
+}
 app.use('/pagos', pagoRoutes);
 app.use('/recibos', reciboRoutes);
 app.use('/factpy', factpyRoutes);
 app.use('/sucursales', sucursalRoutes);
+app.use('/presupuestos', presupuestoRoutes);
+app.use('/proveedores', proveedorRoutes);
+app.use('/notas-pedido', notaPedidoRoutes);
 
 // Error handler (último middleware)
 app.use(errorHandler);
+
+function shouldMountLegacyFacturaDigitalRoutes() {
+	const configured = process.env.FACTURA_DIGITAL_LEGACY_ENABLED;
+	if (configured !== undefined) {
+		return !['false', '0', 'off', 'no'].includes(String(configured).trim().toLowerCase());
+	}
+
+	return process.env.NODE_ENV !== 'production';
+}
 
 module.exports = { app, prisma };

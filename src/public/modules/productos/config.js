@@ -38,11 +38,12 @@ function printProductLabel(item) {
         <meta charset="utf-8">
         <title>Etiqueta ${sku}</title>
         <style>
-          body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 24px; }
-          .label { border: 2px solid #111827; border-radius: 12px; padding: 18px; width: 260px; }
+          body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f8fafc; }
+          .label { border: 2px solid #111827; border-radius: 12px; padding: 20px; width: 280px; background: #ffffff; }
           h1 { margin: 0 0 8px; font-size: 18px; color: #111827; }
-          .sku { font-size: 24px; font-weight: 700; letter-spacing: 0.18em; margin: 12px 0; color: #111827; text-align: center; }
-          .barcode { display: flex; justify-content: center; margin: 16px 0 6px; }
+          .sku { font-size: 24px; font-weight: 700; letter-spacing: 0.14em; margin: 12px 0 6px; color: #111827; text-align: center; }
+          .barcode { display: flex; justify-content: center; margin: 14px 0 10px; padding: 2px 0; }
+          .barcode svg { width: 100%; }
           .price { font-size: 22px; font-weight: 600; color: #0f766e; margin: 8px 0; text-align: center; }
           .original { font-size: 14px; color: #6b7280; text-align: center; }
           .meta { font-size: 12px; color: #6b7280; display: flex; justify-content: space-between; margin-top: 18px; }
@@ -68,10 +69,15 @@ function printProductLabel(item) {
             if (typeof JsBarcode === 'function' && skuValue) {
               JsBarcode('#barcode', skuValue, {
                 format: 'CODE128',
-                displayValue: false,
-                margin: 0,
-                height: 60,
-                width: 1.8
+                displayValue: true,
+                fontSize: 13,
+                fontOptions: '600',
+                textMargin: 6,
+                margin: 12,
+                height: 64,
+                width: 1.4,
+                lineColor: '#000000',
+                background: '#ffffff'
               });
             }
             setTimeout(function(){
@@ -109,10 +115,12 @@ const UNIDAD_OPTIONS = [
 
 let skuTouched = false;
 let lastSuggestedSku = null;
+let skuRequestSeq = 0;
 
 function resetSkuState() {
   skuTouched = false;
   lastSuggestedSku = null;
+  skuRequestSeq = 0;
 }
 
 async function suggestSku(form, { force = false } = {}) {
@@ -123,6 +131,8 @@ async function suggestSku(form, { force = false } = {}) {
 
   const tipo = tipoControl.value;
   if (!tipo) return;
+  const requestSeq = ++skuRequestSeq;
+  const requestedTipo = tipo;
 
   const currentValue = (skuControl.value || '').trim();
   if (!force && skuTouched && currentValue && currentValue !== lastSuggestedSku) {
@@ -132,6 +142,11 @@ async function suggestSku(form, { force = false } = {}) {
   try {
     const nextSku = await fetchNextSku(tipo);
     if (!nextSku) return;
+
+    const tipoActual = tipoControl.value;
+    if (requestSeq !== skuRequestSeq || tipoActual !== requestedTipo) {
+      return;
+    }
 
     const latestValue = (skuControl.value || '').trim();
     if (!force && skuTouched && latestValue && latestValue !== lastSuggestedSku) {
@@ -151,7 +166,7 @@ function wireSkuAutoFill(form) {
   const skuControl = form?.elements?.sku;
   if (!tipoControl || !skuControl) return;
 
-  const alreadyWired = form.dataset?.skuAutoFill === '1';
+  const alreadyWired = tipoControl.dataset?.skuAutoFillWired === '1' && skuControl.dataset?.skuAutoFillWired === '1';
 
   if (!alreadyWired) {
     tipoControl.addEventListener('change', () => {
@@ -166,7 +181,8 @@ function wireSkuAutoFill(form) {
       skuTouched = current !== lastSuggestedSku;
     });
 
-    form.dataset.skuAutoFill = '1';
+    tipoControl.dataset.skuAutoFillWired = '1';
+    skuControl.dataset.skuAutoFillWired = '1';
   }
 
   // Forzar sugerencia inicial una vez que el DOM está listo
@@ -224,7 +240,8 @@ export const productosModule = {
   fields: [
     { name: 'tipo', label: 'Tipo', type: 'select', required: true, defaultValue: 'DRON', options: TIPO_OPTIONS },
     { name: 'sku', label: 'SKU', type: 'text', required: true, placeholder: 'DRON-001' },
-    { name: 'nombre', label: 'Nombre', type: 'text', required: true, placeholder: 'Drone de inspección' },
+    { name: 'nombre', label: 'Nombre', type: 'text', required: true, placeholder: 'Nombre' },
+    { name: 'codigo_dji', label: 'Código DJI (opcional)', type: 'text', placeholder: 'DJI-XXXXX' },
     { name: 'moneda_precio_venta', label: 'Moneda del precio de venta', type: 'select', required: true, defaultValue: 'PYG', options: MONEDA_OPTIONS },
     {
       name: 'precio_venta',
@@ -269,6 +286,7 @@ export const productosModule = {
   ],
   columns: [
     { header: 'Nombre', accessor: (item) => item.nombre || '' },
+    { header: 'Código DJI', accessor: (item) => item.codigo_dji || '-' },
     { header: 'SKU', accessor: (item) => item.sku || '' },
     { header: 'Tipo', accessor: (item) => item.tipo || '' },
     {

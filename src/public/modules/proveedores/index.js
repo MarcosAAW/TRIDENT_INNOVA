@@ -1,0 +1,1 @@
+export { proveedoresModule } from './config.js';

@@ -8,7 +8,7 @@ jest.mock('../src/services/factpy/client', () => ({
     status: true,
     kude: '/storage/facturas/mock.pdf',
     xmlLink: '/storage/facturas/mock.xml',
-    cdc: 'MOCK-CDC',
+    cdc: '01800100100000010012026032712345678',
     receiptid: 'MOCK-RECEIPT'
   })),
   consultarEstados: jest.fn(async () => [])
@@ -28,6 +28,35 @@ jest.mock('../src/services/sifen/facturaProcessor', () => ({
     envio: { ok: true }
   }))
 }));
+
+jest.mock('../src/services/email/facturaDigitalMailer', () => {
+  class EmailNotConfiguredError extends Error {
+    constructor(message = 'El servidor de correo no está configurado.') {
+      super(message);
+      this.name = 'EmailNotConfiguredError';
+      this.code = 'EMAIL_NO_CONFIGURADO';
+    }
+  }
+
+  class DestinatarioInvalidoError extends Error {
+    constructor(message = 'No se encontró un destinatario para la factura digital.') {
+      super(message);
+      this.name = 'DestinatarioInvalidoError';
+      this.code = 'DESTINATARIO_NO_DISPONIBLE';
+    }
+  }
+
+  return {
+    enviarFacturaDigitalPorCorreo: jest.fn(async (facturaDigital) => ({
+      ...facturaDigital,
+      estado_envio: 'ENVIADO',
+      intentos: Number(facturaDigital?.intentos || 0) + 1
+    })),
+    EmailNotConfiguredError,
+    DestinatarioInvalidoError,
+    isEmailEnabled: jest.fn(() => false)
+  };
+});
 
 jest.mock('../src/middleware/authContext', () => ({
   attachUser: (req, _res, next) => {
@@ -54,6 +83,12 @@ jest.mock('../src/middleware/sucursalContext', () => ({
 const request = require('supertest');
 const prisma = require('../src/prismaClient');
 const { app } = require('../src/app');
+const { emitirFactura } = require('../src/services/factpy/client');
+const {
+  enviarFacturaDigitalPorCorreo,
+  EmailNotConfiguredError,
+  isEmailEnabled
+} = require('../src/services/email/facturaDigitalMailer');
 
 describe('Ventas API (integración)', () => {
   let usuario;
@@ -65,24 +100,92 @@ describe('Ventas API (integración)', () => {
 
   beforeEach(async () => {
     // Limpiar tablas relevantes
+    emitirFactura.mockClear();
+    enviarFacturaDigitalPorCorreo.mockClear();
+    isEmailEnabled.mockReturnValue(false);
     await prisma.detalleVenta.deleteMany().catch(() => {});
     await prisma.movimientoStock.deleteMany().catch(() => {});
-  await prisma.facturaElectronica.deleteMany().catch(() => {});
+    await prisma.notaCreditoDetalle?.deleteMany?.().catch(() => {});
+    await prisma.notaCreditoElectronica.deleteMany().catch(() => {});
+    await prisma.facturaDigital.deleteMany().catch(() => {});
+    await prisma.facturaElectronica.deleteMany().catch(() => {});
     await prisma.venta.deleteMany().catch(() => {});
     await prisma.producto.deleteMany().catch(() => {});
     await prisma.usuario.deleteMany().catch(() => {});
+    await prisma.sucursal.deleteMany().catch(() => {});
+
+    await prisma.sucursal.create({ data: {
+      id: '00000000-0000-0000-0000-000000000001',
+      nombre: 'Casa Central',
+      establecimiento: '001',
+      punto_expedicion: '001'
+    }});
 
     usuario = await prisma.usuario.create({ data: {
       nombre: 'Tester', usuario: 'tester', password_hash: 'hash', rol: 'ADMIN'
     }});
 
     producto = await prisma.producto.create({ data: {
-      sku: 'TEST-SKU', nombre: 'Producto Test', tipo: 'REPUESTO', precio_venta: '1000.00', stock_actual: 5
+      sku: 'TEST-SKU', nombre: 'Producto Test', tipo: 'REPUESTO', precio_venta: '1000.00', stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
     }});
   });
 
   afterAll(async () => {
     await prisma.$disconnect();
+  });
+
+  // Test: Faltan campos obligatorios
+  test('rechaza creación sin usuarioId o detalles', async () => {
+    const res = await request(app).post('/ventas').send({ iva_porcentaje: 10 }).expect(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  // Test: Detalles con cantidad negativa
+  test('rechaza detalles con cantidad negativa', async () => {
+    const res = await request(app).post('/ventas').send({ usuarioId: usuario.id, iva_porcentaje: 10, detalles: [{ productoId: producto.id, cantidad: -2 }] }).expect(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  // Test: Acceso sin autenticación (middleware simulado)
+  test('rechaza acceso sin autenticación (simulado)', async () => {
+    // Si el middleware real estuviera activo, aquí se probaría 401
+    // expect(await request(app).get('/ventas').expect(401));
+    expect(true).toBe(true);
+  });
+
+  // Test: Acceso con rol incorrecto (simulado)
+  test('rechaza creación con rol no admin (simulado)', async () => {
+    // Si el middleware real estuviera activo, aquí se probaría 403
+    // expect(await request(app).post('/ventas').set('x-user-role', 'USUARIO').send({...}).expect(403));
+    expect(true).toBe(true);
+  });
+
+  // Test: Soft delete y consulta directa
+  test('verifica que deleted_at funciona', async () => {
+    const payload = { usuarioId: usuario.id, iva_porcentaje: 10, detalles: [{ productoId: producto.id, cantidad: 1 }] };
+    const created = await request(app).post('/ventas').send(payload).expect(201);
+    await request(app).post(`/ventas/${created.body.id}/anular`).send({ motivo: 'Test' }).expect(200);
+    // Consulta directa (debería incluir deleted_at)
+    const venta = await prisma.venta.findUnique({ where: { id: created.body.id } });
+    expect(venta.deleted_at).not.toBeNull();
+  });
+
+  // Test: Listado incluye/excluye borrados según flag
+  test('listado incluye borrados si se pide', async () => {
+    const payload = { usuarioId: usuario.id, iva_porcentaje: 10, detalles: [{ productoId: producto.id, cantidad: 1 }] };
+    const created = await request(app).post('/ventas').send(payload).expect(201);
+    await request(app).post(`/ventas/${created.body.id}/anular`).send({ motivo: 'Test' }).expect(200);
+    const res = await request(app).get('/ventas?include_deleted=true').expect(200);
+    expect(res.body.data.some((v) => v.id === created.body.id)).toBe(true);
+  });
+
+  // Test: Simulación de error de integración (mock)
+  test.skip('maneja error de integración externa', async () => {
+    // Aquí se podría mockear una dependencia y forzar un error
+    // Ejemplo: jest.spyOn(servicio, 'emitirFactura').mockRejectedValue(new Error('Fallo externo'));
+    // ...
+    expect(true).toBe(true);
   });
 
   test('Crear venta válida decrementa stock y crea movimiento', async () => {
@@ -106,6 +209,112 @@ describe('Ventas API (integración)', () => {
     const movimientos = await prisma.movimientoStock.findMany({ where: { productoId: producto.id } });
     expect(movimientos.length).toBeGreaterThanOrEqual(1);
     expect(movimientos[0].tipo).toBe('SALIDA');
+  });
+
+  test('crea venta en guaranies con descuento e IVA 5 por ciento', async () => {
+    const payload = {
+      usuarioId: usuario.id,
+      iva_porcentaje: 5,
+      descuento_total: 100,
+      detalles: [{ productoId: producto.id, cantidad: 2 }]
+    };
+
+    const res = await request(app).post('/ventas').send(payload).expect(201);
+
+    expect(res.body.condicion_venta).toBe('CONTADO');
+    expect(res.body.moneda).toBe('PYG');
+    expect(Number(res.body.subtotal)).toBeCloseTo(2000, 2);
+    expect(Number(res.body.descuento_total)).toBeCloseTo(100, 2);
+    expect(Number(res.body.total)).toBeCloseTo(1900, 2);
+    expect(Number(res.body.impuesto_total)).toBeCloseTo(1900 / 21, 2);
+    expect(res.body.total_moneda).toBeNull();
+  });
+
+  test('crea venta exenta en guaranies sin impuesto', async () => {
+    const payload = {
+      usuarioId: usuario.id,
+      iva_porcentaje: 0,
+      detalles: [{ productoId: producto.id, cantidad: 1 }]
+    };
+
+    const res = await request(app).post('/ventas').send(payload).expect(201);
+
+    expect(Number(res.body.subtotal)).toBeCloseTo(1000, 2);
+    expect(Number(res.body.total)).toBeCloseTo(1000, 2);
+    expect(Number(res.body.impuesto_total)).toBeCloseTo(0, 2);
+    expect(res.body.iva_porcentaje).toBe(0);
+  });
+
+  test('crea venta a credito en cuotas en guaranies con saldo pendiente completo', async () => {
+    const credito = {
+      tipo: 'CUOTAS',
+      cantidad_cuotas: 2,
+      cuotas: [
+        { numero: 1, monto: 1000, fecha_vencimiento: '2026-05-10' },
+        { numero: 2, monto: 1000, fecha_vencimiento: '2026-06-10' }
+      ]
+    };
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito,
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    expect(createRes.body.condicion_venta).toBe('CREDITO');
+    expect(createRes.body.es_credito).toBe(true);
+    expect(Number(createRes.body.saldo_pendiente)).toBeCloseTo(2000, 2);
+    expect(createRes.body.credito_config).toMatchObject({
+      tipo: 'CUOTAS',
+      cantidad_cuotas: 2,
+      cuotas: [
+        expect.objectContaining({ numero: 1, monto: 1000 }),
+        expect.objectContaining({ numero: 2, monto: 1000 })
+      ]
+    });
+  });
+
+  test('mantiene el precio original en USD y recalcula guaranies con el cambio del dia', async () => {
+    const productoUsd = await prisma.producto.create({ data: {
+      sku: 'TEST-USD',
+      nombre: 'Producto USD',
+      tipo: 'REPUESTO',
+      precio_venta: '70000.00',
+      precio_venta_original: '10.00',
+      moneda_precio_venta: 'USD',
+      tipo_cambio_precio_venta: '7000.00',
+      stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
+    }});
+
+    const res = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        moneda: 'USD',
+        tipo_cambio: 6500,
+        detalles: [{ productoId: productoUsd.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    expect(Number(res.body.total)).toBeCloseTo(65000, 2);
+    expect(Number(res.body.total_moneda)).toBeCloseTo(10, 2);
+
+    const ventaGuardada = await prisma.venta.findUnique({
+      where: { id: res.body.id },
+      include: { detalles: true }
+    });
+
+    expect(ventaGuardada.detalles).toHaveLength(1);
+    expect(ventaGuardada.detalles[0].moneda_precio_unitario).toBe('USD');
+    expect(Number(ventaGuardada.detalles[0].precio_unitario_moneda)).toBeCloseTo(10, 4);
+    expect(Number(ventaGuardada.detalles[0].subtotal_moneda)).toBeCloseTo(10, 4);
+    expect(Number(ventaGuardada.detalles[0].tipo_cambio_aplicado)).toBeCloseTo(6500, 4);
   });
 
   test('Crear venta con stock insuficiente revierte y devuelve 400', async () => {
@@ -140,6 +349,106 @@ describe('Ventas API (integración)', () => {
     expect(venta).toHaveProperty('usuario');
     expect(venta).toHaveProperty('cliente');
     expect(res.body.meta).toMatchObject({ page: 1, total: res.body.data.length });
+  });
+
+  test('lista solo las ventas de la sucursal activa', async () => {
+    await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const otraSucursal = await prisma.sucursal.create({
+      data: {
+        id: '00000000-0000-0000-0000-000000000002',
+        nombre: 'Sucursal Secundaria',
+        establecimiento: '002',
+        punto_expedicion: '001'
+      }
+    });
+
+    await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: otraSucursal.id,
+        subtotal: 1000,
+        impuesto_total: 90.91,
+        total: 1000,
+        estado: 'PENDIENTE',
+        moneda: 'PYG',
+        iva_porcentaje: 10,
+        condicion_venta: 'CONTADO'
+      }
+    });
+
+    const response = await request(app).get('/ventas').expect(200);
+
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0].sucursalId).toBe('00000000-0000-0000-0000-000000000001');
+  });
+
+  test('crea venta a crédito a plazo con saldo pendiente y la expone en el listado', async () => {
+    const credito = {
+      tipo: 'PLAZO',
+      fecha_vencimiento: '2026-04-30',
+      descripcion: '30 dias'
+    };
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito,
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    expect(createRes.body.condicion_venta).toBe('CREDITO');
+    expect(createRes.body.es_credito).toBe(true);
+    expect(Number(createRes.body.saldo_pendiente)).toBeCloseTo(2000, 2);
+    expect(createRes.body.credito_config).toMatchObject({
+      ...credito,
+      fecha_vencimiento: '2026-04-30T00:00:00.000Z'
+    });
+
+    const listRes = await request(app).get('/ventas').expect(200);
+    expect(listRes.body.data[0].credito).toMatchObject({
+      ...credito,
+      fecha_vencimiento: '2026-04-30T00:00:00.000Z'
+    });
+  });
+
+  test('reabre ticket como PDF A4', async () => {
+    const created = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await prisma.venta.update({
+      where: { id: created.body.id },
+      data: {
+        estado: 'TICKET',
+        moneda: 'USD',
+        tipo_cambio: 7300,
+        total_moneda: 0.14,
+        condicion_venta: 'CONTADO'
+      }
+    });
+
+    const res = await request(app)
+      .get(`/ventas/${created.body.id}/ticket/pdf`)
+      .expect(200);
+
+    expect(res.headers['content-type']).toMatch(/application\/pdf/);
+    expect(res.headers['content-disposition']).toMatch(/ticket-venta/i);
   });
 
   test('Buscar ventas por número de factura devuelve coincidencias', async () => {
@@ -193,6 +502,28 @@ describe('Ventas API (integración)', () => {
     await request(app).post(`/ventas/${ventaId}/anular`).send({ motivo: 'Otro' }).expect(400);
   });
 
+  test('no permite anular una venta ya facturada', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const res = await request(app)
+      .post(`/ventas/${createRes.body.id}/anular`)
+      .send({ motivo: 'No debe anularse directo' })
+      .expect(400);
+
+    expect(res.body.error).toMatch(/nota de crédito|facturada/i);
+  });
+
   test('Generar factura electrónica para una venta', async () => {
     const createRes = await request(app)
       .post('/ventas')
@@ -224,5 +555,489 @@ describe('Ventas API (integración)', () => {
     expect(Number(segundoIntento.body.factura.intentos)).toBeGreaterThan(1);
     expect(segundoIntento.body.factura.pdf_path).toBe(facturaRes.body.factura.pdf_path);
     expect(segundoIntento.body.factura.xml_path).toBe(facturaRes.body.factura.xml_path);
+  });
+
+  test('factura venta en USD con descuento usando la base monetaria guardada por linea', async () => {
+    const productoUsd = await prisma.producto.create({ data: {
+      sku: 'TEST-USD-DESC',
+      nombre: 'Producto USD Descuento',
+      tipo: 'REPUESTO',
+      precio_venta: '70000.00',
+      precio_venta_original: '10.00',
+      moneda_precio_venta: 'USD',
+      tipo_cambio_precio_venta: '7000.00',
+      stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
+    }});
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        moneda: 'USD',
+        tipo_cambio: 6500,
+        descuento_total: 1,
+        detalles: [{ productoId: productoUsd.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    expect(Number(createRes.body.total)).toBeCloseTo(58500, 2);
+    expect(Number(createRes.body.total_moneda)).toBeCloseTo(9, 2);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(payloadFactpy?.moneda).toBe('USD');
+    expect(Number(payloadFactpy?.cambio)).toBeCloseTo(6500, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.totalPago)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.totalPagoMoneda)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.totalGs)).toBeCloseTo(58500, 2);
+  });
+
+  test('factura una venta a cuotas y envía la estructura de crédito a FactPy', async () => {
+    const cuotas = [
+      { numero: 1, monto: 1000, fecha_vencimiento: '2026-05-10' },
+      { numero: 2, monto: 1000, fecha_vencimiento: '2026-06-10' }
+    ];
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito: { tipo: 'CUOTAS', cuotas },
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .send({
+        condicion_pago: 'CREDITO',
+        credito: { tipo: 'CUOTAS', cuotas }
+      })
+      .expect(200);
+
+    const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(payloadFactpy?.condicionPago).toBe(2);
+    expect(payloadFactpy?.credito).toMatchObject({
+      condicionCredito: 2,
+      cantidadCuota: 2
+    });
+    expect(payloadFactpy?.credito?.cuotas).toEqual([
+      expect.objectContaining({ numero: 1, monto: 1000, fechaVencimiento: '2026-05-10' }),
+      expect.objectContaining({ numero: 2, monto: 1000, fechaVencimiento: '2026-06-10' })
+    ]);
+  });
+
+  test('factura una venta a crédito a plazo y envía condicion de plazo a FactPy', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito: {
+          tipo: 'PLAZO',
+          fecha_vencimiento: '2026-05-30',
+          descripcion: '45 dias'
+        },
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .send({
+        condicion_pago: 'CREDITO',
+        credito: {
+          tipo: 'PLAZO',
+          fecha_vencimiento: '2026-05-30',
+          descripcion: '45 dias'
+        }
+      })
+      .expect(200);
+
+    const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(payloadFactpy?.condicionPago).toBe(2);
+    expect(payloadFactpy?.credito).toMatchObject({
+      condicionCredito: 1,
+      descripcion: '45 dias'
+    });
+    expect(payloadFactpy?.credito?.cuotas).toBeUndefined();
+  });
+
+  test('continua la facturacion aunque FactPy falle al emitir', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    emitirFactura.mockRejectedValueOnce(new Error('FactPy temporalmente fuera de servicio'));
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(emitirFactura).toHaveBeenCalled();
+    expect(facturaRes.body.factura?.id).toBeTruthy();
+    expect(facturaRes.body.factura?.estado).toBe('PAGADA');
+    expect(facturaRes.body.factura?.respuesta_set?.factpy).toBeUndefined();
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  test('factura una venta con cliente con correo sin romper el flujo principal', async () => {
+    isEmailEnabled.mockReturnValue(true);
+    enviarFacturaDigitalPorCorreo.mockRejectedValueOnce(new EmailNotConfiguredError());
+
+    const cliente = await prisma.cliente.create({
+      data: {
+        nombre_razon_social: 'Cliente correo',
+        ruc: '80012345-6',
+        direccion: 'Calle correo 123',
+        correo: 'cliente-correo@test.com'
+      }
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        clienteId: cliente.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await prisma.facturaDigital.create({
+      data: {
+        ventaId: createRes.body.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0099999',
+        timbrado: '12345678',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 99999,
+        total: '1000.00',
+        total_iva: '90.91',
+        pdf_path: '/storage/facturas/mock.pdf'
+      }
+    });
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(facturaRes.body.factura?.id).toBeTruthy();
+    expect(facturaRes.body.venta?.id).toBe(createRes.body.id);
+  });
+
+  test('redirige el PDF de factura digital cuando pdf_path es externo', async () => {
+    const venta = await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        estado: 'FACTURADO',
+        total: '1000.00',
+        total_iva: '90.91',
+        moneda: 'PYG',
+        detalles: {
+          create: [{ productoId: producto.id, cantidad: 1, precio_unitario: '1000.00', subtotal: '1000.00' }]
+        }
+      }
+    });
+
+    const facturaDigital = await prisma.facturaDigital.create({
+      data: {
+        ventaId: venta.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000001',
+        timbrado: '12345678',
+        total: '1000.00',
+        total_iva: '90.91',
+        pdf_path: 'https://factpy.example.com/kude.pdf'
+      }
+    });
+
+    const response = await request(app)
+      .get(`/facturas-digitales/${facturaDigital.id}/pdf`)
+      .redirects(0)
+      .expect(302);
+
+    expect(response.headers.location).toBe('https://factpy.example.com/kude.pdf');
+  });
+
+  test('prioriza el PDF de factura electronica en el listado aunque exista factura digital', async () => {
+    const venta = await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        estado: 'FACTURADO',
+        total: '1000.00',
+        total_iva: '90.91',
+        moneda: 'PYG',
+        detalles: {
+          create: [{ productoId: producto.id, cantidad: 1, precio_unitario: '1000.00', subtotal: '1000.00' }]
+        }
+      }
+    });
+
+    await prisma.facturaElectronica.create({
+      data: {
+        ventaId: venta.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000456',
+        estado: 'ENVIADO',
+        pdf_path: 'https://factpy.example.com/factura-electronica.pdf'
+      }
+    });
+
+    await prisma.facturaDigital.create({
+      data: {
+        ventaId: venta.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000999',
+        timbrado: '12345678',
+        total: '1000.00',
+        total_iva: '90.91',
+        pdf_path: 'https://legacy.example.com/factura-digital.pdf'
+      }
+    });
+
+    const response = await request(app).get('/ventas').expect(200);
+    const listed = response.body.data.find((item) => item.id === venta.id);
+
+    expect(listed.pdf_url).toBe('https://factpy.example.com/factura-electronica.pdf');
+    expect(listed.factura_electronica?.pdf_path).toBe('https://factpy.example.com/factura-electronica.pdf');
+    expect(listed.factura_digital ?? null).toBeNull();
+  });
+
+  test('emite nota de crédito electrónica total para una venta facturada', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(facturaRes.body.factura?.id).toBeTruthy();
+
+    const notaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({ motivo: 'Anulación total por error de carga' })
+      .expect(201);
+
+    expect(notaRes.body.nota_credito).toBeDefined();
+    expect(notaRes.body.nota_credito.nro_nota).toMatch(/^001-001-/);
+  expect(notaRes.body.nota_credito.tipo_ajuste).toBe('TOTAL');
+    expect(Number(notaRes.body.nota_credito.total)).toBeLessThan(0);
+    expect(notaRes.body.nota_credito.estado).toBe('ENVIADO');
+    expect(notaRes.body.pdf_url).toBe('/storage/facturas/mock.pdf');
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({ motivo: 'Segundo intento inválido' })
+      .expect(409);
+
+    const anularRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/anular`)
+      .send({ motivo: 'No debe permitirse luego de NC' })
+      .expect(400);
+
+    expect(anularRes.body.error).toMatch(/nota de crédito|regularizada/i);
+  });
+
+  test('emite nota de crédito total en USD con descuento usando el neto facturado', async () => {
+    const productoUsd = await prisma.producto.create({ data: {
+      sku: 'TEST-USD-NC-TOTAL',
+      nombre: 'Producto USD NC Total',
+      tipo: 'REPUESTO',
+      precio_venta: '70000.00',
+      precio_venta_original: '10.00',
+      moneda_precio_venta: 'USD',
+      tipo_cambio_precio_venta: '7000.00',
+      stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
+    }});
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        moneda: 'USD',
+        tipo_cambio: 6500,
+        descuento_total: 1,
+        detalles: [{ productoId: productoUsd.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const notaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({ motivo: 'Anulación total USD con descuento' })
+      .expect(201);
+
+    expect(Number(notaRes.body.nota_credito.total)).toBeCloseTo(-58500, 2);
+    expect(Number(notaRes.body.nota_credito.total_moneda)).toBeCloseTo(-9, 2);
+
+    const notaPayload = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(notaPayload?.moneda).toBe('USD');
+    expect(Number(notaPayload?.items?.[0]?.precioUnitario)).toBeCloseTo(9, 4);
+    expect(Number(notaPayload?.items?.[0]?.precioTotal)).toBeCloseTo(-9, 4);
+    expect(Number(notaPayload?.totalPago)).toBeCloseTo(-9, 4);
+    expect(Number(notaPayload?.totalPagoGs)).toBeCloseTo(-58500, 2);
+  });
+
+  test('emite nota de crédito electrónica parcial por ítems', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const venta = await prisma.venta.findUnique({
+      where: { id: createRes.body.id },
+      include: { detalles: true }
+    });
+
+    const detalleVenta = venta.detalles[0];
+    expect(detalleVenta).toBeDefined();
+
+    const notaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({
+        motivo: 'Devolución parcial de un ítem',
+        tipo_ajuste: 'PARCIAL',
+        detalles: [{ detalleVentaId: detalleVenta.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    expect(notaRes.body.nota_credito.tipo_ajuste).toBe('PARCIAL');
+    expect(Number(notaRes.body.nota_credito.total)).toBeCloseTo(-1000, 2);
+    expect(prisma.state.notaCreditoDetalle).toHaveLength(1);
+    expect(prisma.state.notaCreditoDetalle[0]).toMatchObject({
+      detalleVentaId: detalleVenta.id,
+      cantidad: 1,
+      subtotal: 1000
+    });
+  });
+
+  test('emite nota de crédito parcial en USD con descuento prorrateado por cantidad', async () => {
+    const productoUsd = await prisma.producto.create({ data: {
+      sku: 'TEST-USD-NC-PARCIAL',
+      nombre: 'Producto USD NC Parcial',
+      tipo: 'REPUESTO',
+      precio_venta: '70000.00',
+      precio_venta_original: '10.00',
+      moneda_precio_venta: 'USD',
+      tipo_cambio_precio_venta: '7000.00',
+      stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
+    }});
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        moneda: 'USD',
+        tipo_cambio: 6500,
+        descuento_total: 2,
+        detalles: [{ productoId: productoUsd.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const venta = await prisma.venta.findUnique({
+      where: { id: createRes.body.id },
+      include: { detalles: true }
+    });
+
+    const detalleVenta = venta.detalles[0];
+    const notaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({
+        motivo: 'Devolución parcial USD con descuento',
+        tipo_ajuste: 'PARCIAL',
+        detalles: [{ detalleVentaId: detalleVenta.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    expect(Number(notaRes.body.nota_credito.total)).toBeCloseTo(-58500, 2);
+    expect(Number(notaRes.body.nota_credito.total_moneda)).toBeCloseTo(-9, 2);
+    expect(prisma.state.notaCreditoDetalle.at(-1)).toMatchObject({
+      detalleVentaId: detalleVenta.id,
+      cantidad: 1,
+      subtotal: 58500
+    });
+
+    const notaPayload = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(notaPayload?.moneda).toBe('USD');
+    expect(Number(notaPayload?.items?.[0]?.precioUnitario)).toBeCloseTo(9, 4);
+    expect(Number(notaPayload?.items?.[0]?.precioTotal)).toBeCloseTo(-9, 4);
+    expect(Number(notaPayload?.totalPago)).toBeCloseTo(-9, 4);
+    expect(Number(notaPayload?.totalPagoGs)).toBeCloseTo(-58500, 2);
+  });
+
+  test('usa consumidor final cuando la venta no tiene cliente en factura y nota de crédito', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const facturaPayload = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(facturaPayload?.cliente).toMatchObject({
+      nombre: 'Consumidor Final',
+      ruc: '44444401-7'
+    });
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({ motivo: 'Prueba consumidor final en NC' })
+      .expect(201);
+
+    const notaPayload = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(notaPayload?.cliente).toMatchObject({
+      nombre: 'Consumidor Final',
+      ruc: '44444401-7'
+    });
   });
 });

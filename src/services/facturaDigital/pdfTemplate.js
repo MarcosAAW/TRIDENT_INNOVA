@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { getSaleDetailSnapshot } = require('../../utils/productPricing');
 
 function renderFacturaDigitalPdf(doc, context) {
   const {
@@ -59,10 +60,9 @@ function renderFacturaDigitalPdf(doc, context) {
   const infoBottom = doc.y;
   const logoBottom = hasLogo ? cursorY + 90 : cursorY;
   const timbradoBottom = cursorY + timbradoBoxHeight;
+  // Definir headerBottom como el mayor valor para evitar solapamientos
   const headerBottom = Math.max(infoBottom, logoBottom, timbradoBottom);
-  cursorY = headerBottom + 30;
-
-  cursorY = drawOperacionInfo(doc, factura, margin, cursorY, contentWidth);
+  cursorY = drawOperacionInfo(doc, factura, venta, margin, headerBottom + 30, contentWidth);
   cursorY = drawClienteInfo(doc, venta, margin, cursorY + 8, contentWidth);
   cursorY = drawDetalleTabla(doc, venta, detalles, currency, margin, cursorY + 12, contentWidth) + 10;
   cursorY = drawTotales(doc, totals, breakdown, factura, currency, margin, cursorY, contentWidth, qrBuffer);
@@ -72,18 +72,36 @@ function renderFacturaDigitalPdf(doc, context) {
   }
 }
 
-function drawOperacionInfo(doc, factura, x, y, width) {
+function drawOperacionInfo(doc, factura, venta, x, y, width) {
+  const safeWidth = Number(width);
+  if (!Number.isFinite(safeWidth) || safeWidth <= 0) {
+    return y;
+  }
+  const condicionBase = factura.condicion || venta?.condicion_venta || 'CONTADO';
+  const fechaVencimiento = venta?.fecha_vencimiento || factura?.fecha_vencimiento || null;
+  const fechaBase = venta?.fecha || factura?.fecha_emision || fechaVencimiento;
+  let condicionLabel = condicionBase;
+
+  const isCredito = String(condicionBase || '').toUpperCase().includes('CREDITO');
+  if (isCredito && fechaVencimiento) {
+    const fv = new Date(fechaVencimiento);
+    const fb = new Date(fechaBase || fechaVencimiento);
+    const diffMs = fv.getTime() - fb.getTime();
+    const dias = Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+    condicionLabel = `CRÉDITO ${dias} DÍAS (vence ${formatFecha(fv)})`;
+  }
+
   const rows = [
     [
-      { label: 'FECHA / HORA', value: formatFechaHora(factura.fecha_emision), width: width * 0.3 },
-      { label: 'CONDICIÓN DE VENTA', value: factura.condicion || 'CONTADO', width: width * 0.35 },
-      { label: 'TIPO DE TRANSACCIÓN', value: factura.tipo_transaccion || 'Venta de mercadería', width: width * 0.35 }
+      { label: 'FECHA / HORA', value: formatFechaHora(factura.fecha_emision), width: safeWidth * 0.3 },
+      { label: 'CONDICIÓN DE VENTA', value: condicionLabel, width: safeWidth * 0.35 },
+      { label: 'TIPO DE TRANSACCIÓN', value: factura.tipo_transaccion || 'Venta de mercadería', width: safeWidth * 0.35 }
     ],
     [
-      { label: 'MONEDA', value: (factura.moneda || 'PYG').toUpperCase(), width: width * 0.2 },
-      { label: 'TIPO DE CAMBIO', value: formatCambio(factura.tipo_cambio), width: width * 0.25 },
-      { label: 'NOTA DE REMISIÓN Nº', value: factura.nota_remision || 'S/D', width: width * 0.25 },
-      { label: 'CORREO EMISOR', value: factura.correo_emisor || '-', width: width * 0.3 }
+      { label: 'MONEDA', value: (factura.moneda || 'PYG').toUpperCase(), width: safeWidth * 0.2 },
+      { label: 'TIPO DE CAMBIO', value: formatCambio(factura.tipo_cambio), width: safeWidth * 0.25 },
+      { label: 'NOTA DE REMISIÓN Nº', value: factura.nota_remision || 'S/D', width: safeWidth * 0.25 },
+      { label: 'CORREO EMISOR', value: factura.correo_emisor || '-', width: safeWidth * 0.3 }
     ]
   ];
 
@@ -127,13 +145,14 @@ function drawClienteInfo(doc, venta, x, y, width) {
 
 function drawDetalleTabla(doc, venta, detalles, currency, x, y, width) {
   const headerHeight = 24;
+  const isUsd = (currency || 'PYG').toUpperCase() === 'USD';
   const columns = [
     { key: 'cantidad', label: 'CANTIDAD', width: 70, align: 'center' },
     { key: 'descripcion', label: 'DESCRIPCIÓN', width: width - 340, align: 'left' },
-    { key: 'precio_unitario', label: 'PRECIO UNITARIO', width: 90, align: 'right' },
-    { key: 'exentas', label: 'EXENTAS', width: 60, align: 'right' },
-    { key: 'gravado5', label: '5%', width: 60, align: 'right' },
-    { key: 'gravado10', label: '10%', width: 60, align: 'right' }
+    { key: 'precio_unitario', label: isUsd ? 'PRECIO UNITARIO (USD)' : 'PRECIO UNITARIO', width: 90, align: 'right' },
+    { key: 'exentas', label: isUsd ? 'EXENTAS (USD)' : 'EXENTAS', width: 60, align: 'right' },
+    { key: 'gravado5', label: isUsd ? '5% (USD)' : '5%', width: 60, align: 'right' },
+    { key: 'gravado10', label: isUsd ? '10% (USD)' : '10%', width: 60, align: 'right' }
   ];
 
   doc.rect(x, y, width, headerHeight).fill('#e5e7eb');
@@ -172,14 +191,15 @@ function drawDetalleTabla(doc, venta, detalles, currency, x, y, width) {
 function prepareDetalleRows(detalles, venta, columns, currency) {
   const rows = [];
   const safeDetalles = Array.isArray(detalles) ? detalles : [];
-  const tipoCambio = Number(venta?.tipo_cambio) || 0;
-  const factor = currency.toUpperCase() === 'USD' && tipoCambio > 0 ? 1 / tipoCambio : 1;
   safeDetalles.forEach((detalle) => {
+    const snapshot = getSaleDetailSnapshot(detalle, venta);
     const cantidad = Number(detalle.cantidad) || 0;
-    const precioBase = Number(detalle.precio_unitario) || 0;
-    const subtotalBase = Number(detalle.subtotal) || cantidad * precioBase;
-    const precio = precioBase * factor;
-    const subtotal = subtotalBase * factor;
+    const precio = currency.toUpperCase() === 'USD'
+      ? Number(snapshot.unitCurrency) || 0
+      : Number(snapshot.unitCurrency ?? snapshot.unitGs) || 0;
+    const subtotal = currency.toUpperCase() === 'USD'
+      ? Number(snapshot.subtotalCurrency) || 0
+      : Number(snapshot.subtotalCurrency ?? snapshot.subtotalGs) || 0;
     const iva = resolveDetalleIva(detalle, venta);
     const impuesto = splitTax(subtotal, iva);
     rows.push({
@@ -199,11 +219,25 @@ function drawTotales(doc, totals, breakdown, factura, currency, x, y, width, qrB
   const qrPanelWidth = width - tableWidth - 16;
   const rowHeight = 22;
   const qrPanelHeight = 190;
-  const rows = [
-    { label: 'SUBTOTAL', value: formatCurrency(totals.subtotal, currency) },
-    { label: 'DESCUENTO', value: formatCurrency(totals.descuento, currency) },
-    { label: 'TOTAL', value: formatCurrency(totals.total, currency) }
-  ];
+  const isUsd = (currency || 'PYG').toUpperCase() === 'USD';
+  const cambio = Number(factura?.tipo_cambio) || 0;
+  const totalGs = isUsd && Number.isFinite(cambio) && cambio > 0 ? totals.total * cambio : null;
+
+  // Mostrar solo la moneda principal
+  let rows = [];
+  if (isUsd) {
+    rows = [
+      { label: 'SUBTOTAL (USD)', value: formatCurrency(totals.subtotal, 'USD') },
+      { label: 'DESCUENTO (USD)', value: formatCurrency(totals.descuento, 'USD') },
+      { label: 'TOTAL (USD)', value: formatCurrency(totals.total, 'USD') }
+    ];
+  } else {
+    rows = [
+      { label: 'SUBTOTAL', value: formatCurrency(totals.subtotal, 'PYG') },
+      { label: 'DESCUENTO', value: formatCurrency(totals.descuento, 'PYG') },
+      { label: 'TOTAL', value: formatCurrency(totals.total, 'PYG') }
+    ];
+  }
 
   rows.forEach((row, index) => {
     doc.rect(x, y + index * rowHeight, tableWidth, rowHeight).stroke('#111827');
@@ -217,9 +251,9 @@ function drawTotales(doc, totals, breakdown, factura, currency, x, y, width, qrB
   const ivaBlockY = y + rows.length * rowHeight + 10;
   const totalIva = breakdown.iva5 + breakdown.iva10;
   const ivaRows = [
-    { label: 'LIQUIDACIÓN DEL IVA (5%)', value: formatCurrency(breakdown.iva5, currency) },
-    { label: 'LIQUIDACIÓN DEL IVA (10%)', value: formatCurrency(breakdown.iva10, currency) },
-    { label: 'TOTAL IVA', value: formatCurrency(totalIva, currency) }
+    { label: isUsd ? 'LIQ. IVA (USD) 5%' : 'LIQUIDACIÓN DEL IVA (5%)', value: formatCurrency(breakdown.iva5, isUsd ? 'USD' : 'PYG') },
+    { label: isUsd ? 'LIQ. IVA (USD) 10%' : 'LIQUIDACIÓN DEL IVA (10%)', value: formatCurrency(breakdown.iva10, isUsd ? 'USD' : 'PYG') },
+    { label: isUsd ? 'TOTAL IVA (USD)' : 'TOTAL IVA', value: formatCurrency(totalIva, isUsd ? 'USD' : 'PYG') }
   ];
   ivaRows.forEach((row, index) => {
     doc.rect(x, ivaBlockY + index * rowHeight, tableWidth, rowHeight).stroke('#111827');
@@ -230,6 +264,17 @@ function drawTotales(doc, totals, breakdown, factura, currency, x, y, width, qrB
     });
   });
 
+  // Si es USD, mostrar el total en Gs solo abajo del total USD
+  let afterIvaY = ivaBlockY + ivaRows.length * rowHeight + 10;
+  if (isUsd && totalGs) {
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#b91c1c');
+    doc.text('TOTAL (GS):', x + 8, afterIvaY, { continued: true });
+    doc.font('Helvetica').fontSize(11).fillColor('#111827');
+    doc.text(formatCurrency(totalGs, 'PYG'), x + 120, afterIvaY);
+    afterIvaY += rowHeight;
+  }
+  doc.fillColor('#111827');
+
   drawQrPanel(doc, {
     x: x + tableWidth + 16,
     y,
@@ -238,7 +283,7 @@ function drawTotales(doc, totals, breakdown, factura, currency, x, y, width, qrB
     qrBuffer
   });
 
-  const tablaBottom = ivaBlockY + ivaRows.length * rowHeight;
+  const tablaBottom = isUsd && totalGs ? afterIvaY : ivaBlockY + ivaRows.length * rowHeight;
   const qrBottom = y + qrPanelHeight;
   return Math.max(tablaBottom, qrBottom);
 }

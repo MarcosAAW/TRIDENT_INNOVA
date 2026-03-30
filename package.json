@@ -12,6 +12,8 @@
     "db:check": "node scripts/db-check.js",
     "db:seed": "node scripts/seed.js",
     "db:reset": "node scripts/reset.js",
+    "db:seed:nota-pedido-demo": "node scripts/seed-nota-pedido-demo.js",
+    "auth:reset": "node scripts/seed-login-only.js",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "lint": "eslint \"src/**/*.js\" \"tests/**/*.js\" --max-warnings=0",

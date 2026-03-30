@@ -39,30 +39,40 @@ describe('Productos API', () => {
   });
 
   beforeEach(async () => {
-      // Orden de borrado respeta FK: recibo_detalle -> recibo -> ventas -> resto
-    await prisma.reciboDetalle.deleteMany();
-    await prisma.recibo.deleteMany();
-    await prisma.detalleVenta.deleteMany();
-    await prisma.movimientoStock.deleteMany();
-    await prisma.venta.deleteMany();
-    await prisma.producto.deleteMany();
-    await prisma.salidaCaja.deleteMany();
-    await prisma.cierreCaja.deleteMany();
-    await prisma.aperturaCaja.deleteMany();
-    await prisma.usuarioSucursal.deleteMany();
-    await prisma.usuario.deleteMany();
-    await prisma.sucursal.deleteMany();
+    // Limpieza ordenada: primero recibos, ventas, presupuestos, luego usuarios y sucursales
+    await prisma.reciboDetalle?.deleteMany?.();
+    await prisma.recibo?.deleteMany?.();
+    await prisma.notaCreditoDetalle?.deleteMany?.();
+    await prisma.notaCreditoElectronica?.deleteMany?.();
+    await prisma.facturaDigital?.deleteMany?.();
+    await prisma.facturaElectronica?.deleteMany?.();
+    await prisma.detalleVenta?.deleteMany?.();
+    await prisma.movimientoStock?.deleteMany?.();
+    await prisma.venta?.deleteMany?.();
+    await prisma.detallePresupuesto?.deleteMany?.();
+    await prisma.presupuesto?.deleteMany?.();
+    await prisma.productoStock?.deleteMany?.();
+    await prisma.producto?.deleteMany?.();
+    await prisma.salidaCaja?.deleteMany?.();
+    await prisma.cierreCaja?.deleteMany?.();
+    await prisma.aperturaCaja?.deleteMany?.();
+    await prisma.usuarioSucursal?.deleteMany?.();
+    await prisma.usuario?.deleteMany?.();
+    await prisma.sucursal?.deleteMany?.();
+
+    // Generar sufijo único
+    const unique = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
 
     sucursal = await prisma.sucursal.create({
       data: {
-        nombre: 'Sucursal Test'
+        nombre: `Sucursal Test ${unique}`
       }
     });
 
     adminUser = await prisma.usuario.create({
       data: {
         nombre: 'Admin pruebas',
-        usuario: 'admin.pruebas',
+        usuario: `admin.pruebas_${unique}`,
         password_hash: 'hash',
         rol: 'ADMIN'
       }
@@ -173,5 +183,92 @@ describe('Productos API', () => {
     expect(response.headers['content-type']).toMatch(/application\/pdf/);
     expect(response.body).toBeInstanceOf(Buffer);
     expect(response.body.length).toBeGreaterThan(1000);
+  });
+  // Test: Faltan campos obligatorios
+  test('rechaza creación sin sku ni nombre', async () => {
+    const res = await auth(request(app).post('/productos')).send({ tipo: 'DRON', precio_venta: 1000, stock_actual: 1 }).expect(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  // Test: Precio negativo
+  test('rechaza precio_venta negativo', async () => {
+    const res = await auth(request(app).post('/productos')).send({ ...basePayload, precio_venta: -100 }).expect(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  // Test: Acceso sin autenticación
+  test('rechaza acceso sin autenticación', async () => {
+    const res = await request(app).get('/productos').expect(401);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  // Test: Acceso con rol incorrecto
+  test('rechaza creación con rol no permitido', async () => {
+    // Crear usuario con rol GERENCIA
+    const unique = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
+    const suc = await prisma.sucursal.create({ data: { nombre: `Sucursal Test ${unique}` } });
+    const user = await prisma.usuario.create({ data: { nombre: 'User', usuario: `user_${unique}`, password_hash: 'hash', rol: 'GERENCIA' } });
+    await prisma.usuarioSucursal.create({ data: { usuarioId: user.id, sucursalId: suc.id, rol: 'GERENCIA' } });
+    const req = request(app).post('/productos').set('x-user-id', user.id).set('x-user-role', user.rol).set('x-sucursal-id', suc.id);
+    const res = await req.send({ ...basePayload, sku: 'ROL-TEST', nombre: 'Rol Test' }).expect(403);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error).toMatch(/permisos/i);
+  });
+
+  // Test: Acceso cruzado de sucursal
+  test('comparte productos entre sucursales pero mantiene stock separado', async () => {
+    // Crear sucursal y usuario A
+    const unique = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
+    const sucA = await prisma.sucursal.create({ data: { nombre: `Sucursal A ${unique}` } });
+    const userA = await prisma.usuario.create({ data: { nombre: 'UserA', usuario: `userA_${unique}`, password_hash: 'hash', rol: 'ADMIN' } });
+    await prisma.usuarioSucursal.create({ data: { usuarioId: userA.id, sucursalId: sucA.id, rol: 'ADMIN' } });
+    // Crear sucursal y usuario B
+    const sucB = await prisma.sucursal.create({ data: { nombre: `Sucursal B ${unique}` } });
+    const userB = await prisma.usuario.create({ data: { nombre: 'UserB', usuario: `userB_${unique}`, password_hash: 'hash', rol: 'ADMIN' } });
+    await prisma.usuarioSucursal.create({ data: { usuarioId: userB.id, sucursalId: sucB.id, rol: 'ADMIN' } });
+    // Crear producto en sucursal A
+    const prodA = await request(app).post('/productos').set('x-user-id', userA.id).set('x-user-role', userA.rol).set('x-sucursal-id', sucA.id).send({ ...basePayload, sku: `SKU-A-${unique}` }).expect(201);
+
+    const desdeSucursalB = await request(app).get(`/productos/${prodA.body.id}`).set('x-user-id', userB.id).set('x-user-role', userB.rol).set('x-sucursal-id', sucB.id).expect(200);
+    expect(Number(desdeSucursalB.body.stock_actual)).toBe(0);
+
+    await request(app)
+      .put(`/productos/${prodA.body.id}`)
+      .set('x-user-id', userB.id)
+      .set('x-user-role', userB.rol)
+      .set('x-sucursal-id', sucB.id)
+      .send({ stock_actual: 3 })
+      .expect(200);
+
+    const desdeSucursalA = await request(app).get(`/productos/${prodA.body.id}`).set('x-user-id', userA.id).set('x-user-role', userA.rol).set('x-sucursal-id', sucA.id).expect(200);
+    const actualizadoSucursalB = await request(app).get(`/productos/${prodA.body.id}`).set('x-user-id', userB.id).set('x-user-role', userB.rol).set('x-sucursal-id', sucB.id).expect(200);
+
+    expect(Number(desdeSucursalA.body.stock_actual)).toBe(5);
+    expect(Number(actualizadoSucursalB.body.stock_actual)).toBe(3);
+  });
+
+  // Test: Soft delete y consulta directa
+  test('verifica que deleted_at funciona', async () => {
+    const prod = await auth(request(app).post('/productos')).send({ ...basePayload, sku: `SOFT-DEL-${Date.now()}` }).expect(201);
+    await auth(request(app).delete(`/productos/${prod.body.id}`)).expect(200);
+    // Consulta directa (debería incluir deleted_at)
+    const producto = await prisma.producto.findUnique({ where: { id: prod.body.id } });
+    expect(producto.deleted_at).not.toBeNull();
+  });
+
+  // Test: Listado incluye/excluye borrados según flag
+  test('listado incluye borrados si se pide', async () => {
+    const prod = await auth(request(app).post('/productos')).send({ ...basePayload, sku: `BORRADO-${Date.now()}` }).expect(201);
+    await auth(request(app).delete(`/productos/${prod.body.id}`)).expect(200);
+    const res = await auth(request(app).get('/productos?include_deleted=true')).expect(200);
+    expect(res.body.data.some((p) => p.id === prod.body.id)).toBe(true);
+  });
+
+  // Test: Simulación de error de integración (mock)
+  test.skip('maneja error de integración externa', async () => {
+    // Aquí se podría mockear una dependencia y forzar un error
+    // Ejemplo: jest.spyOn(servicio, 'generarReporte').mockRejectedValue(new Error('Fallo externo'));
+    // ...
+    expect(true).toBe(true);
   });
 });

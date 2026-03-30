@@ -1,3 +1,18 @@
+
+// ...existing code...
+
+
+
+
+
+
+
+// ...existing code...
+
+
+// ...existing code...
+
+// Mover todos los imports y la inicialización de router al principio del archivo
 const express = require('express');
 const { randomUUID } = require('crypto');
 const path = require('path');
@@ -15,15 +30,15 @@ const { procesarFacturaElectronica } = require('../services/sifen/facturaProcess
 const empresaConfig = require('../config/empresa');
 const factpyConfig = require('../config/factpy');
 const { emitirFactura } = require('../services/factpy/client');
-const { generarFacturaDigital, FacturaDigitalError, validateTimbradoConfig, buildNumeroFactura } = require('../services/facturaDigital');
+const { FacturaDigitalError, validateTimbradoConfig, buildNumeroFactura } = require('../services/facturaDigital');
 const { requireAuth, authorizeRoles } = require('../middleware/authContext');
 const { requireSucursal } = require('../middleware/sucursalContext');
+const { resolveProductSalePricing, getSaleDetailSnapshot } = require('../utils/productPricing');
 const {
-  enviarFacturaDigitalPorCorreo,
-  EmailNotConfiguredError,
-  DestinatarioInvalidoError,
-  isEmailEnabled
-} = require('../services/email/facturaDigitalMailer');
+  getProductoStockMap,
+  resolveProductoStock,
+  applyProductoStockDelta
+} = require('../utils/productStock');
 
 const MONEDAS_PERMITIDAS = new Set(['PYG', 'USD']);
 const SIFEN_ENABLED = !['false', '0', 'off'].includes(String(process.env.SIFEN_ENABLE || 'true').toLowerCase());
@@ -47,13 +62,27 @@ const VENTAS_REPORT_INCLUDE = {
       nro_factura: true
     }
   },
-  factura_digital: {
+  notas_credito: {
+    where: { deleted_at: null },
     select: {
       id: true,
-      nro_factura: true,
-      pdf_path: true
+      nro_nota: true,
+      pdf_path: true,
+      estado: true,
+      fecha_emision: true
     }
   },
+  detalles: {
+    include: {
+      producto: true
+    }
+  }
+};
+
+const TICKET_PDF_INCLUDE = {
+  cliente: true,
+  usuario: true,
+  sucursal: true,
   detalles: {
     include: {
       producto: true
@@ -69,7 +98,7 @@ const detalleSchema = z.object({
 });
 
 const ivaSchema = z
-  .union([z.literal(5), z.literal(10), z.literal('5'), z.literal('10')])
+  .union([z.literal(0), z.literal(5), z.literal(10), z.literal('0'), z.literal('5'), z.literal('10')])
   .optional()
   .transform((value) => {
     if (value === undefined || value === null) return undefined;
@@ -90,6 +119,10 @@ const creditoCuotaSchema = z.object({
   fecha_vencimiento: z.union([z.coerce.date(), z.string().trim().min(1)])
 });
 
+// Mover todos los imports y la inicialización de router al principio del archivo
+// Endpoint para servir el PDF del ticket de venta contado (hoja completa)
+// (Colocado después de la inicialización de router)
+
 const creditoConfigSchema = z.object({
   tipo: z.enum(['PLAZO', 'CUOTAS']).default('PLAZO'),
   descripcion: z.string().trim().min(1).max(10).optional(),
@@ -97,6 +130,35 @@ const creditoConfigSchema = z.object({
   cuotas: z.array(creditoCuotaSchema).min(1).optional(),
   fecha_vencimiento: z.coerce.date().optional()
 });
+
+const notaCreditoDetalleSchema = z.object({
+  detalleVentaId: z.string().uuid(),
+  cantidad: z.coerce.number().int().min(1)
+});
+
+const createNotaCreditoSchema = z
+  .object({
+    motivo: z.string().trim().min(5).max(200),
+    tipo_ajuste: z.enum(['TOTAL', 'PARCIAL']).optional(),
+    detalles: z.array(notaCreditoDetalleSchema).optional()
+  })
+  .transform((value) => {
+    const detalles = Array.isArray(value.detalles) ? value.detalles : [];
+    return {
+      ...value,
+      detalles,
+      tipo_ajuste: value.tipo_ajuste || (detalles.length ? 'PARCIAL' : 'TOTAL')
+    };
+  })
+  .superRefine((value, ctx) => {
+    if (value.tipo_ajuste === 'PARCIAL' && (!Array.isArray(value.detalles) || !value.detalles.length)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Debes indicar al menos un ítem para la nota de crédito parcial.',
+        path: ['detalles']
+      });
+    }
+  });
 
 const facturarRequestSchema = z
   .object({
@@ -138,11 +200,72 @@ class VentaValidationError extends Error {}
 
 const MAX_DECIMAL_VALUE = 10_000_000_000;
 const IVA_DIVISOR = {
+  0: null,
   5: 21,
   10: 11
 };
 
 const MAX_FACTURA_REINTENTOS = 5;
+
+function numberToWordsEs(num) {
+  const units = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve'];
+  const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+  const hundreds = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+
+  const toWordsBelowThousand = (n) => {
+    if (n === 0) return '';
+    if (n < 10) return units[n];
+    if (n < 20) return teens[n - 10];
+    if (n < 100) {
+      const ten = Math.trunc(n / 10);
+      const unit = n % 10;
+      if (n === 20) return 'veinte';
+      const suffix = unit ? ` y ${units[unit]}` : '';
+      return `${tens[ten]}${suffix}`;
+    }
+    if (n === 100) return 'cien';
+    const hundred = Math.trunc(n / 100);
+    const remainder = n % 100;
+    const rest = remainder ? ` ${toWordsBelowThousand(remainder)}` : '';
+    return `${hundreds[hundred]}${rest}`;
+  };
+
+  const toWords = (n) => {
+    if (n === 0) return 'cero';
+    let result = '';
+    const billions = Math.trunc(n / 1_000_000_000);
+    const millions = Math.trunc((n % 1_000_000_000) / 1_000_000);
+    const thousands = Math.trunc((n % 1_000_000) / 1000);
+    const remainder = n % 1000;
+
+    if (billions) {
+      result += `${toWords(billions)} mil millones`;
+    }
+    if (millions) {
+      result += `${result ? ' ' : ''}${millions === 1 ? 'un millon' : `${toWords(millions)} millones`}`;
+    }
+    if (thousands) {
+      result += `${result ? ' ' : ''}${thousands === 1 ? 'mil' : `${toWordsBelowThousand(thousands)} mil`}`;
+    }
+    if (remainder) {
+      result += `${result ? ' ' : ''}${toWordsBelowThousand(remainder)}`;
+    }
+    return result.trim();
+  };
+
+  return toWords(Math.trunc(Math.abs(num)));
+}
+
+function montoEnLetras(total, moneda) {
+  const safeMonto = Number.isFinite(Number(total)) ? Math.abs(Number(total)) : 0;
+  const entero = Math.trunc(safeMonto);
+  const centavos = Math.round((safeMonto - entero) * 100);
+  const monedaNombre = String(moneda || 'PYG').toUpperCase() === 'USD' ? 'dolares' : 'guaranies';
+  const textoNumero = numberToWordsEs(entero);
+  const textoCentavos = centavos.toString().padStart(2, '0');
+  return `${textoNumero} ${monedaNombre} con ${textoCentavos}/100`;
+}
 
 function isUniqueNroFacturaError(error) {
   return (
@@ -271,7 +394,9 @@ function normalizeIvaPorcentaje(value) {
     return 10;
   }
   const parsed = Number(value);
-  return parsed === 5 ? 5 : 10;
+  if (parsed === 0) return 0;
+  if (parsed === 5) return 5;
+  return 10;
 }
 
 function normalizeCurrency(value) {
@@ -312,28 +437,18 @@ router.get('/', async (req, res) => {
     return res.status(400).json({ error: 'Parámetros inválidos', detalles: parsed.error.flatten() });
   }
 
-  const filters = parsed.data || {};
-  const where = buildVentaWhere(filters, req.sucursalId);
-
   try {
+    const filters = parsed.data || {};
+    const where = buildVentaWhere(filters, req.sucursalId);
     const ventas = await prisma.venta.findMany({
       where,
       include: {
         cliente: true,
         usuario: true,
-        factura_electronica: {
-          select: {
-            id: true,
-            nro_factura: true
-          }
-        },
-        factura_digital: {
-          select: {
-            id: true,
-            nro_factura: true,
-            pdf_path: true,
-            estado_envio: true
-          }
+        factura_electronica: true,
+        notas_credito: {
+          where: { deleted_at: null },
+          orderBy: { created_at: 'desc' }
         },
         detalles: {
           include: {
@@ -344,7 +459,29 @@ router.get('/', async (req, res) => {
       orderBy: { fecha: 'desc' }
     });
 
-    const data = serialize(ventas);
+    // Agregar campo pdf_url y exponer info de crédito (tipo, cuotas, etc.)
+    const data = serialize(ventas).map((venta) => {
+      let pdf_url = null;
+      let pdf_path = venta.factura_electronica?.pdf_path || null;
+      if (venta.factura_electronica && venta.factura_electronica.pdf_path) {
+        pdf_url = venta.factura_electronica.pdf_path;
+        pdf_path = pdf_url;
+      }
+
+      // Extraer info de crédito: preferir el campo persistido en la venta
+      let credito = null;
+      if (venta.credito_config) {
+        credito = venta.credito_config;
+      } else if (venta.factura_electronica && venta.factura_electronica.respuesta_set && venta.factura_electronica.respuesta_set.credito) {
+        credito = venta.factura_electronica.respuesta_set.credito;
+      } else if (venta.credito) {
+        credito = venta.credito;
+      }
+      if (!credito && venta.es_credito && venta.fecha_vencimiento) {
+        credito = { tipo: 'PLAZO', fecha_vencimiento: venta.fecha_vencimiento };
+      }
+      return { ...venta, pdf_url, credito };
+    });
     const resumen = data.reduce(
       (acc, venta) => {
         const estado = (venta.estado || '').toUpperCase();
@@ -363,7 +500,6 @@ router.get('/', async (req, res) => {
       },
       { total_pyg: 0, total_usd: 0 }
     );
-
     res.json({
       data,
       meta: {
@@ -372,13 +508,227 @@ router.get('/', async (req, res) => {
         total: data.length,
         totalPages: 1,
         resumen
-      }
+      },
+      ventas: data,
+      resumen
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Error al listar ventas' });
+    res.status(500).json({ error: 'No se pudieron obtener las ventas.' });
+  }
+// ...existing code...
+});
+
+router.get('/:id/ticket/pdf', async (req, res) => {
+  const parsedParams = ventaIdParams.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: 'Identificador inválido', detalles: parsedParams.error.flatten() });
+  }
+
+  try {
+    const venta = await prisma.venta.findFirst({
+      where: {
+        id: parsedParams.data.id,
+        sucursalId: req.sucursalId
+      },
+      include: TICKET_PDF_INCLUDE
+    });
+
+    if (!venta) {
+      return res.status(404).json({ error: 'Venta no encontrada.' });
+    }
+
+    const ventaData = serialize(venta);
+    if (String(ventaData.estado || '').toUpperCase() !== 'TICKET') {
+      return res.status(400).json({ error: 'La venta indicada no corresponde a un ticket.' });
+    }
+
+    if (normalizeCurrency(ventaData.moneda) === 'USD' && !(Number(ventaData.tipo_cambio) > 0)) {
+      return res.status(400).json({ error: 'El ticket en USD no tiene tipo de cambio válido.' });
+    }
+
+    const fileLabel = (ventaData.id || 'ticket').slice(0, 8).toUpperCase();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="ticket-venta-${fileLabel}.pdf"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 36, bufferPages: true });
+    doc.pipe(res);
+    renderVentaTicketPdf(doc, ventaData);
+    doc.end();
+  } catch (error) {
+    console.error('[ventas] ticket pdf', error);
+    res.status(500).json({ error: 'No se pudo generar el ticket en PDF.' });
   }
 });
+
+router.post('/:id/nota-credito', authorizeRoles('ADMIN'), async (req, res) => {
+  const parsedParams = ventaIdParams.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ error: 'Identificador de venta inválido.' });
+  }
+
+  const parsedBody = createNotaCreditoSchema.safeParse(req.body || {});
+  if (!parsedBody.success) {
+    return res.status(400).json({ error: 'Datos inválidos para la nota de crédito.', detalles: parsedBody.error.flatten() });
+  }
+
+  const { id } = parsedParams.data;
+  const { motivo, tipo_ajuste: tipoAjuste, detalles: detallesSolicitados } = parsedBody.data;
+
+  try {
+    const venta = await prisma.venta.findFirst({
+      where: { id, sucursalId: req.sucursalId },
+      include: {
+        cliente: true,
+        usuario: true,
+        sucursal: true,
+        detalles: { include: { producto: true } },
+        factura_electronica: true,
+        notas_credito: {
+          where: { deleted_at: null },
+          orderBy: { created_at: 'desc' }
+        }
+      }
+    });
+
+    if (!venta) {
+      return res.status(404).json({ error: 'No se encontró la venta solicitada.' });
+    }
+    if (venta.deleted_at || String(venta.estado || '').toUpperCase() === 'ANULADA') {
+      return res.status(400).json({ error: 'No se puede emitir nota de crédito para una venta anulada.' });
+    }
+    if (!venta.factura_electronica?.id) {
+      return res.status(400).json({ error: 'La venta no tiene factura electrónica asociada.' });
+    }
+    if (Array.isArray(venta.notas_credito) && venta.notas_credito.length) {
+      return res.status(409).json({ error: 'La venta ya tiene una nota de crédito total emitida.' });
+    }
+
+    const cdcAsociado = extractFacturaCdc(venta.factura_electronica);
+    if (!cdcAsociado) {
+      return res.status(412).json({ error: 'La factura asociada no tiene CDC válido para emitir la nota de crédito.' });
+    }
+
+    const notaCreditoCalculada = buildNotaCreditoData(venta, {
+      tipoAjuste,
+      detallesSolicitados
+    });
+
+    const timbradoSeleccionado = selectTimbradoParaVenta(venta, empresaConfig);
+    const secuencia = await resolveSecuenciaNotaCredito(prisma, timbradoSeleccionado, req.sucursalId);
+    const nroNota = buildNumeroFactura(timbradoSeleccionado, secuencia);
+    const now = new Date();
+
+    const notaBase = await prisma.notaCreditoElectronica.create({
+      data: {
+        ventaId: venta.id,
+        facturaElectronicaId: venta.factura_electronica.id,
+        sucursalId: req.sucursalId,
+        nro_nota: nroNota,
+        timbrado: timbradoSeleccionado.numero || 'NO_TIMBRADO',
+        establecimiento: timbradoSeleccionado.establecimiento || '001',
+        punto_expedicion: timbradoSeleccionado.punto_expedicion || timbradoSeleccionado.punto || '001',
+        secuencia,
+        motivo,
+        tipo_ajuste: notaCreditoCalculada.tipoAjuste,
+        fecha_emision: now,
+        moneda: normalizeCurrency(venta.moneda),
+        tipo_cambio: venta.tipo_cambio || null,
+        total: -Math.abs(notaCreditoCalculada.totalGs),
+        total_moneda: notaCreditoCalculada.totalMoneda != null ? -Math.abs(notaCreditoCalculada.totalMoneda) : null,
+        cdc: cdcAsociado,
+        qr_data: cdcAsociado,
+        estado: 'PENDIENTE',
+        intentos: 1,
+        ambiente: venta.factura_electronica.ambiente || 'PRUEBA',
+        detalles: {
+          create: notaCreditoCalculada.detalles.map((detalle) => ({
+            detalleVentaId: detalle.detalleVentaId,
+            productoId: detalle.productoId,
+            descripcion: detalle.descripcion,
+            codigo_producto: detalle.codigoProducto,
+            cantidad: detalle.cantidad,
+            precio_unitario: detalle.precioUnitarioGs,
+            subtotal: detalle.subtotalGs,
+            iva_porcentaje: detalle.ivaPorcentaje
+          }))
+        },
+        respuesta_set: {
+          motivo,
+          tipo_ajuste: notaCreditoCalculada.tipoAjuste,
+          factura_asociada: venta.factura_electronica.nro_factura,
+          cdc_asociado: cdcAsociado,
+          timestamp: now.toISOString()
+        }
+      }
+    });
+
+    let notaActualizada = notaBase;
+    if (factpyConfig?.recordId) {
+      try {
+        const payload = buildFactPyCreditNotePayload(venta, venta.factura_electronica, notaBase, {
+          motivo,
+          cdcAsociado,
+          detallesSeleccionados: notaCreditoCalculada.detalles
+        });
+        const respuestaFactpy = await emitirFactura({
+          dataJson: payload,
+          recordID: factpyConfig.recordId,
+          baseUrl: factpyConfig.baseUrl,
+          timeoutMs: factpyConfig.timeoutMs
+        });
+
+        notaActualizada = await prisma.notaCreditoElectronica.update({
+          where: { id: notaBase.id },
+          data: {
+            respuesta_set: {
+              motivo,
+              tipo_ajuste: notaCreditoCalculada.tipoAjuste,
+              receiptid: payload.receiptid,
+              documentoAsociado: payload.documentoAsociado,
+              factpy: respuestaFactpy,
+              timestamp: new Date().toISOString()
+            },
+            cdc: respuestaFactpy?.cdc || notaBase.cdc,
+            qr_data: respuestaFactpy?.cdc || notaBase.qr_data,
+            xml_path: normalizeFactpyExternalUrl(respuestaFactpy?.xmlLink) || notaBase.xml_path,
+            pdf_path: normalizeFactpyExternalUrl(respuestaFactpy?.kude) || notaBase.pdf_path,
+            estado: respuestaFactpy?.status === false ? 'RECHAZADO' : 'ENVIADO'
+          }
+        });
+      } catch (factpyError) {
+        console.error('[FactPy][NotaCredito] Error al emitir', factpyError);
+        notaActualizada = await prisma.notaCreditoElectronica.update({
+          where: { id: notaBase.id },
+          data: {
+            estado: 'RECHAZADO',
+            respuesta_set: {
+              ...(notaBase.respuesta_set || {}),
+              error: factpyError?.body || factpyError?.message || 'Error al emitir la nota de crédito.',
+              timestamp: new Date().toISOString()
+            }
+          }
+        });
+        return res.status(502).json({
+          error: 'No se pudo emitir la nota de crédito en FactPy.',
+          nota_credito: serialize(notaActualizada)
+        });
+      }
+    }
+
+    return res.status(201).json({
+      nota_credito: serialize(notaActualizada),
+      pdf_url: notaActualizada.pdf_path || null
+    });
+  } catch (error) {
+    if (error instanceof VentaValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('[ventas] nota de credito', error);
+    return res.status(500).json({ error: 'No se pudo emitir la nota de crédito.' });
+  }
+});
+
 router.post('/', validate(createVentaSchema), async (req, res) => {
   const payload = req.validatedBody;
   const ivaPorcentaje = normalizeIvaPorcentaje(payload.iva_porcentaje);
@@ -396,12 +746,24 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
         throw new VentaValidationError('Debes seleccionar al menos un producto.');
       }
 
+      const monedaSeleccionada = normalizeCurrency(payload.moneda);
+      let tipoCambioSeleccionado = null;
+      if (monedaSeleccionada === 'USD') {
+        const parsedTipoCambio = Number(payload.tipo_cambio);
+        if (!Number.isFinite(parsedTipoCambio) || parsedTipoCambio <= 0) {
+          throw new VentaValidationError('Ingresá un tipo de cambio válido para ventas en USD.');
+        }
+        tipoCambioSeleccionado = round(parsedTipoCambio, 4);
+      }
+
       const productoIds = [...new Set(detallesNormalizados.map((detalle) => detalle.productoId))];
-      const productos = await tx.producto.findMany({ where: { id: { in: productoIds }, sucursalId: req.sucursalId } });
+      const productos = await tx.producto.findMany({ where: { id: { in: productoIds } } });
       const productosMap = new Map(productos.map((producto) => [producto.id, producto]));
+      const stockMap = await getProductoStockMap(tx, productoIds, req.sucursalId);
       const stockReservado = new Map();
 
       let subtotalAcumulado = 0;
+      let subtotalAcumuladoMoneda = 0;
       const detallePayloads = [];
 
       for (const detalle of detallesNormalizados) {
@@ -418,44 +780,42 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
           throw new VentaValidationError('La cantidad debe ser mayor a cero.');
         }
 
+        const stockDisponible = resolveProductoStock(producto, req.sucursalId, stockMap);
         const reservado = stockReservado.get(detalle.productoId) || 0;
-        if (typeof producto.stock_actual === 'number' && producto.stock_actual < cantidad + reservado) {
+        if (stockDisponible < cantidad + reservado) {
           throw new Error('STOCK_INSUFICIENTE:' + detalle.productoId);
         }
         stockReservado.set(detalle.productoId, reservado + cantidad);
 
-        const precioUnitario = Number(producto.precio_venta);
-        if (!Number.isFinite(precioUnitario) || precioUnitario < 0) {
-          throw new VentaValidationError('El producto no tiene un precio de venta válido.');
-        }
+        const pricing = resolveProductSalePricing(producto, {
+          targetCurrency: monedaSeleccionada,
+          exchangeRate: tipoCambioSeleccionado
+        });
 
-        const precioUnitarioRedondeado = round(precioUnitario, 2);
+        const precioUnitarioRedondeado = round(pricing.unitGs, 2);
         ensureWithinLimit(precioUnitarioRedondeado, 'Precio unitario');
 
         const subtotalDetalle = round(precioUnitarioRedondeado * cantidad, 2);
         ensureWithinLimit(subtotalDetalle, 'Subtotal de detalle');
 
         subtotalAcumulado = round(subtotalAcumulado + subtotalDetalle, 2);
+        if (monedaSeleccionada === 'USD') {
+          subtotalAcumuladoMoneda = round(subtotalAcumuladoMoneda + round(pricing.unitCurrency * cantidad, 2), 2);
+        }
 
         detallePayloads.push({
           productoId: detalle.productoId,
           cantidad,
           precio_unitario: precioUnitarioRedondeado,
-          subtotal: subtotalDetalle
+          subtotal: subtotalDetalle,
+          moneda_precio_unitario: monedaSeleccionada,
+          precio_unitario_moneda: round(pricing.unitCurrency, monedaSeleccionada === 'USD' ? 4 : 2),
+          subtotal_moneda: round(pricing.unitCurrency * cantidad, monedaSeleccionada === 'USD' ? 4 : 2),
+          tipo_cambio_aplicado: monedaSeleccionada === 'USD' ? tipoCambioSeleccionado : null
         });
       }
 
       ensureWithinLimit(subtotalAcumulado, 'Subtotal');
-
-      const monedaSeleccionada = normalizeCurrency(payload.moneda);
-      let tipoCambioSeleccionado = null;
-      if (monedaSeleccionada === 'USD') {
-        const parsedTipoCambio = Number(payload.tipo_cambio);
-        if (!Number.isFinite(parsedTipoCambio) || parsedTipoCambio <= 0) {
-          throw new VentaValidationError('Ingresá un tipo de cambio válido para ventas en USD.');
-        }
-        tipoCambioSeleccionado = round(parsedTipoCambio, 4);
-      }
 
       let descuentoEntrada = Number(payload.descuento_total ?? 0);
       if (!Number.isFinite(descuentoEntrada) || descuentoEntrada < 0) {
@@ -467,6 +827,7 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       const descuentoTotal = monedaSeleccionada === 'USD' && tipoCambioSeleccionado
         ? round(descuentoEntrada * tipoCambioSeleccionado, 2)
         : descuentoEntrada;
+      const descuentoMoneda = monedaSeleccionada === 'USD' ? descuentoEntrada : null;
 
       if (descuentoTotal > subtotalAcumulado) {
         throw new VentaValidationError('El descuento no puede superar el subtotal.');
@@ -475,19 +836,17 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       const baseGravada = round(subtotalAcumulado - descuentoTotal, 2);
       ensureWithinLimit(baseGravada, 'Total');
 
-      const divisor = IVA_DIVISOR[ivaPorcentaje] || IVA_DIVISOR[10];
-      const impuestoTotal = baseGravada > 0 ? round(baseGravada / divisor, 2) : 0;
+      const divisor = IVA_DIVISOR[ivaPorcentaje];
+      const impuestoTotal = divisor && baseGravada > 0 ? round(baseGravada / divisor, 2) : 0;
       ensureWithinLimit(impuestoTotal, 'Impuesto total');
 
       const total = baseGravada;
 
       let totalEnMonedaSeleccionada = null;
-      if (tipoCambioSeleccionado) {
-        if (total === 0) {
-          totalEnMonedaSeleccionada = 0;
-        } else {
-          totalEnMonedaSeleccionada = round(total / tipoCambioSeleccionado, 2);
-        }
+      if (monedaSeleccionada === 'USD') {
+        totalEnMonedaSeleccionada = total === 0
+          ? 0
+          : round(Math.max(subtotalAcumuladoMoneda - (descuentoMoneda || 0), 0), 2);
         ensureWithinLimit(totalEnMonedaSeleccionada, 'Total en moneda seleccionada');
       }
 
@@ -498,9 +857,9 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
 
       let clienteId = payload.clienteId || null;
       if (clienteId) {
-        const cliente = await tx.cliente.findFirst({ where: { id: clienteId, sucursalId: req.sucursalId } });
+        const cliente = await tx.cliente.findUnique({ where: { id: clienteId } });
         if (!cliente || cliente.deleted_at) {
-          throw new VentaValidationError('El cliente no pertenece a la sucursal activa.');
+          throw new VentaValidationError('El cliente no existe o fue eliminado.');
         }
       }
 
@@ -521,7 +880,8 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
           condicion_venta: condicionVenta,
           es_credito: esCredito,
           fecha_vencimiento: fechaVencimiento || undefined,
-          saldo_pendiente: saldoPendiente
+          saldo_pendiente: saldoPendiente,
+          credito_config: payload.credito ? payload.credito : null
         }
       });
 
@@ -532,17 +892,19 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
             productoId: detalle.productoId,
             cantidad: detalle.cantidad,
             precio_unitario: detalle.precio_unitario,
-            subtotal: detalle.subtotal
+            subtotal: detalle.subtotal,
+            moneda_precio_unitario: detalle.moneda_precio_unitario,
+            precio_unitario_moneda: detalle.precio_unitario_moneda,
+            subtotal_moneda: detalle.subtotal_moneda,
+            tipo_cambio_aplicado: detalle.tipo_cambio_aplicado
           }
         });
 
         const producto = productosMap.get(detalle.productoId);
-        if (producto && typeof producto.stock_actual === 'number') {
-          await tx.producto.update({
-            where: { id: detalle.productoId },
-            data: { stock_actual: { decrement: detalle.cantidad } }
-          });
-          producto.stock_actual -= detalle.cantidad;
+        if (producto) {
+          await applyProductoStockDelta(tx, producto, req.sucursalId, -detalle.cantidad);
+          const stockActual = stockMap.get(detalle.productoId) || 0;
+          stockMap.set(detalle.productoId, stockActual - detalle.cantidad);
         }
 
         await tx.movimientoStock.create({
@@ -640,13 +1002,20 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
               cliente: true,
               usuario: true,
               detalles: { include: { producto: true } },
-              factura_electronica: true,
-              factura_digital: true
+              factura_electronica: true
             }
           });
 
           if (!ventaActual) {
             throw new VentaValidationError('No se encontró la venta solicitada.');
+          }
+
+          const monedaVenta = (ventaActual.moneda || 'PYG').toUpperCase();
+          if (monedaVenta === 'USD') {
+            const tipoCambioVenta = Number(ventaActual.tipo_cambio);
+            if (!Number.isFinite(tipoCambioVenta) || tipoCambioVenta <= 0) {
+              throw new VentaValidationError('La venta en USD no tiene tipo de cambio cargado. Corrigila antes de facturar.');
+            }
           }
 
           const condicionVentaFacturacion = normalizeCondicionVenta(
@@ -748,8 +1117,7 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
               usuario: true,
               sucursal: true,
               detalles: { include: { producto: true } },
-              factura_electronica: true,
-              factura_digital: true
+              factura_electronica: true
             }
           });
 
@@ -845,28 +1213,6 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
       }
     }
 
-    try {
-      const facturaDigital = await generarFacturaDigital(venta);
-      if (facturaDigital) {
-        venta.factura_digital = facturaDigital;
-      }
-    } catch (digitalError) {
-      console.error('[FacturaDigital] No se pudo generar la factura digital.', digitalError);
-    }
-
-    if (isEmailEnabled() && venta?.cliente?.correo && venta?.factura_digital?.pdf_path) {
-      try {
-        const updatedDigital = await enviarFacturaDigitalPorCorreo(venta.factura_digital, venta);
-        venta.factura_digital = updatedDigital;
-      } catch (mailError) {
-        if (mailError instanceof EmailNotConfiguredError || mailError instanceof DestinatarioInvalidoError) {
-          console.warn('[FacturaDigital] Aviso al enviar correo:', mailError.message);
-        } else {
-          console.error('[FacturaDigital] Error al enviar el correo con la factura.', mailError);
-        }
-      }
-    }
-
     res.json({ venta: serialize(venta), factura: serialize(facturaActualizada) });
   } catch (err) {
     if (err instanceof VentaValidationError) {
@@ -896,7 +1242,12 @@ router.post('/:id/anular', authorizeRoles('ADMIN'), async (req, res) => {
       const venta = await tx.venta.findFirst({
         where: { id, sucursalId: req.sucursalId },
         include: {
-          detalles: true
+          detalles: true,
+          factura_electronica: true,
+          notas_credito: {
+            where: { deleted_at: null },
+            orderBy: { created_at: 'desc' }
+          }
         }
       });
 
@@ -908,12 +1259,20 @@ router.post('/:id/anular', authorizeRoles('ADMIN'), async (req, res) => {
         throw new VentaValidationError('La venta ya se encuentra anulada.');
       }
 
+      if (Array.isArray(venta.notas_credito) && venta.notas_credito.length) {
+        throw new VentaValidationError('La venta ya fue regularizada con nota de crédito.');
+      }
+
+      if (venta.factura_electronica?.id) {
+        throw new VentaValidationError('La venta ya está facturada. Debes emitir una nota de crédito en lugar de anularla.');
+      }
+
       const detalles = Array.isArray(venta.detalles) ? venta.detalles : [];
       for (const detalle of detalles) {
-        await tx.producto.update({
-          where: { id: detalle.productoId },
-          data: { stock_actual: { increment: Number(detalle.cantidad) } }
-        });
+        const producto = await tx.producto.findUnique({ where: { id: detalle.productoId } });
+        if (producto) {
+          await applyProductoStockDelta(tx, producto, req.sucursalId, Number(detalle.cantidad));
+        }
 
         await tx.movimientoStock.create({
           data: {
@@ -941,24 +1300,12 @@ router.post('/:id/anular', authorizeRoles('ADMIN'), async (req, res) => {
             include: {
               producto: true
             }
-          },
-          factura_digital: true
+          }
         }
       });
 
       return updated;
     });
-
-    if (result?.factura_digital) {
-      try {
-        const facturaActualizada = await generarFacturaDigital(result);
-        if (facturaActualizada) {
-          result.factura_digital = facturaActualizada;
-        }
-      } catch (regenError) {
-        console.error('[FacturaDigital] No se pudo regenerar la factura anulada.', regenError);
-      }
-    }
 
     res.json(serialize(result));
   } catch (err) {
@@ -1157,7 +1504,9 @@ function describeReportFilters(filters = {}) {
   const chips = [];
   if (filters.search) chips.push(`Búsqueda: ${filters.search}`);
   if (filters.estado) chips.push(`Estado contiene: ${filters.estado}`);
-  if (filters.iva_porcentaje) chips.push(`IVA: ${filters.iva_porcentaje}%`);
+  if (filters.iva_porcentaje !== undefined && filters.iva_porcentaje !== null) {
+    chips.push(`IVA: ${filters.iva_porcentaje}%`);
+  }
   if (filters.moneda) chips.push(`Moneda: ${(filters.moneda || '').toUpperCase()}`);
   if (filters.include_deleted) chips.push('Incluye registros eliminados');
   return chips;
@@ -1593,8 +1942,8 @@ function calculateDailyTotals(ventas) {
       acc.margen += totalVenta - costo;
       const currency = (venta.moneda || 'PYG').toUpperCase();
       const ivaTotal = Number(venta.impuesto_total) || 0;
-      const ivaRate = Number(venta.iva_porcentaje) || 10;
-      if (ivaRate === 5) acc.iva5 += ivaTotal; else acc.iva10 += ivaTotal;
+      const ivaRate = Number.isFinite(Number(venta.iva_porcentaje)) ? Number(venta.iva_porcentaje) : 10;
+      if (ivaRate === 5) acc.iva5 += ivaTotal; else if (ivaRate === 10) acc.iva10 += ivaTotal;
       if (currency === 'USD') {
         const usdAmount = Number(venta.total_moneda) || 0;
         if (usdAmount > 0) {
@@ -1604,7 +1953,7 @@ function calculateDailyTotals(ventas) {
         if (ivaTotal > 0 && tipoCambio > 0) {
           const ivaUsd = ivaTotal / tipoCambio;
           acc.impuestoUsd += ivaUsd;
-          if (ivaRate === 5) acc.iva5Usd += ivaUsd; else acc.iva10Usd += ivaUsd;
+          if (ivaRate === 5) acc.iva5Usd += ivaUsd; else if (ivaRate === 10) acc.iva10Usd += ivaUsd;
         }
       }
       return acc;
@@ -1875,7 +2224,6 @@ function computeCostoDetalle(detalle) {
 }
 
 function resolveInvoiceNumberForReport(venta) {
-  if (venta?.factura_digital?.nro_factura) return venta.factura_digital.nro_factura;
   if (venta?.factura_electronica?.nro_factura) return venta.factura_electronica.nro_factura;
   if (venta?.numero_factura) return venta.numero_factura;
   return venta?.id ? venta.id.slice(0, 8).toUpperCase() : '-';
@@ -2059,6 +2407,21 @@ async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
   return Math.max(scoped, overrideMin);
 }
 
+async function resolveSecuenciaNotaCredito(tx, timbrado, _sucursalId) {
+  const ultimaNota = await tx.notaCreditoElectronica.findFirst({
+    where: {
+      timbrado: timbrado.numero,
+      establecimiento: timbrado.establecimiento || '001',
+      punto_expedicion: timbrado.punto_expedicion || timbrado.punto || '001',
+      deleted_at: null
+    },
+    orderBy: { secuencia: 'desc' },
+    select: { secuencia: true }
+  });
+
+  return Math.max((ultimaNota?.secuencia || 0) + 1, getMinSecuenciaOverride(timbrado));
+}
+
 function toDateOnlyString(value) {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -2113,7 +2476,6 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
 
   const cuotasNormalizadas = normalizeCuotas(creditoConfig?.cuotas);
   if (creditoConfig && (creditoConfig?.tipo === 'CUOTAS' || cuotasNormalizadas.length)) {
-    const cantidadCuota = creditoConfig.cantidad_cuotas || cuotasNormalizadas.length || 1;
     const cuotasPayload = cuotasNormalizadas.length
       ? cuotasNormalizadas
       : [
@@ -2123,25 +2485,41 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
             fechaVencimiento: toDateOnlyString(fechaVencimiento) || toDateOnlyString(fechaEmision)
           }
         ];
+    const cantidadCuota = cuotasPayload.length || creditoConfig.cantidad_cuotas || 1;
 
     return {
       condicionVenta,
       condicionPago: 2,
-      pagos: [{}],
+      pagos: [
+        {
+          tipoPago: '1',
+          monto: totalPago
+        }
+      ],
       credito: {
         condicionCredito: 2,
-        cantidadCuota: cantidadCuota,
-        cuotas: cuotasPayload
+          cantidadCuota: cantidadCuota,
+          cuotas: cuotasPayload.map((c, idx) => ({
+            numero: Number(c.numero) || idx + 1,
+            monto: round(Number(c.monto) || 0, 2),
+            fechaVencimiento: c.fechaVencimiento
+          }))
       }
     };
   }
 
-  const descripcion = deriveCreditoDescripcion(creditoConfig?.descripcion, fechaEmision, fechaVencimiento);
+  const descripcionRaw = deriveCreditoDescripcion(creditoConfig?.descripcion, fechaEmision, fechaVencimiento);
+  const descripcion = descripcionRaw ? String(descripcionRaw).slice(0, 10) : '30 dias';
 
   return {
     condicionVenta,
     condicionPago: 2,
-    pagos: [{}],
+    pagos: [
+      {
+        tipoPago: '1',
+        monto: totalPago
+      }
+    ],
     credito: {
       condicionCredito: 1,
       descripcion
@@ -2152,6 +2530,9 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
 function buildFactPyPayload(venta, factura, opciones = {}) {
   if (!venta) {
     throw new Error('Venta requerida para FactPy');
+  }
+  if (venta.moneda && String(venta.moneda).toUpperCase() === 'USD' && (!venta.tipo_cambio || Number(venta.tipo_cambio) <= 0)) {
+    throw new Error('Venta en USD sin tipo de cambio válido.');
   }
   const parseMonto = (value) => {
     if (typeof value === 'string') {
@@ -2166,13 +2547,16 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
   const numeroFactura = factura?.nro_factura || generarNumeroFactura(venta, timbradoSeleccionado);
   const secuencia = (numeroFactura.split('-').pop() || '0000001').replace(/[^0-9]/g, '').padStart(7, '0');
   const fecha = venta?.created_at ? new Date(venta.created_at) : new Date();
-  const cliente = venta?.cliente || {};
-  const nombreCliente = cliente.nombre_razon_social || cliente.nombre || 'CLIENTE';
-  const rucCliente = cliente.ruc || '';
-  const direccionCliente = cliente.direccion || cliente.direccion_facturacion || 'S/D';
-  const correoCliente = cliente.correo || cliente.email || '';
+  const cliente = resolveClienteFiscal(venta?.cliente);
+  const nombreCliente = cliente.nombre;
+  const rucCliente = cliente.ruc;
+  const direccionCliente = cliente.direccion;
+  const correoCliente = cliente.correo;
   const moneda = (venta?.moneda || 'PYG').toUpperCase();
   const cambio = parseMonto(venta?.tipo_cambio) || 0;
+  if (moneda === 'USD' && (!Number.isFinite(cambio) || cambio <= 0)) {
+    throw new Error('Venta en USD sin tipo de cambio válido para FactPy/SIFEN');
+  }
   const establecimiento = process.env.FACTPY_ESTABLECIMIENTO || timbradoSeleccionado.establecimiento || '001';
   const punto = process.env.FACTPY_PUNTO || timbradoSeleccionado.punto_expedicion || timbradoSeleccionado.punto || '001';
   const descuentoTotalGs = parseMonto(venta?.descuento_total) || 0;
@@ -2200,14 +2584,21 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
   const items = Array.isArray(venta?.detalles)
     ? venta.detalles.map((detalle, idx) => {
         const cantidad = Number(detalle?.cantidad) || 1;
-        const precioUnitarioGs = Number(detalle?.precio_unitario || detalle?.subtotal / (cantidad || 1) || detalle?.producto?.precio_venta) || 0;
+        const snapshot = getSaleDetailSnapshot(detalle, venta);
+        const precioUnitarioGs = snapshot.unitGs || Number(detalle?.producto?.precio_venta) || 0;
         const precioUnitarioConvertido = convertirMonto(precioUnitarioGs);
-        const precioUnitario = precioUnitarioConvertido > 0 ? precioUnitarioConvertido : round(precioUnitarioGs, 4);
-        const precioTotal = round(precioUnitario * cantidad, 4);
-        const ivaTasa = Number(detalle?.iva_porcentaje || detalle?.producto?.iva_porcentaje || venta?.iva_porcentaje || 10);
-        const divisor = ivaTasa === 5 ? 1.05 : 1.1;
-        const baseGravItem = Number((precioTotal / divisor).toFixed(8));
-        const liqIvaItem = Number((precioTotal - baseGravItem).toFixed(8));
+        const precioUnitario = moneda === 'USD'
+          ? (snapshot.unitCurrency ?? precioUnitarioConvertido ?? round(precioUnitarioGs, 4))
+          : (snapshot.unitCurrency ?? round(precioUnitarioGs, 2));
+        const precioTotal = moneda === 'USD'
+          ? round(snapshot.subtotalCurrency ?? (precioUnitario * cantidad), 4)
+          : round(snapshot.subtotalCurrency ?? (precioUnitario * cantidad), 2);
+        const ivaTasaRaw =
+          detalle?.iva_porcentaje ?? detalle?.producto?.iva_porcentaje ?? venta?.iva_porcentaje;
+        const ivaTasa = Number.isFinite(Number(ivaTasaRaw)) ? Number(ivaTasaRaw) : 10;
+        const divisor = ivaTasa === 5 ? 1.05 : ivaTasa === 10 ? 1.1 : 1;
+        const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
+        const liqIvaItem = ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
         const descripcion = detalle?.producto?.nombre || 'Item de venta';
         const codigo = detalle?.producto?.sku || detalle?.productoId || `ITEM-${idx + 1}`;
         return {
@@ -2215,7 +2606,7 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
           codigo,
           unidadMedida: 77,
           ivaTasa,
-          ivaAfecta: 1,
+          ivaAfecta: ivaTasa === 0 ? 0 : 1,
           cantidad,
           precioUnitario,
           precioTotal,
@@ -2247,11 +2638,20 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     : items;
 
   const totalPago = round(itemsConDescuento.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
-  const totalGs = round(Number(venta?.total) || totalPago, 2);
-  const totalMoneda =
-    moneda === 'USD'
-      ? Number(venta?.total_moneda) || (cambio > 0 ? round(totalGs / cambio, 4) : totalPago)
-      : totalGs;
+
+  const totalMoneda = moneda === 'USD'
+    ? round(Number(venta?.total_moneda) || totalPago, 4)
+    : round(Number(venta?.total) || totalPago, 2);
+
+  const totalGs = moneda === 'USD'
+    ? (() => {
+        if (cambio && cambio > 0) return round(totalPago * cambio, 2);
+        const totalGuardado = Number(venta?.total) || 0;
+        if (totalGuardado > 0) return round(totalGuardado, 2);
+        if (totalMoneda > 0 && cambio > 0) return round(totalMoneda * cambio, 2);
+        return round(totalPago, 2);
+      })()
+    : totalMoneda;
 
   const credito = buildCreditoSection(venta, opciones, totalPago, fecha);
 
@@ -2283,10 +2683,304 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     pagos: credito.pagos,
     ...(credito.credito ? { credito: credito.credito } : {}),
     totalPago,
+    totalGs,
+    // mantenemos totalPagoGs para compatibilidad con integraciones previas
     totalPagoGs: totalGs,
     totalPagoMoneda: totalMoneda,
     totalRedondeo: 0
   };
+}
+
+function buildNotaCreditoData(venta, opciones = {}) {
+  const tipoAjuste = String(opciones?.tipoAjuste || 'TOTAL').toUpperCase() === 'PARCIAL' ? 'PARCIAL' : 'TOTAL';
+  const ventaDetalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
+  if (!ventaDetalles.length) {
+    throw new VentaValidationError('La venta no tiene ítems para emitir una nota de crédito.');
+  }
+
+  const moneda = normalizeCurrency(venta?.moneda);
+  const tipoCambio = Number(venta?.tipo_cambio) || 0;
+  if (moneda === 'USD' && (!Number.isFinite(tipoCambio) || tipoCambio <= 0)) {
+    throw new VentaValidationError('La venta en USD no tiene tipo de cambio válido para emitir la nota de crédito.');
+  }
+
+  const detallePorId = new Map(ventaDetalles.map((detalle) => [detalle.id, detalle]));
+  const detallesSolicitados = Array.isArray(opciones?.detallesSolicitados) ? opciones.detallesSolicitados : [];
+  const subtotalBrutoVentaGs = round(
+    ventaDetalles.reduce((acc, detalle) => acc + Math.max(Number(detalle?.subtotal) || 0, 0), 0),
+    2
+  );
+  const descuentoVentaGs = Math.max(Number(venta?.descuento_total) || 0, 0);
+  const factorDescuento = subtotalBrutoVentaGs > 0
+    ? Math.max(subtotalBrutoVentaGs - descuentoVentaGs, 0) / subtotalBrutoVentaGs
+    : 1;
+
+  const selecciones = tipoAjuste === 'PARCIAL'
+    ? Array.from(
+        detallesSolicitados.reduce((map, item) => {
+          const detalleVentaId = item?.detalleVentaId;
+          const cantidad = Number(item?.cantidad) || 0;
+          map.set(detalleVentaId, (map.get(detalleVentaId) || 0) + cantidad);
+          return map;
+        }, new Map())
+      ).map(([detalleVentaId, cantidad]) => ({ detalleVentaId, cantidad }))
+    : ventaDetalles.map((detalle) => ({
+        detalleVentaId: detalle.id,
+        cantidad: Number(detalle.cantidad) || 0
+      }));
+
+  if (!selecciones.length) {
+    throw new VentaValidationError('Debes seleccionar al menos un ítem para la nota de crédito.');
+  }
+
+  const detalles = selecciones.map((seleccion, idx) => {
+    const original = detallePorId.get(seleccion.detalleVentaId);
+    if (!original) {
+      throw new VentaValidationError(`El ítem seleccionado #${idx + 1} no existe en la venta.`);
+    }
+
+    const cantidadOriginal = Number(original.cantidad) || 0;
+    const cantidad = Number(seleccion.cantidad) || 0;
+    if (!cantidadOriginal || cantidad <= 0 || cantidad > cantidadOriginal) {
+      throw new VentaValidationError(`La cantidad para ${original?.producto?.nombre || 'el ítem seleccionado'} excede lo vendido.`);
+    }
+
+    const snapshot = getSaleDetailSnapshot(original, venta);
+    const ratioCantidad = cantidadOriginal > 0 ? cantidad / cantidadOriginal : 0;
+    const subtotalBrutoGs = round((snapshot.subtotalGs || 0) * ratioCantidad, 2);
+    const subtotalGs = round(subtotalBrutoGs * factorDescuento, 2);
+    if (subtotalGs <= 0) {
+      throw new VentaValidationError(`El subtotal calculado para ${original?.producto?.nombre || 'el ítem seleccionado'} no es válido.`);
+    }
+    const precioUnitarioGs = round(subtotalGs / cantidad, 4);
+
+    const subtotalBrutoMoneda = moneda === 'USD'
+      ? round((snapshot.subtotalCurrency || 0) * ratioCantidad, 4)
+      : round(((snapshot.subtotalCurrency ?? snapshot.subtotalGs) || 0) * ratioCantidad, 2);
+    const subtotalMoneda = moneda === 'USD'
+      ? round(subtotalBrutoMoneda * factorDescuento, 4)
+      : round(subtotalBrutoMoneda * factorDescuento, 2);
+    const precioUnitarioMoneda = moneda === 'USD'
+      ? round(subtotalMoneda / cantidad, 4)
+      : round(subtotalMoneda / cantidad, 2);
+
+    return {
+      detalleVentaId: original.id,
+      productoId: original.productoId || null,
+      descripcion: original?.producto?.nombre || `Ítem ${idx + 1}`,
+      codigoProducto: original?.producto?.sku || original?.productoId || `ITEM-NC-${idx + 1}`,
+      cantidad,
+      precioUnitarioGs,
+      subtotalGs,
+      precioUnitarioMoneda,
+      subtotalMoneda,
+      ivaPorcentaje: Number.isFinite(Number(original?.iva_porcentaje ?? original?.producto?.iva_porcentaje ?? venta?.iva_porcentaje))
+        ? Number(original?.iva_porcentaje ?? original?.producto?.iva_porcentaje ?? venta?.iva_porcentaje)
+        : 10
+    };
+  });
+
+  const totalGs = round(detalles.reduce((acc, detalle) => acc + Number(detalle.subtotalGs || 0), 0), 2);
+  const totalMoneda = moneda === 'USD'
+    ? round(detalles.reduce((acc, detalle) => acc + Number(detalle.subtotalMoneda || 0), 0), 4)
+    : null;
+
+  return {
+    tipoAjuste,
+    detalles,
+    totalGs,
+    totalMoneda
+  };
+}
+
+function buildFactPyCreditNotePayload(venta, facturaOriginal, notaCredito, opciones = {}) {
+  if (!venta || !facturaOriginal || !notaCredito) {
+    throw new Error('Faltan datos para construir la nota de crédito de FactPy.');
+  }
+
+  const moneda = normalizeCurrency(venta.moneda);
+  const cambio = Number(venta.tipo_cambio) || 0;
+  if (moneda === 'USD' && (!Number.isFinite(cambio) || cambio <= 0)) {
+    throw new Error('La nota de crédito en USD requiere tipo de cambio válido.');
+  }
+
+  const cliente = resolveClienteFiscal(venta?.cliente);
+  const cdcAsociado = opciones.cdcAsociado || extractFacturaCdc(facturaOriginal);
+  const fechaEmision = new Date(notaCredito.fecha_emision || Date.now());
+  const detallesSeleccionados = Array.isArray(opciones.detallesSeleccionados) && opciones.detallesSeleccionados.length
+    ? opciones.detallesSeleccionados
+    : buildNotaCreditoData(venta, { tipoAjuste: notaCredito.tipo_ajuste }).detalles;
+  const totalNotaGs = Math.abs(Number(notaCredito.total) || 0);
+  const totalNotaMoneda = moneda === 'USD'
+    ? Math.abs(Number(notaCredito.total_moneda) || 0)
+    : totalNotaGs;
+  const convertAmount = (amountGs) => {
+    const numeric = Math.abs(Number(amountGs) || 0);
+    if (moneda === 'USD') {
+      return round(numeric / cambio, 4);
+    }
+    return round(numeric, 2);
+  };
+
+  const items = detallesSeleccionados.map((detalle, idx) => {
+        const cantidad = Math.abs(Number(detalle.cantidad) || 0);
+        const precioUnitario = moneda === 'USD'
+          ? round(Math.abs(Number(detalle.precioUnitarioMoneda) || convertAmount(detalle.precioUnitarioGs)), 4)
+          : round(Math.abs(Number(detalle.precioUnitarioGs) || 0), 2);
+        const precioTotal = moneda === 'USD'
+          ? -round(Math.abs(Number(detalle.subtotalMoneda) || (precioUnitario * cantidad)), 4)
+          : -round(Math.abs(Number(detalle.subtotalGs) || (precioUnitario * cantidad)), 2);
+        const ivaTasa = Number.isFinite(Number(detalle?.ivaPorcentaje)) ? Number(detalle.ivaPorcentaje) : 10;
+        const divisor = ivaTasa === 5 ? 1.05 : ivaTasa === 10 ? 1.1 : 1;
+        const baseGravItem = ivaTasa === 0 ? precioTotal : Number((precioTotal / divisor).toFixed(8));
+        const liqIvaItem = ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
+        return {
+          descripcion: detalle.descripcion || 'Item nota de crédito',
+          codigo: detalle.codigoProducto || detalle.productoId || `ITEM-NC-${idx + 1}`,
+          tipoIva: ivaTasa === 5 ? 'I.V.A. 5%' : ivaTasa === 10 ? 'I.V.A. 10%' : 'EXENTO',
+          unidadMedida: 77,
+          ivaTasa,
+          ivaAfecta: ivaTasa === 0 ? 3 : 1,
+          cantidad: -cantidad,
+          precioUnitario,
+          precioTotal,
+          baseGravItem,
+          liqIvaItem
+        };
+      });
+
+  const creditoBase = buildCreditoSection(
+    venta,
+    {
+      condicion_pago: venta?.condicion_venta,
+      fecha_vencimiento: venta?.fecha_vencimiento,
+      credito: venta?.credito_config || facturaOriginal?.respuesta_set?.credito || null
+    },
+    round(totalNotaMoneda, 4),
+    fechaEmision
+  );
+
+  const pagos = Array.isArray(creditoBase?.pagos) && creditoBase.pagos.length
+    ? creditoBase.pagos.map((pago) => ({
+        ...pago,
+        monto: -Math.abs(round(totalNotaMoneda, 4))
+      }))
+    : [
+        {
+          tipoPago: '1',
+          monto: -round(totalNotaMoneda, 4)
+        }
+      ];
+
+  const credito = creditoBase?.credito
+    ? {
+        ...creditoBase.credito,
+        ...(Array.isArray(creditoBase.credito.cuotas)
+          ? {
+              cuotas: scaleCreditNoteCuotas(creditoBase.credito.cuotas, totalNotaMoneda)
+            }
+          : {})
+      }
+    : null;
+
+  return {
+    fecha: fechaEmision.toISOString().replace('T', ' ').slice(0, 19),
+    documentoAsociado: {
+      remision: false,
+      tipoDocumentoAsoc: '1',
+      cdcAsociado,
+      establecimientoAsoc: '',
+      puntoAsoc: '',
+      numeroAsoc: '',
+      tipoDocuemntoIm: '',
+      fechaDocIm: '',
+      timbradoAsoc: ''
+    },
+    establecimiento: notaCredito.establecimiento,
+    punto: notaCredito.punto_expedicion,
+    numero: String(notaCredito.secuencia).padStart(7, '0'),
+    descripcion: opciones.motivo || notaCredito.motivo,
+    tipoDocumento: 5,
+    tipoEmision: 1,
+    tipoTransaccion: 1,
+    receiptid: `nc_${notaCredito.id}`,
+    condicionPago: creditoBase?.condicionPago || 1,
+    moneda,
+    cambio,
+    cliente: {
+      ruc: cliente.ruc,
+      nombre: cliente.nombre,
+      direccion: cliente.direccion,
+      cpais: 'PRY',
+      correo: cliente.correo,
+      numCasa: 0,
+      diplomatico: false,
+      dncp: 0
+    },
+    codigoSeguridadAleatorio: String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, '0'),
+    items,
+    pagos,
+    ...(credito ? { credito } : {}),
+    totalPago: -round(totalNotaMoneda, 4),
+    totalPagoGs: -round(totalNotaGs, 2)
+  };
+}
+
+function resolveClienteFiscal(cliente = {}) {
+  const nombre = String(cliente?.nombre_razon_social || cliente?.nombre || '').trim() || 'Consumidor Final';
+  const ruc = String(cliente?.ruc || '').trim() || '44444401-7';
+  const direccion = String(cliente?.direccion || cliente?.direccion_facturacion || '').trim() || 'S/D';
+  const correo = String(cliente?.correo || cliente?.email || '').trim();
+
+  return {
+    nombre,
+    ruc,
+    direccion,
+    correo
+  };
+}
+
+function scaleCreditNoteCuotas(cuotas = [], totalObjetivo) {
+  if (!Array.isArray(cuotas) || !cuotas.length) return [];
+
+  const totalBase = cuotas.reduce((acc, cuota) => acc + Math.abs(Number(cuota?.monto) || 0), 0);
+  if (!totalBase || totalObjetivo <= 0) {
+    return cuotas.map((cuota) => ({
+      ...cuota,
+      monto: 0
+    }));
+  }
+
+  let acumulado = 0;
+  return cuotas.map((cuota, index) => {
+    const esUltima = index === cuotas.length - 1;
+    const proporcion = Math.abs(Number(cuota?.monto) || 0) / totalBase;
+    const monto = esUltima
+      ? round(totalObjetivo - acumulado, 4)
+      : round(totalObjetivo * proporcion, 4);
+    acumulado = round(acumulado + monto, 4);
+    return {
+      ...cuota,
+      monto: -Math.abs(monto)
+    };
+  });
+}
+
+function extractFacturaCdc(factura) {
+  const candidates = [factura?.respuesta_set?.factpy?.cdc, factura?.respuesta_set?.cdc, factura?.qr_data];
+  for (const candidate of candidates) {
+    const normalized = String(candidate || '').replace(/\s+/g, '').trim();
+    if (normalized && normalized.length >= 20) return normalized;
+  }
+  return null;
+}
+
+function normalizeFactpyExternalUrl(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/iu.test(raw)) return `https://${raw}`;
+  return raw;
 }
 
 function selectTimbradoParaVenta(venta, config) {
@@ -2460,7 +3154,7 @@ function renderFacturaPdf(doc, venta, factura, qrBuffer) {
   const breakdown = computeIvaBreakdown(venta);
   const totalsWidth = contentWidth * 0.55;
   const qrWidth = contentWidth - totalsWidth - 16;
-  const totalsBottom = renderTotalsBlock(doc, totals, breakdown, startX, cursorY, totalsWidth);
+  const totalsBottom = renderTotalsBlock(doc, venta, totals, breakdown, startX, cursorY, totalsWidth);
   const qrBottom = renderQrPanel(doc, factura, qrBuffer, startX + totalsWidth + 16, cursorY, qrWidth);
 
   cursorY = Math.max(totalsBottom, qrBottom) + 18;
@@ -2471,6 +3165,412 @@ function renderFacturaPdf(doc, venta, factura, qrBuffer) {
     cursorY,
     { width: contentWidth, align: 'center' }
   );
+}
+
+function renderVentaTicketPdf(doc, venta) {
+  const printable = buildTicketPrintableData(venta);
+  const margins = doc.page.margins;
+  const pageWidth = doc.page.width - margins.left - margins.right;
+  const pageHeight = doc.page.height - margins.top - margins.bottom;
+  const startX = margins.left;
+  const maxY = margins.top + pageHeight;
+  let cursorY = margins.top;
+
+  const hasLogo = fs.existsSync(REPORT_LOGO_PATH);
+  if (hasLogo) {
+    try {
+      doc.image(REPORT_LOGO_PATH, startX + 6, cursorY + 6, { fit: [86, 86], align: 'left' });
+    } catch (logoError) {
+      console.warn('[Ticket] No se pudo incrustar el logo.', logoError);
+    }
+  }
+
+  const headerBlockWidth = Math.min(360, pageWidth - 140);
+  const headerTextX = startX + (pageWidth - headerBlockWidth) / 2;
+  const headerTextWidth = headerBlockWidth;
+  const badgeWidth = 120;
+  const badgeX = headerTextX + (headerTextWidth - badgeWidth) / 2;
+  doc.font('Helvetica-Bold').fontSize(20).fillColor('#0f172a').text('Ticket de venta', headerTextX, cursorY + 4, {
+    width: headerTextWidth,
+    align: 'center'
+  });
+  doc.font('Helvetica').fontSize(10).fillColor('#374151');
+  doc.text('Documento interno de venta contado', headerTextX, cursorY + 30, {
+    width: headerTextWidth,
+    align: 'center'
+  });
+  doc.text(`Ticket N° ${printable.ticketNumber}`, headerTextX, cursorY + 50, {
+    width: headerTextWidth,
+    align: 'center'
+  });
+  doc.roundedRect(badgeX, cursorY + 64, badgeWidth, 22, 11).fill('#fff1e6');
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('#c2410c').text(
+    printable.primaryCurrency === 'USD' ? 'Venta en USD' : 'Venta en guaraníes',
+    badgeX,
+    cursorY + 71,
+    { width: badgeWidth, align: 'center' }
+  );
+  doc.moveTo(startX, cursorY + 102).lineTo(startX + pageWidth, cursorY + 102).lineWidth(1).stroke('#e5e7eb');
+
+  cursorY += 116;
+
+  const blockGap = 16;
+  const blockWidth = (pageWidth - blockGap) / 2;
+  const infoPadding = 14;
+  const cliente = venta?.cliente || {};
+  const usuario = venta?.usuario || {};
+  const sucursal = venta?.sucursal || {};
+
+  const companyRows = [
+    { label: 'Empresa', value: EMPRESA_INFO.nombre },
+    { label: 'RUC', value: EMPRESA_INFO.ruc },
+    { label: 'Sucursal', value: sucursal.nombre || 'Principal' },
+    { label: 'Dirección', value: sucursal.direccion || EMPRESA_INFO.direccion }
+  ];
+  const saleRows = [
+    { label: 'Fecha', value: formatDatePrintable(venta?.fecha || venta?.created_at) },
+    { label: 'Moneda', value: printable.primaryCurrency },
+    { label: 'Cambio', value: printable.exchangeRateSummary },
+    { label: 'Vendedor', value: usuario.nombre || usuario.usuario || '-' }
+  ];
+
+  const infoBoxHeight = Math.max(
+    measureTicketInfoCardHeight(doc, companyRows, blockWidth, { labelWidth: 82, padding: infoPadding }),
+    measureTicketInfoCardHeight(doc, saleRows, blockWidth, { labelWidth: 82, padding: infoPadding })
+  );
+
+  renderTicketInfoCard(doc, 'Emisor', companyRows, startX, cursorY, blockWidth, infoBoxHeight, {
+    labelWidth: 82,
+    padding: infoPadding
+  });
+  renderTicketInfoCard(doc, 'Operación', saleRows, startX + blockWidth + blockGap, cursorY, blockWidth, infoBoxHeight, {
+    labelWidth: 82,
+    padding: infoPadding
+  });
+
+  cursorY += infoBoxHeight + 18;
+  const clientRows = buildTicketClientRows(cliente, venta);
+  const clientBoxHeight = measureTicketInfoCardHeight(doc, clientRows, pageWidth, {
+    labelWidth: 88,
+    padding: infoPadding,
+    columns: 2,
+    titleHeight: 24,
+    minHeight: 84
+  });
+  renderTicketInfoCard(doc, 'Cliente', clientRows, startX, cursorY, pageWidth, clientBoxHeight, {
+    labelWidth: 88,
+    padding: infoPadding,
+    columns: 2,
+    titleHeight: 24,
+    badgeWidth: 96
+  });
+
+  cursorY += clientBoxHeight + 22;
+  const table = buildTicketPdfColumns(pageWidth);
+  cursorY = drawTicketPdfHeaderRow(doc, table, startX, cursorY);
+
+  printable.items.forEach((item) => {
+    const rowHeight = 22;
+    if (cursorY + rowHeight > maxY - 190) {
+      doc.addPage();
+      cursorY = margins.top;
+      cursorY = drawTicketPdfHeaderRow(doc, table, startX, cursorY);
+    }
+
+    doc.rect(startX, cursorY, pageWidth, rowHeight).lineWidth(1).stroke('#e5e7eb');
+    const row = {
+      codigo: item.codigo,
+      descripcion: item.descripcion,
+      cantidad: formatNumberPrintable(item.cantidad),
+      precio: formatCurrencyPrintable(item.precioUnitario, printable.primaryCurrency),
+      subtotal: formatCurrencyPrintable(item.subtotal, printable.primaryCurrency),
+      iva: item.ivaLabel
+    };
+
+    let cellX = startX;
+    table.forEach((column) => {
+      doc.font('Helvetica').fontSize(9).fillColor('#111827').text(row[column.key] || '-', cellX + 4, cursorY + 6, {
+        width: column.width - 8,
+        align: column.align
+      });
+      cellX += column.width;
+    });
+
+    cursorY += rowHeight;
+  });
+
+  cursorY += 18;
+  const summaryWidth = pageWidth * 0.5;
+  const sideWidth = pageWidth - summaryWidth - 18;
+  const summaryBottom = renderTicketPdfSummary(doc, printable, startX, cursorY, summaryWidth);
+  const sideBottom = renderTicketPdfMeta(doc, printable, startX + summaryWidth + 18, cursorY, sideWidth);
+  cursorY = Math.max(summaryBottom, sideBottom) + 18;
+
+  doc.font('Helvetica').fontSize(9).fillColor('#374151').text(
+    `Total en letras: ${montoEnLetras(printable.primaryTotal, printable.primaryCurrency)}`,
+    startX,
+    cursorY,
+    { width: pageWidth }
+  );
+  cursorY += 20;
+  doc.font('Helvetica').fontSize(8).fillColor('#6b7280').text(
+    'Este ticket respalda la venta realizada y no reemplaza una factura electrónica.',
+    startX,
+    cursorY,
+    { width: pageWidth, align: 'center' }
+  );
+}
+
+function buildTicketPrintableData(venta) {
+  const primaryCurrency = normalizeCurrency(venta?.moneda);
+  const exchangeRate = Number(venta?.tipo_cambio) || 0;
+  const details = Array.isArray(venta?.detalles) ? venta.detalles : [];
+
+  const items = details.map((detalle) => {
+    const snapshot = getSaleDetailSnapshot(detalle, venta);
+    const cantidad = Number(detalle?.cantidad) || 0;
+    return {
+      codigo: getDetalleCodigo(detalle),
+      descripcion: detalle?.producto?.nombre || 'Producto',
+      cantidad,
+      precioUnitario: primaryCurrency === 'USD'
+        ? round(snapshot.unitCurrency || 0, 4)
+        : round(snapshot.unitCurrency || snapshot.unitGs || 0, 2),
+      subtotal: primaryCurrency === 'USD'
+        ? round(snapshot.subtotalCurrency || 0, 4)
+        : round(snapshot.subtotalCurrency || snapshot.subtotalGs || 0, 2),
+      ivaLabel: getTicketIvaLabel(getDetalleIvaPorcentaje(detalle, venta))
+    };
+  });
+
+  const subtotalPrimary = round(items.reduce((acc, item) => acc + item.subtotal, 0), 2);
+  const descuentoGs = Number(venta?.descuento_total) || 0;
+  const descuentoPrimary = primaryCurrency === 'USD'
+    ? round((exchangeRate > 0 ? descuentoGs / exchangeRate : 0), 4)
+    : round(descuentoGs, 2);
+  const storedPrimaryTotal = primaryCurrency === 'USD'
+    ? Number(venta?.total_moneda)
+    : Number(venta?.total);
+  const primaryTotal = Number.isFinite(storedPrimaryTotal)
+    ? round(storedPrimaryTotal, 2)
+    : round(Math.max(subtotalPrimary - descuentoPrimary, 0), 2);
+  const ivaPorcentaje = Number.isFinite(Number(venta?.iva_porcentaje)) ? Number(venta?.iva_porcentaje) : 10;
+  const ivaDivisor = IVA_DIVISOR[ivaPorcentaje];
+  const ivaPrimary = ivaDivisor && primaryTotal > 0 ? round(primaryTotal / ivaDivisor, 2) : 0;
+  const totalGs = Number.isFinite(Number(venta?.total)) ? round(Number(venta.total), 2) : round(primaryTotal * exchangeRate, 2);
+  const totalUsd = primaryCurrency === 'USD'
+    ? primaryTotal
+    : exchangeRate > 0
+      ? round(totalGs / exchangeRate, 2)
+      : null;
+
+  return {
+    ticketNumber: (venta?.id || 'ticket').slice(0, 8).toUpperCase(),
+    primaryCurrency,
+    primaryCurrencyLabel: primaryCurrency === 'USD' ? 'Dólares estadounidenses (USD)' : 'Guaraníes (PYG)',
+    exchangeRate,
+    exchangeRateLabel: exchangeRate > 0 ? formatExchangeRatePrintable(exchangeRate) : 'No aplica',
+    exchangeRateSummary: exchangeRate > 0 ? `Gs ${formatExchangeRatePrintable(exchangeRate)}` : 'No aplica',
+    items,
+    subtotalPrimary,
+    descuentoPrimary,
+    ivaPrimary,
+    primaryTotal,
+    totalGs,
+    totalUsd
+  };
+}
+
+function buildTicketClientRows(cliente, venta) {
+  const rows = [
+    { label: 'Nombre', value: cliente?.nombre_razon_social || 'Cliente eventual' },
+    { label: 'RUC/CI', value: cliente?.ruc || 'S/D' }
+  ];
+
+  if (cliente?.telefono) rows.push({ label: 'Teléfono', value: cliente.telefono });
+  if (cliente?.correo) rows.push({ label: 'Correo', value: cliente.correo });
+  if (cliente?.direccion) rows.push({ label: 'Dirección', value: cliente.direccion });
+
+  return rows;
+}
+
+function measureSimpleInfoListHeight(doc, rows, width, options = {}) {
+  const labelWidth = Number(options.labelWidth) || 92;
+  const valueWidth = Math.max(width - labelWidth, 60);
+  const rowGap = Number(options.rowGap) || 6;
+  let totalHeight = 0;
+
+  rows.forEach((row, index) => {
+    const labelText = `${row.label || '-'}:`;
+    const valueText = String(row.value || '-');
+    doc.font('Helvetica-Bold').fontSize(9);
+    const labelHeight = doc.heightOfString(labelText, { width: labelWidth });
+    doc.font('Helvetica').fontSize(9);
+    const valueHeight = doc.heightOfString(valueText, { width: valueWidth });
+    totalHeight += Math.max(labelHeight, valueHeight);
+    if (index < rows.length - 1) {
+      totalHeight += rowGap;
+    }
+  });
+
+  return totalHeight;
+}
+
+function measureTicketInfoCardHeight(doc, rows, width, options = {}) {
+  const padding = Number(options.padding) || 14;
+  const minHeight = Number(options.minHeight) || 94;
+  const titleHeight = Number(options.titleHeight) || 24;
+  const columns = Math.max(1, Number(options.columns) || 1);
+  const availableWidth = width - padding * 2;
+  const columnGap = Number(options.columnGap) || 18;
+
+  let contentHeight = 0;
+  if (columns === 1) {
+    contentHeight = measureSimpleInfoListHeight(doc, rows, availableWidth, options);
+  } else {
+    const perColumnWidth = (availableWidth - columnGap * (columns - 1)) / columns;
+    const groups = Array.from({ length: columns }, () => []);
+    rows.forEach((row, index) => {
+      groups[index % columns].push(row);
+    });
+    contentHeight = Math.max(
+      ...groups.map((group) => measureSimpleInfoListHeight(doc, group, perColumnWidth, options)),
+      0
+    );
+  }
+
+  return Math.max(minHeight, contentHeight + padding * 2 + titleHeight);
+}
+
+function renderTicketInfoCard(doc, title, rows, x, y, width, height, options = {}) {
+  const padding = Number(options.padding) || 14;
+  const columns = Math.max(1, Number(options.columns) || 1);
+  const titleHeight = Number(options.titleHeight) || 24;
+  const badgeWidth = Number(options.badgeWidth) || 92;
+  const columnGap = Number(options.columnGap) || 18;
+  doc.roundedRect(x, y, width, height, 10).lineWidth(1).fillAndStroke('#fcfcfd', '#d1d5db');
+  doc.roundedRect(x + 12, y + 10, badgeWidth, 18, 9).fill('#eef2ff');
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('#1e3a8a').text(title, x + 12, y + 16, { width: badgeWidth, align: 'center' });
+
+  const contentY = y + padding + titleHeight;
+  const availableWidth = width - padding * 2;
+  if (columns === 1) {
+    renderSimpleInfoList(doc, rows, x + padding, contentY, availableWidth, options);
+    return;
+  }
+
+  const perColumnWidth = (availableWidth - columnGap * (columns - 1)) / columns;
+  const groups = Array.from({ length: columns }, () => []);
+  rows.forEach((row, index) => {
+    groups[index % columns].push(row);
+  });
+
+  groups.forEach((group, index) => {
+    renderSimpleInfoList(doc, group, x + padding + index * (perColumnWidth + columnGap), contentY, perColumnWidth, options);
+  });
+}
+
+function renderSimpleInfoList(doc, rows, x, y, width, options = {}) {
+  const labelWidth = Number(options.labelWidth) || 92;
+  const valueWidth = Math.max(width - labelWidth, 60);
+  const rowGap = Number(options.rowGap) || 6;
+  let cursor = y;
+  rows.forEach((row) => {
+    const labelText = `${row.label || '-'}:`;
+    const valueText = String(row.value || '-');
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#374151').text(labelText, x, cursor, {
+      width: labelWidth,
+      align: 'left'
+    });
+    doc.font('Helvetica').fontSize(9).fillColor('#111827').text(valueText, x + labelWidth, cursor, {
+      width: valueWidth,
+      align: 'left'
+    });
+    const rowHeight = Math.max(
+      doc.heightOfString(labelText, { width: labelWidth }),
+      doc.heightOfString(valueText, { width: valueWidth })
+    );
+    cursor += rowHeight + rowGap;
+  });
+
+  return cursor;
+}
+
+function buildTicketPdfColumns(availableWidth) {
+  const fixedWidth = 72 + 48 + 92 + 104 + 64;
+  return [
+    { key: 'codigo', label: 'Código', width: 72, align: 'left' },
+    { key: 'descripcion', label: 'Descripción', width: Math.max(160, availableWidth - fixedWidth), align: 'left' },
+    { key: 'cantidad', label: 'Cant.', width: 48, align: 'right' },
+    { key: 'precio', label: 'Precio unit.', width: 92, align: 'right' },
+    { key: 'subtotal', label: 'Subtotal', width: 104, align: 'right' },
+    { key: 'iva', label: 'IVA', width: 64, align: 'center' }
+  ];
+}
+
+function drawTicketPdfHeaderRow(doc, columns, x, y) {
+  const totalWidth = columns.reduce((acc, column) => acc + column.width, 0);
+  doc.rect(x, y, totalWidth, 22).fill('#0f172a');
+  let cursorX = x;
+  columns.forEach((column) => {
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#ffffff').text(column.label, cursorX + 4, y + 6, {
+      width: column.width - 8,
+      align: column.align
+    });
+    cursorX += column.width;
+  });
+  return y + 22;
+}
+
+function renderTicketPdfSummary(doc, printable, x, y, width) {
+  doc.roundedRect(x, y, width, 126, 8).lineWidth(1).stroke('#d1d5db');
+  doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a').text('Resumen', x + 12, y + 12);
+
+  let cursor = y + 34;
+  cursor = renderKeyValueRow(doc, 'Subtotal', formatCurrencyPrintable(printable.subtotalPrimary, printable.primaryCurrency), x + 12, cursor, width - 24);
+  cursor = renderKeyValueRow(doc, 'Descuento', formatCurrencyPrintable(printable.descuentoPrimary, printable.primaryCurrency), x + 12, cursor, width - 24);
+  cursor = renderKeyValueRow(doc, 'IVA', formatCurrencyPrintable(printable.ivaPrimary, printable.primaryCurrency), x + 12, cursor, width - 24);
+  cursor = renderKeyValueRow(
+    doc,
+    `Total (${printable.primaryCurrency})`,
+    formatCurrencyPrintable(printable.primaryTotal, printable.primaryCurrency),
+    x + 12,
+    cursor,
+    width - 24,
+    { boldValue: true }
+  );
+  return cursor + 8;
+}
+
+function renderTicketPdfMeta(doc, printable, x, y, width) {
+  doc.roundedRect(x, y, width, 126, 8).lineWidth(1).stroke('#d1d5db');
+  doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a').text('Conversión y control', x + 12, y + 12);
+
+  let cursor = y + 34;
+  cursor = renderKeyValueRow(doc, 'Tipo de cambio', printable.exchangeRateLabel, x + 12, cursor, width - 24);
+  cursor = renderKeyValueRow(doc, 'Total en guaraníes', formatCurrencyPrintable(printable.totalGs, 'PYG'), x + 12, cursor, width - 24);
+  cursor = renderKeyValueRow(
+    doc,
+    'Total en dólares',
+    printable.totalUsd === null ? 'No disponible' : formatCurrencyPrintable(printable.totalUsd, 'USD'),
+    x + 12,
+    cursor,
+    width - 24
+  );
+  doc.font('Helvetica').fontSize(8).fillColor('#6b7280').text(
+    'El detalle se muestra en la moneda original de la venta. Los importes convertidos se calculan usando el tipo de cambio registrado.',
+    x + 12,
+    cursor + 10,
+    { width: width - 24, align: 'left' }
+  );
+  return cursor + 40;
+}
+
+function getTicketIvaLabel(ivaPorcentaje) {
+  const parsed = Number(ivaPorcentaje);
+  if (parsed === 5) return '5%';
+  if (parsed === 10) return '10%';
+  return 'Exento';
 }
 
 function renderInfoBlock(doc, title, rows, x, y, width) {
@@ -2561,7 +3661,7 @@ function buildDetalleColumns(availableWidth) {
   return baseColumns;
 }
 
-function renderTotalsBlock(doc, totals, breakdown, x, y, width) {
+function renderTotalsBlock(doc, venta, totals, breakdown, x, y, width) {
   doc.font('Helvetica-Bold').fontSize(10).fillColor('#0f172a').text('Liquidación del IVA', x, y);
   let cursor = y + 16;
 
@@ -2604,6 +3704,12 @@ function renderTotalsBlock(doc, totals, breakdown, x, y, width) {
   cursor = renderKeyValueRow(doc, 'Descuento', formatCurrencyPrintable(totals.descuento), x, cursor, width);
   cursor = renderKeyValueRow(doc, 'IVA', formatCurrencyPrintable(totals.iva), x, cursor, width);
   cursor = renderKeyValueRow(doc, 'Total', formatCurrencyPrintable(totals.total), x, cursor, width, { boldValue: true });
+  const totalEnLetras = montoEnLetras(totals.total, venta?.moneda || 'PYG');
+  doc.font('Helvetica').fontSize(9).fillColor('#374151').text(`Total en letras: ${totalEnLetras}`, x, cursor + 4, {
+    width,
+    align: 'left'
+  });
+  cursor += 18;
   return cursor;
 }
 
@@ -2623,14 +3729,16 @@ function computeInvoiceTotals(venta) {
   const subtotal = detalles.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
   const descuento = Number(venta?.descuento_total) || 0;
   const total = Number(venta?.total) || Math.max(subtotal - descuento, 0);
-  const divisor = IVA_DIVISOR[Number(venta?.iva_porcentaje) || 10] || IVA_DIVISOR[10];
-  const iva = total > 0 ? total / divisor : 0;
+  const ivaPorcentaje = Number.isFinite(Number(venta?.iva_porcentaje)) ? Number(venta?.iva_porcentaje) : 10;
+  const divisor = IVA_DIVISOR[ivaPorcentaje];
+  const iva = divisor && total > 0 ? total / divisor : 0;
   return { subtotal, descuento, total, iva };
 }
 
 function computeIvaBreakdown(venta) {
   const totals = computeInvoiceTotals(venta);
-  const ivaPorcentaje = Number(venta?.iva_porcentaje) || 10;
+  const parsedIva = Number(venta?.iva_porcentaje);
+  const ivaPorcentaje = Number.isFinite(parsedIva) ? parsedIva : 10;
   const breakdown = {
     exentas: 0,
     gravado5: 0,
@@ -2657,7 +3765,8 @@ function computeIvaBreakdown(venta) {
 function getDetalleIvaPorcentaje(detalle, venta) {
   if (typeof detalle?.iva_porcentaje === 'number') return detalle.iva_porcentaje;
   if (typeof detalle?.producto?.iva_porcentaje === 'number') return detalle.producto.iva_porcentaje;
-  return Number(venta?.iva_porcentaje) || 10;
+  const parsed = Number(venta?.iva_porcentaje);
+  return Number.isFinite(parsed) ? parsed : 10;
 }
 
 function splitTaxColumns(amount, ivaPorcentaje) {
@@ -2707,13 +3816,23 @@ function renderQrPanel(doc, factura, qrBuffer, x, y, width) {
   return cursor + 14;
 }
 
-function formatCurrencyPrintable(value) {
+function formatCurrencyPrintable(value, currency = 'PYG') {
   const number = Number(value) || 0;
+  const resolvedCurrency = String(currency || 'PYG').toUpperCase() === 'USD' ? 'USD' : 'PYG';
+  const fractionDigits = resolvedCurrency === 'USD' ? 2 : 0;
   return new Intl.NumberFormat('es-PY', {
     style: 'currency',
-    currency: 'PYG',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0
+    currency: resolvedCurrency,
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits
+  }).format(number);
+}
+
+function formatExchangeRatePrintable(value) {
+  const number = Number(value) || 0;
+  return new Intl.NumberFormat('es-PY', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4
   }).format(number);
 }
 
@@ -2740,6 +3859,7 @@ function formatDatePrintable(value) {
 function buildFacturaXml(venta, factura) {
   const totals = computeInvoiceTotals(venta);
   const detalles = Array.isArray(venta?.detalles) ? venta.detalles : [];
+  const ivaPorcentaje = Number.isFinite(Number(venta?.iva_porcentaje)) ? Number(venta.iva_porcentaje) : 10;
 
   const lines = detalles
     .map((detalle, index) => {
@@ -2781,7 +3901,7 @@ ${lines}
   <totales>
     <subtotal>${totals.subtotal.toFixed(2)}</subtotal>
     <descuento>${totals.descuento.toFixed(2)}</descuento>
-    <iva porcentaje="${venta?.iva_porcentaje || 10}">${totals.iva.toFixed(2)}</iva>
+    <iva porcentaje="${ivaPorcentaje}">${totals.iva.toFixed(2)}</iva>
     <total>${totals.total.toFixed(2)}</total>
   </totales>
 </factura>

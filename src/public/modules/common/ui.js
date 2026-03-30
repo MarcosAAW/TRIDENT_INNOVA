@@ -16,6 +16,7 @@ export function initDashboard(modules) {
     editingId: null,
     formCollapsed: true
   };
+  let loadRequestSeq = 0;
 
   const dom = getDomRefs();
   if (dom.year) {
@@ -187,6 +188,8 @@ export function initDashboard(modules) {
     const { preserveScroll = true } = options;
     const mod = getCurrentModule();
     if (!mod) return;
+    const requestSeq = ++loadRequestSeq;
+    const requestedModuleKey = mod.key;
 
     const scrollSnapshot = captureScrollSnapshot(preserveScroll);
     const filters = collectFilters(mod);
@@ -197,6 +200,11 @@ export function initDashboard(modules) {
         : await mod.fetchList({ filters });
 
       const { data = [], meta = null } = payload || {};
+
+      if (requestSeq !== loadRequestSeq || state.moduleKey !== requestedModuleKey) {
+        return;
+      }
+
       state.items = Array.isArray(data) ? data : [];
       state.meta = meta;
 
@@ -204,6 +212,9 @@ export function initDashboard(modules) {
       renderPagination(mod);
       restoreScrollPosition(preserveScroll, scrollSnapshot);
     } catch (error) {
+      if (requestSeq !== loadRequestSeq || state.moduleKey !== requestedModuleKey) {
+        return;
+      }
       console.error(`[Dashboard] No se pudo cargar ${mod.key}`, error);
       showMessage(error.message || 'No se pudo cargar los registros.', 'error');
     }
@@ -618,10 +629,12 @@ export function initDashboard(modules) {
         const cells = columns.map((col) => `<td>${formatCellValue(col, item)}</td>`).join('');
         let actions = '';
         const actionContext = { item, module: mod, state };
-        if (supportsEdit) {
+        const canEdit = typeof mod.canEdit === 'function' ? mod.canEdit(actionContext) : true;
+        const canDelete = typeof mod.canDelete === 'function' ? mod.canDelete(actionContext) : true;
+        if (supportsEdit && canEdit) {
           actions += `<button type="button" class="btn ghost small" data-action="edit" data-id="${item.id}">Editar</button>`;
         }
-        if (supportsDelete) {
+        if (supportsDelete && canDelete) {
           actions += `<button type="button" class="btn danger small" data-action="delete" data-id="${item.id}">Eliminar</button>`;
         }
         if (customActions.length) {
@@ -728,6 +741,11 @@ export function initDashboard(modules) {
       return;
     }
 
+    if (typeof mod.canEdit === 'function' && !mod.canEdit({ item, module: mod, state })) {
+      showMessage('Este registro ya no se puede editar.', 'info');
+      return;
+    }
+
     setFormCollapsed(false);
     state.editingId = id;
   dom.formTitle.textContent = `Editar ${getModuleSingular(mod)}`;
@@ -754,10 +772,23 @@ export function initDashboard(modules) {
         control.checked = Boolean(value);
       } else if (value !== undefined && value !== null) {
         control.value = value;
+        if (control.tagName === 'SELECT') {
+          if (control.value !== String(value)) {
+            control.dataset.pendingValue = String(value);
+          } else {
+            delete control.dataset.pendingValue;
+          }
+        }
       } else if (field.defaultValue !== undefined) {
         control.value = field.defaultValue;
+        if (control.tagName === 'SELECT') {
+          delete control.dataset.pendingValue;
+        }
       } else {
         control.value = '';
+        if (control.tagName === 'SELECT') {
+          delete control.dataset.pendingValue;
+        }
       }
     });
 
@@ -770,6 +801,12 @@ export function initDashboard(modules) {
   async function handleDelete(id) {
     const mod = getCurrentModule();
     if (!mod) return;
+
+    const item = state.items.find((entry) => entry.id === id);
+    if (item && typeof mod.canDelete === 'function' && !mod.canDelete({ item, module: mod, state })) {
+      showMessage('Este registro ya no se puede eliminar.', 'info');
+      return;
+    }
 
     const action = mod.actions?.eliminar;
     if (!action || typeof action.submit !== 'function') {
@@ -842,8 +879,14 @@ export function initDashboard(modules) {
           control.checked = Boolean(field.defaultValue);
         } else if (field.defaultValue !== undefined) {
           control.value = field.defaultValue;
+          if (control.tagName === 'SELECT') {
+            delete control.dataset.pendingValue;
+          }
         } else {
           control.value = '';
+          if (control.tagName === 'SELECT') {
+            delete control.dataset.pendingValue;
+          }
         }
       });
     }
@@ -865,12 +908,23 @@ export function initDashboard(modules) {
     const effectiveCollapsed = hasForm ? Boolean(collapsed) : true;
     state.formCollapsed = hasForm ? effectiveCollapsed : false;
     const shouldHide = !hasForm || effectiveCollapsed;
+    const focusFormLayout = Boolean(mod?.focusFormLayout) && hasForm && !shouldHide;
 
     if (dom.formCard) {
       dom.formCard.style.display = shouldHide ? 'none' : '';
     }
     if (dom.panelBody) {
       dom.panelBody.classList.toggle('is-form-collapsed', shouldHide);
+      dom.panelBody.classList.toggle('form-focus-mode', focusFormLayout);
+    }
+    if (dom.listCard) {
+      dom.listCard.style.display = focusFormLayout ? 'none' : '';
+    }
+    if (dom.listActions) {
+      dom.listActions.style.display = focusFormLayout ? 'none' : '';
+    }
+    if (dom.pagination) {
+      dom.pagination.style.display = focusFormLayout ? 'none' : '';
     }
     if (dom.toggleFormCardButton) {
       dom.toggleFormCardButton.hidden = !hasForm;

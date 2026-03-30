@@ -37,15 +37,19 @@ describe('Cierre de caja API', () => {
   });
 
   beforeEach(async () => {
-    await prisma.salidaCaja.deleteMany().catch(() => {});
-    await prisma.cierreCaja.deleteMany().catch(() => {});
-    await prisma.venta.deleteMany().catch(() => {});
-    await prisma.usuario.deleteMany().catch(() => {});
+    // Limpieza ordenada: primero salidas, cierres, ventas, luego usuarios
+    await prisma.salidaCaja?.deleteMany?.();
+    await prisma.cierreCaja?.deleteMany?.();
+    await prisma.venta?.deleteMany?.();
+    await prisma.usuario?.deleteMany?.();
+
+    // Generar sufijo único
+    const unique = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
 
     usuario = await prisma.usuario.create({
       data: {
         nombre: 'Caja Tester',
-        usuario: 'caja.tester',
+        usuario: `caja.tester_${unique}`,
         password_hash: 'hash',
         rol: 'ADMIN'
       }
