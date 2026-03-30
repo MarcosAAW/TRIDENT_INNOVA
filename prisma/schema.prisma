@@ -312,8 +312,8 @@ model DetalleVenta {
   precio_unitario        Decimal   @db.Decimal(12,2)
   subtotal               Decimal   @db.Decimal(12,2)
   moneda_precio_unitario String?   @map("moneda_precio_unitario") @db.VarChar(3)
-  precio_unitario_moneda Decimal?  @map("precio_unitario_moneda") @db.Decimal(12,4)
-  subtotal_moneda        Decimal?  @map("subtotal_moneda") @db.Decimal(12,4)
+  precio_unitario_moneda Decimal?  @map("precio_unitario_moneda") @db.Decimal(18,4)
+  subtotal_moneda        Decimal?  @map("subtotal_moneda") @db.Decimal(18,4)
   tipo_cambio_aplicado   Decimal?  @map("tipo_cambio_aplicado") @db.Decimal(12,4)
 
   @@map("detalle_venta")

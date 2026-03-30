@@ -1,7 +1,7 @@
 ALTER TABLE detalle_venta
   ADD COLUMN moneda_precio_unitario varchar(3),
-  ADD COLUMN precio_unitario_moneda numeric(12,4),
-  ADD COLUMN subtotal_moneda numeric(12,4),
+  ADD COLUMN precio_unitario_moneda numeric(18,4),
+  ADD COLUMN subtotal_moneda numeric(18,4),
   ADD COLUMN tipo_cambio_aplicado numeric(12,4);
 
 UPDATE detalle_venta AS dv
