@@ -1,6 +1,7 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency } from '../common/format.js';
 import { resolveProductUnitPricing } from '../common/pricing.js';
+import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js';
 import { createPresupuesto, buildPresupuestoPayload } from './nuevo.js';
 
 async function updateEstadoPresupuesto(id, estado) {
@@ -121,10 +122,10 @@ function attachPdfHandler() {
     if (!id) return;
 
     const url = urlWithSession(`/presupuestos/${encodeURIComponent(id)}/pdf`);
-    const win = window.open(url, '_blank');
-    if (!win || win.closed || typeof win.closed === 'undefined') {
-      alert('Permití las ventanas emergentes para ver el PDF del presupuesto.');
-    }
+    openUrlInNewTab(url, {
+      blockedTitle: 'No se pudo abrir el PDF',
+      blockedDescription: 'Permití las ventanas emergentes para ver el PDF del presupuesto.'
+    });
   });
 
   pdfHandlerAttached = true;
@@ -145,22 +146,26 @@ function attachEstadoHandler() {
     const confirmMsg = target === 'VENCIDO'
       ? '¿Marcar este presupuesto como VENCIDO?'
       : '¿Marcar este presupuesto como GENERADO?';
-    const ok = window.confirm(confirmMsg);
+    const ok = await confirmDialog({
+      title: 'Cambiar estado del presupuesto',
+      description: confirmMsg,
+      confirmLabel: 'Confirmar',
+      cancelLabel: 'Cancelar'
+    });
     if (!ok) return;
 
     btn.disabled = true;
     try {
       await updateEstadoPresupuesto(id, target);
-      // Refresh list silently
-      const reloadBtn = document.querySelector('[data-refresh-list]') || document.getElementById('refresh-list');
-      if (reloadBtn) {
-        reloadBtn.click();
-      } else {
-        window.location.reload();
-      }
+      document.dispatchEvent(new CustomEvent('dashboard:reload-list', {
+        detail: { preserveScroll: true }
+      }));
     } catch (err) {
       console.error('[Presupuestos] No se pudo actualizar el estado', err);
-      alert('No se pudo actualizar el estado del presupuesto.');
+      infoDialog({
+        title: 'No se pudo actualizar el estado',
+        description: 'No se pudo actualizar el estado del presupuesto.'
+      });
     } finally {
       btn.disabled = false;
     }
@@ -269,6 +274,16 @@ export const presupuestosModule = {
 
       const itemsState = [];
       let repriceItemsForFormCurrency = () => {};
+
+      const builderFeedback = document.createElement('p');
+      builderFeedback.className = 'form-helper-text';
+      builderFeedback.style.color = 'var(--color-danger, #fca5a5)';
+      builderFeedback.style.display = 'none';
+
+      const showBuilderFeedback = (message) => {
+        builderFeedback.textContent = message;
+        builderFeedback.style.display = message ? 'block' : 'none';
+      };
 
       const setSpan = (fieldName, className) => {
         const control = form?.elements?.[fieldName];
@@ -503,6 +518,7 @@ export const presupuestosModule = {
 
         builder.appendChild(topRow);
         builder.appendChild(quantityRow);
+        builder.appendChild(builderFeedback);
         builder.appendChild(listContainer);
         detallesWrapper.appendChild(builder);
 
@@ -641,12 +657,12 @@ export const presupuestosModule = {
           const monedaFormulario = getFormCurrency();
 
           if (productoId && !producto) {
-            alert('Seleccioná un producto válido de la lista.');
+            showBuilderFeedback('Seleccioná un producto válido de la lista.');
             return;
           }
 
           if (!Number.isInteger(cantidad) || cantidad <= 0) {
-            alert('Ingresá una cantidad válida.');
+            showBuilderFeedback('Ingresá una cantidad válida.');
             return;
           }
 
@@ -659,7 +675,7 @@ export const presupuestosModule = {
           }
 
           if (!precioUnitario || precioUnitario <= 0) {
-            alert('Ingresá un precio unitario válido.');
+            showBuilderFeedback('Ingresá un precio unitario válido.');
             return;
           }
 
@@ -670,15 +686,16 @@ export const presupuestosModule = {
           const totalSolicitado = yaReservado + cantidad;
 
           if (requiereStock && (stockDisponible <= 0 || !Number.isFinite(stockDisponible))) {
-            alert('El producto no tiene stock disponible.');
+            showBuilderFeedback('El producto no tiene stock disponible.');
             return;
           }
 
           if (requiereStock && totalSolicitado > stockDisponible) {
-            alert(`Solo hay ${stockDisponible} unidades disponibles (ya agregaste ${yaReservado}).`);
+            showBuilderFeedback(`Solo hay ${stockDisponible} unidades disponibles (ya agregaste ${yaReservado}).`);
             return;
           }
 
+          showBuilderFeedback('');
           itemsState.push({
             productoId,
             nombre: productoNombre,
@@ -706,6 +723,7 @@ export const presupuestosModule = {
           if (!button) return;
           const idx = Number(button.dataset.removeIndex);
           if (Number.isInteger(idx)) {
+          showBuilderFeedback('');
             itemsState.splice(idx, 1);
             renderItemsList(listContainer);
             syncDetallesField();

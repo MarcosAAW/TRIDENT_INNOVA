@@ -127,6 +127,31 @@ describe('Recibos API', () => {
     expect(ventaActualizada.estado).toBe('FACTURADO');
   });
 
+  test('el listado de ventas incluye recibos asociados para reabrirlos desde Ver factura', async () => {
+    const venta = await crearVentaCredito();
+
+    await auth(request(app).post('/recibos'))
+      .send({
+        metodo: 'EFECTIVO',
+        observacion: 'Cobro parcial para reabrir recibo',
+        ventas: [{ ventaId: venta.id, monto: 50000 }]
+      })
+      .expect(201);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const response = await auth(request(app).get(`/ventas?fecha_desde=${today}&fecha_hasta=${today}`))
+      .expect(200);
+
+    const ventaListada = Array.isArray(response.body?.data)
+      ? response.body.data.find((item) => item.id === venta.id)
+      : null;
+
+    expect(ventaListada).toBeDefined();
+    expect(Array.isArray(ventaListada.recibos)).toBe(true);
+    expect(ventaListada.recibos.length).toBeGreaterThan(0);
+    expect(ventaListada.recibos[0]).toEqual(expect.objectContaining({ id: expect.any(String) }));
+  });
+
   test('rechaza cobros de ventas que no pertenecen a la sucursal activa', async () => {
     const otraSucursal = await prisma.sucursal.create({
       data: { nombre: 'Sucursal ajena' }
@@ -142,6 +167,48 @@ describe('Recibos API', () => {
       .expect(404);
 
     expect(response.body.error).toMatch(/no pertenece a esta sucursal|no existe/i);
+  });
+
+  test('rechaza recibos para una venta regularizada con nota de crédito total', async () => {
+    const venta = await crearVentaCredito({ saldo_pendiente: 0 });
+
+    const factura = await prisma.facturaElectronica.create({
+      data: {
+        ventaId: venta.id,
+        sucursalId: sucursal.id,
+        nro_factura: '001-001-RECIBO-NC',
+        timbrado: '12345678',
+        fecha_emision: new Date('2026-05-01T10:00:00.000Z'),
+        estado: 'PAGADA'
+      }
+    });
+
+    await prisma.notaCreditoElectronica.create({
+      data: {
+        ventaId: venta.id,
+        facturaElectronicaId: factura.id,
+        sucursalId: sucursal.id,
+        nro_nota: '001-001-0000001',
+        timbrado: '12345678',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 1,
+        motivo: 'Anulación total de prueba',
+        tipo_ajuste: 'TOTAL',
+        moneda: 'PYG',
+        total: -200000,
+        estado: 'ENVIADO'
+      }
+    });
+
+    const response = await auth(request(app).post('/recibos'))
+      .send({
+        metodo: 'EFECTIVO',
+        ventas: [{ ventaId: venta.id, monto: 50000 }]
+      })
+      .expect(409);
+
+    expect(response.body.error).toMatch(/nota de crédito total|regularizada/i);
   });
 
   test('aplica cobro FIFO sobre cuotas y marca la primera como pagada', async () => {
@@ -244,6 +311,99 @@ describe('Recibos API', () => {
     expect(ventaActualizada.credito_config.cuotas[0].pagada || false).toBe(false);
     expect(ventaActualizada.credito_config.cuotas[1].pagada).toBe(true);
     expect(Number(ventaActualizada.credito_config.cuotas[1].monto_pagado)).toBeCloseTo(100, 2);
+  });
+
+  test('permite cobrar una venta en guaranies usando USD aunque el redondeo del contravalor exceda unos guaranies', async () => {
+    const venta = await crearVentaCredito({
+      total: 250000,
+      subtotal: 250000,
+      impuesto_total: 22727.27,
+      saldo_pendiente: 250000,
+      moneda: 'PYG',
+      tipo_cambio: null,
+      total_moneda: null
+    });
+
+    const response = await auth(request(app).post('/recibos'))
+      .send({
+        metodo: 'TRANSFERENCIA',
+        moneda: 'USD',
+        tipo_cambio: 7300,
+        ventas: [{ ventaId: venta.id, monto: 34.25 }]
+      })
+      .expect(201);
+
+    expect(response.body.moneda).toBe('USD');
+    expect(Number(response.body.total)).toBeCloseTo(250000, 2);
+    expect(Number(response.body.total_moneda)).toBeCloseTo(34.25, 2);
+    expect(response.body.aplicaciones).toHaveLength(1);
+    expect(Number(response.body.aplicaciones[0].monto)).toBeCloseTo(250000, 2);
+    expect(Number(response.body.aplicaciones[0].monto_moneda)).toBeCloseTo(34.25, 2);
+    expect(Number(response.body.aplicaciones[0].saldo_posterior)).toBeCloseTo(0, 2);
+
+    const ventaActualizada = await prisma.venta.findUnique({ where: { id: venta.id } });
+    expect(Number(ventaActualizada.saldo_pendiente)).toBeCloseTo(0, 2);
+    expect(ventaActualizada.estado).toBe('PAGADA');
+  });
+
+  test('cierra el saldo cuando el pago en USD deja un residuo menor a un centavo convertido', async () => {
+    const venta = await crearVentaCredito({
+      total: 45500,
+      subtotal: 45500,
+      impuesto_total: 4136.36,
+      saldo_pendiente: 45500,
+      moneda: 'PYG',
+      tipo_cambio: null,
+      total_moneda: null
+    });
+
+    const response = await auth(request(app).post('/recibos'))
+      .send({
+        metodo: 'EFECTIVO',
+        moneda: 'USD',
+        tipo_cambio: 7300,
+        ventas: [{ ventaId: venta.id, monto: 6.23 }]
+      })
+      .expect(201);
+
+    expect(response.body.moneda).toBe('USD');
+    expect(Number(response.body.total)).toBeCloseTo(45500, 2);
+    expect(Number(response.body.total_moneda)).toBeCloseTo(6.23, 2);
+    expect(Number(response.body.aplicaciones[0].saldo_posterior)).toBeCloseTo(0, 2);
+
+    const ventaActualizada = await prisma.venta.findUnique({ where: { id: venta.id } });
+    expect(Number(ventaActualizada.saldo_pendiente)).toBeCloseTo(0, 2);
+    expect(ventaActualizada.estado).toBe('PAGADA');
+  });
+
+  test('absorbe un residuo pequeño en guaranies aunque el monto cobrado en USD no haya entrado por el ajuste previo', async () => {
+    const venta = await crearVentaCredito({
+      total: 500014,
+      subtotal: 500014,
+      impuesto_total: 45455.82,
+      saldo_pendiente: 500014,
+      moneda: 'PYG',
+      tipo_cambio: null,
+      total_moneda: null
+    });
+
+    const response = await auth(request(app).post('/recibos'))
+      .send({
+        metodo: 'TRANSFERENCIA',
+        moneda: 'USD',
+        tipo_cambio: 7000,
+        ventas: [{ ventaId: venta.id, monto: 71.43 }]
+      })
+      .expect(201);
+
+    expect(response.body.moneda).toBe('USD');
+    expect(Number(response.body.total)).toBeCloseTo(500014, 2);
+    expect(Number(response.body.total_moneda)).toBeCloseTo(71.43, 2);
+    expect(Number(response.body.aplicaciones[0].saldo_posterior)).toBeCloseTo(0, 2);
+
+    const ventaActualizada = await prisma.venta.findUnique({ where: { id: venta.id } });
+    expect(Number(ventaActualizada.saldo_pendiente)).toBeCloseTo(0, 2);
+    expect(ventaActualizada.estado).toBe('PAGADA');
   });
 
   test('permite cobrar las ultimas cuotas en USD aunque el saldo pendiente en Gs tenga redondeo menor al tc de cobro', async () => {

@@ -1,5 +1,6 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency, formatDate } from '../common/format.js';
+import { confirmDialog, createDeferredDocumentWindow, infoDialog, openUrlInNewTab, promptDialog } from '../common/dialogs.js';
 
 const IVA_OPTIONS = [
   { value: '10', label: 'IVA 10%' },
@@ -31,6 +32,20 @@ function round(value, decimals = 2) {
   return Math.round((Number(value) || 0) * factor) / factor;
 }
 
+function ceilAmount(value, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.ceil(((Number(value) || 0) * factor) - Number.EPSILON) / factor;
+}
+
+function lockBodyScroll() {
+  if (typeof document === 'undefined') return () => {};
+  const previousOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  return () => {
+    document.body.style.overflow = previousOverflow;
+  };
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -38,6 +53,81 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function normalizeRecibos(recibos) {
+  if (!Array.isArray(recibos)) return [];
+  return Array.from(
+    new Map(
+      recibos
+        .filter((recibo) => recibo?.id)
+        .map((recibo) => [recibo.id, recibo])
+    ).values()
+  );
+}
+
+async function resolveVentaRecibos(venta) {
+  const recibos = normalizeRecibos(venta?.recibos);
+  if (recibos.length || !venta?.id) {
+    return recibos;
+  }
+
+  try {
+    const query = buildQuery({ ventaId: venta.id });
+    const endpoint = query ? `/recibos?${query}` : '/recibos';
+    const response = await request(endpoint);
+    const fetched = Array.isArray(response)
+      ? response
+      : Array.isArray(response?.data)
+        ? response.data
+        : [];
+    const normalized = normalizeRecibos(fetched);
+    if (normalized.length) {
+      ventasState.lastList = ventasState.lastList.map((item) => (
+        item?.id === venta.id
+          ? { ...item, recibos: normalized }
+          : item
+      ));
+    }
+    return normalized;
+  } catch (error) {
+    console.error('[Ventas] No se pudieron resolver los recibos asociados.', error);
+    return recibos;
+  }
+}
+
+function renderRecibosBundleHtml(venta, recibos) {
+  const links = recibos
+    .map((recibo, index) => {
+      const href = urlWithSession(`/recibos/${encodeURIComponent(recibo.id)}/pdf`);
+      const numero = escapeHtml(recibo.numero || `Recibo ${index + 1}`);
+      const fecha = recibo.fecha ? ` · ${escapeHtml(formatDate(recibo.fecha))}` : '';
+      return `<a class="venta-doc-link" href="${href}" target="_blank" rel="noopener noreferrer">${numero}${fecha}</a>`;
+    })
+    .join('');
+
+  return `<!DOCTYPE html>
+    <html lang="es">
+      <head>
+        <meta charset="utf-8">
+        <title>Recibos relacionados</title>
+        <style>
+          body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; }
+          .card { width: min(100% - 32px, 640px); padding: 28px; border-radius: 20px; background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(8, 15, 28, 0.96)); border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: 0 24px 50px rgba(2, 6, 23, 0.45); }
+          h1 { margin: 0 0 10px; font-size: 1.25rem; }
+          p { margin: 0 0 18px; color: #94a3b8; line-height: 1.55; }
+          .links { display: grid; gap: 12px; }
+          .venta-doc-link { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0.8rem 1.1rem; border-radius: 14px; background: rgba(249, 115, 22, 0.12); border: 1px solid rgba(249, 115, 22, 0.35); color: #fed7aa; text-decoration: none; font-weight: 700; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>Recibos relacionados</h1>
+          <p>Venta ${escapeHtml(venta?.factura_electronica?.nro_factura || venta?.id || '')}. Abrí cada recibo desde esta lista.</p>
+          <div class="links">${links}</div>
+        </div>
+      </body>
+    </html>`;
 }
 
 function normalizeDateString(input) {
@@ -82,6 +172,21 @@ function getNotaCreditoLabel(nota) {
   if (estado === 'RECHAZADO') return `${prefix} rechazada`;
   if (estado === 'ENVIADO' || estado === 'ACEPTADO' || estado === 'PAGADA') return `${prefix} emitida`;
   return `${prefix} pendiente`;
+}
+
+function hasEffectiveTotalCreditNote(venta) {
+  const nota = getPrimaryNotaCredito(venta);
+  if (!nota) return false;
+  const estado = String(nota.estado || '').toUpperCase();
+  if (estado === 'RECHAZADO') return false;
+  return String(nota.tipo_ajuste || 'TOTAL').toUpperCase() === 'TOTAL';
+}
+
+function getOperationalSaldoPendiente(venta) {
+  if (hasEffectiveTotalCreditNote(venta)) {
+    return 0;
+  }
+  return Number(venta?.saldo_pendiente ?? 0);
 }
 
 function renderNotaCreditoBadge(venta) {
@@ -157,7 +262,7 @@ function datesBetween(start, end) {
   return out;
 }
 
-function resolveDateRange(filters, showMessage) {
+async function resolveDateRange(filters, showMessage) {
   let start = null;
   let end = null;
 
@@ -178,7 +283,20 @@ function resolveDateRange(filters, showMessage) {
 
   if (!start && !end) {
     const suggestion = new Date().toISOString().slice(0, 10);
-    const input = typeof window !== 'undefined' ? window.prompt('Ingresá la fecha (YYYY-MM-DD) para el reporte', suggestion) : null;
+    const input = typeof window !== 'undefined'
+      ? await promptDialog({
+        title: 'Fecha del reporte',
+        description: 'Ingresá la fecha base del reporte en formato YYYY-MM-DD.',
+        field: {
+          name: 'fecha',
+          label: 'Fecha',
+          type: 'date',
+          initialValue: suggestion
+        },
+        confirmLabel: 'Usar fecha',
+        validate: (value) => (DATE_ONLY_REGEX.test(value) ? '' : 'Usa el formato YYYY-MM-DD para la fecha del reporte.')
+      })
+      : null;
     if (!input) {
       return null;
     }
@@ -225,7 +343,10 @@ function openReportPdf(type, filters, rangeInfo, showMessage) {
   });
   const rawUrl = query ? `/ventas/reporte/${type}?${query}` : `/ventas/reporte/${type}`;
   const url = urlWithSession(rawUrl);
-  const win = typeof window !== 'undefined' ? window.open(url, '_blank') : null;
+  const win = openUrlInNewTab(url, {
+    blockedTitle: 'No se pudo abrir el reporte',
+    blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF del reporte.'
+  });
   if (!win) {
     showMessage('No se pudo abrir la ventana del reporte. Revisá el bloqueador de ventanas emergentes.', 'error');
   }
@@ -242,7 +363,10 @@ function downloadReportXlsx(filters, rangeInfo, showMessage) {
   });
   const rawUrl = query ? `/ventas/reporte/diario/xlsx?${query}` : '/ventas/reporte/diario/xlsx';
   const url = urlWithSession(rawUrl);
-  const win = typeof window !== 'undefined' ? window.open(url, '_blank') : null;
+  const win = openUrlInNewTab(url, {
+    blockedTitle: 'No se pudo iniciar la descarga',
+    blockedDescription: 'Desbloquea las ventanas emergentes para descargar el Excel del reporte.'
+  });
   if (!win) {
     showMessage('No se pudo iniciar la descarga del Excel. Revisá el bloqueador de ventanas emergentes.', 'error');
   }
@@ -254,13 +378,16 @@ function openNotaCreditoDialog({ venta }) {
     const moneda = (venta?.moneda || 'PYG').toUpperCase();
     const tipoCambio = Number(venta?.tipo_cambio || 0);
 
+    const restoreBodyScroll = lockBodyScroll();
+
     const overlay = document.createElement('div');
     overlay.style.position = 'fixed';
     overlay.style.inset = '0';
     overlay.style.background = 'rgba(0,0,0,0.45)';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
+    overlay.style.display = 'grid';
+    overlay.style.placeItems = 'center';
+    overlay.style.padding = '20px 16px';
+    overlay.style.overflowY = 'auto';
     overlay.style.zIndex = '9999';
 
     const modal = document.createElement('div');
@@ -271,6 +398,7 @@ function openNotaCreditoDialog({ venta }) {
     modal.style.width = 'min(760px, calc(100vw - 32px))';
     modal.style.maxHeight = 'calc(100vh - 40px)';
     modal.style.overflowY = 'auto';
+    modal.style.overscrollBehavior = 'contain';
     modal.style.boxShadow = '0 10px 30px rgba(0,0,0,0.4)';
 
     const title = document.createElement('h3');
@@ -317,6 +445,13 @@ function openNotaCreditoDialog({ venta }) {
     motivoInput.style.color = '#e2e8f0';
     modal.appendChild(motivoLabel);
     modal.appendChild(motivoInput);
+
+    const errorNode = document.createElement('p');
+    errorNode.style.margin = '0 0 12px 0';
+    errorNode.style.color = '#fca5a5';
+    errorNode.style.fontSize = '13px';
+    errorNode.style.display = 'none';
+    modal.appendChild(errorNode);
 
     const partialWrap = document.createElement('div');
     partialWrap.style.display = 'none';
@@ -442,12 +577,17 @@ function openNotaCreditoDialog({ venta }) {
     btnOk.style.color = '#020617';
     actions.appendChild(btnCancel);
     actions.appendChild(btnOk);
+    actions.style.position = 'sticky';
+    actions.style.bottom = '0';
+    actions.style.paddingTop = '12px';
+    actions.style.background = 'linear-gradient(180deg, rgba(15,23,42,0), rgba(15,23,42,1) 30%)';
     modal.appendChild(actions);
 
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
     const close = (result) => {
+      restoreBodyScroll();
       document.body.removeChild(overlay);
       resolve(result);
     };
@@ -456,7 +596,8 @@ function openNotaCreditoDialog({ venta }) {
     btnOk.addEventListener('click', () => {
       const motivo = String(motivoInput.value || '').trim();
       if (motivo.length < 5) {
-        window.alert('El motivo debe tener al menos 5 caracteres.');
+        errorNode.textContent = 'El motivo debe tener al menos 5 caracteres.';
+        errorNode.style.display = 'block';
         return;
       }
 
@@ -468,13 +609,15 @@ function openNotaCreditoDialog({ venta }) {
           }))
           .filter((row) => row.cantidad > 0);
         if (!detalles.length) {
-          window.alert('Seleccioná al menos un ítem para la nota parcial.');
+          errorNode.textContent = 'Seleccioná al menos un ítem para la nota parcial.';
+          errorNode.style.display = 'block';
           return;
         }
         close({ motivo, tipo_ajuste: 'PARCIAL', detalles });
         return;
       }
 
+      errorNode.style.display = 'none';
       close({ motivo, tipo_ajuste: 'TOTAL' });
     });
   });
@@ -488,14 +631,18 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
     const saldoMoneda = esVentaUsd && tipoCambioVenta > 0
       ? round(saldoGs / Number(tipoCambioVenta), 2)
       : saldoGs;
+    const monedaVentaNormalizada = (monedaVenta || 'PYG').toUpperCase();
+
+    const restoreBodyScroll = lockBodyScroll();
 
     const overlay = document.createElement('div');
     overlay.style.position = 'fixed';
     overlay.style.inset = '0';
     overlay.style.background = 'rgba(0,0,0,0.45)';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
+    overlay.style.display = 'grid';
+    overlay.style.placeItems = 'center';
+    overlay.style.padding = '20px 16px';
+    overlay.style.overflowY = 'auto';
     overlay.style.zIndex = '9999';
 
     const modal = document.createElement('div');
@@ -503,7 +650,10 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
     modal.style.color = '#e2e8f0';
     modal.style.padding = '20px';
     modal.style.borderRadius = '10px';
-    modal.style.minWidth = '420px';
+    modal.style.width = 'min(760px, calc(100vw - 32px))';
+    modal.style.maxHeight = 'calc(100vh - 40px)';
+    modal.style.overflowY = 'auto';
+    modal.style.overscrollBehavior = 'contain';
     modal.style.boxShadow = '0 10px 30px rgba(0,0,0,0.4)';
 
     const title = document.createElement('h3');
@@ -515,16 +665,6 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
     resumenSaldo.style.fontSize = '13px';
     resumenSaldo.style.color = '#cbd5e1';
     resumenSaldo.style.marginBottom = '12px';
-    let saldoTexto = '';
-    if (esVentaUsd) {
-      saldoTexto = `Saldo pendiente: ${formatCurrency(saldoMoneda, 'USD')}`;
-      if (tipoCambioVenta > 0) {
-        saldoTexto += ` · ${formatCurrency(saldoGs, 'PYG')} (tc ${tipoCambioVenta})`;
-      }
-    } else {
-      saldoTexto = `Saldo pendiente: ${formatCurrency(saldoGs, 'PYG')}`;
-    }
-    resumenSaldo.textContent = saldoTexto;
     modal.appendChild(resumenSaldo);
 
     // Si la venta es a cuotas, mostrar detalle de cuotas pendientes
@@ -568,14 +708,22 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
 
     // Contenedor de pago único (no multi-pago para cuotas)
     const pagoContainer = document.createElement('div');
-    pagoContainer.style.display = 'flex';
-    pagoContainer.style.flexDirection = 'column';
-    pagoContainer.style.gap = '10px';
+    pagoContainer.className = 'caja-dialog__form';
     modal.appendChild(pagoContainer);
 
+    const appendDialogField = (labelText, control) => {
+      const field = document.createElement('label');
+      field.className = 'caja-dialog__field';
+
+      const caption = document.createElement('span');
+      caption.textContent = labelText;
+      field.appendChild(caption);
+      field.appendChild(control);
+      pagoContainer.appendChild(field);
+      return field;
+    };
+
     // Moneda
-    const monedaLabel = document.createElement('label');
-    monedaLabel.textContent = 'Moneda';
     const monedaSelect = document.createElement('select');
     ['PYG', 'USD'].forEach((val) => {
       const opt = document.createElement('option');
@@ -584,48 +732,39 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
       if ((monedaVenta || 'PYG') === val) opt.selected = true;
       monedaSelect.appendChild(opt);
     });
-    pagoContainer.appendChild(monedaLabel);
-    pagoContainer.appendChild(monedaSelect);
+    appendDialogField('Moneda', monedaSelect);
 
     // Tipo de cambio (solo USD)
-    const cambioLabel = document.createElement('label');
-    cambioLabel.textContent = 'Tipo cambio';
     const cambioInput = document.createElement('input');
     cambioInput.type = 'number';
     cambioInput.step = '0.0001';
     cambioInput.min = '0';
     cambioInput.value = tipoCambioVenta > 0 ? tipoCambioVenta : '';
+    const cambioField = appendDialogField('Tipo cambio', cambioInput);
     if ((monedaVenta || 'PYG') !== 'USD') {
-      cambioLabel.style.display = 'none';
-      cambioInput.style.display = 'none';
+      cambioField.style.display = 'none';
     }
     monedaSelect.addEventListener('change', (e) => {
       if (e.target.value === 'USD') {
-        cambioLabel.style.display = '';
-        cambioInput.style.display = '';
+        cambioField.style.display = '';
       } else {
-        cambioLabel.style.display = 'none';
-        cambioInput.style.display = 'none';
+        cambioField.style.display = 'none';
       }
       updateMontoSugerido();
     });
-    pagoContainer.appendChild(cambioLabel);
-    pagoContainer.appendChild(cambioInput);
+    cambioInput.addEventListener('input', () => {
+      updateMontoSugerido();
+    });
 
     // Monto sugerido
-    const montoLabel = document.createElement('label');
-    montoLabel.textContent = 'Monto';
     const montoInput = document.createElement('input');
     montoInput.type = 'number';
     montoInput.step = '0.01';
     montoInput.min = '0';
     montoInput.value = esVentaUsd ? saldoMoneda : saldoGs;
-    pagoContainer.appendChild(montoLabel);
-    pagoContainer.appendChild(montoInput);
+    appendDialogField('Monto', montoInput);
 
     // Método
-    const metodoLabel = document.createElement('label');
-    metodoLabel.textContent = 'Método';
     const metodoSelect = document.createElement('select');
     ['efectivo', 'transferencia', 'tarjeta'].forEach((val) => {
       const opt = document.createElement('option');
@@ -633,8 +772,63 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
       opt.textContent = val.charAt(0).toUpperCase() + val.slice(1);
       metodoSelect.appendChild(opt);
     });
-    pagoContainer.appendChild(metodoLabel);
-    pagoContainer.appendChild(metodoSelect);
+    appendDialogField('Método', metodoSelect);
+
+    const errorNode = document.createElement('p');
+    errorNode.style.margin = '0';
+    errorNode.style.color = '#fca5a5';
+    errorNode.style.fontSize = '13px';
+    errorNode.style.display = 'none';
+    modal.appendChild(errorNode);
+
+    function getTipoCambioCobro() {
+      const value = Number(cambioInput.value);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    function convertSaleAmountToSelectedCurrency(amount) {
+      const numericAmount = round(Number(amount) || 0, 2);
+      if (monedaSelect.value === monedaVentaNormalizada) {
+        return numericAmount;
+      }
+
+      const tipoCambioCobro = getTipoCambioCobro();
+      if (!tipoCambioCobro) {
+        return null;
+      }
+
+      if (monedaVentaNormalizada === 'PYG' && monedaSelect.value === 'USD') {
+        return ceilAmount(numericAmount / tipoCambioCobro, 2);
+      }
+
+      if (monedaVentaNormalizada === 'USD' && monedaSelect.value === 'PYG') {
+        return round(numericAmount * tipoCambioCobro, 2);
+      }
+
+      return numericAmount;
+    }
+
+    function updateResumenSaldo() {
+      const tipoCambioCobro = getTipoCambioCobro();
+      if (monedaSelect.value === 'USD') {
+        const saldoUsd = monedaVentaNormalizada === 'USD'
+          ? saldoMoneda
+          : (tipoCambioCobro ? ceilAmount(saldoGs / tipoCambioCobro, 2) : null);
+        if (saldoUsd === null) {
+          resumenSaldo.textContent = `Saldo pendiente: ${formatCurrency(saldoGs, 'PYG')} · completá el tipo de cambio para cobrar en USD.`;
+          return;
+        }
+        resumenSaldo.textContent = `Saldo pendiente: ${formatCurrency(saldoUsd, 'USD')} · ${formatCurrency(saldoGs, 'PYG')} (tc ${tipoCambioCobro || tipoCambioVenta || 0})`;
+        return;
+      }
+
+      if (monedaVentaNormalizada === 'USD' && tipoCambioCobro) {
+        resumenSaldo.textContent = `Saldo pendiente: ${formatCurrency(saldoGs, 'PYG')} · ${formatCurrency(saldoMoneda, 'USD')} (tc ${tipoCambioCobro})`;
+        return;
+      }
+
+      resumenSaldo.textContent = `Saldo pendiente: ${formatCurrency(saldoGs, 'PYG')}`;
+    }
 
     // Función para actualizar el monto sugerido según cuotas seleccionadas
     function updateMontoSugerido() {
@@ -642,12 +836,18 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
         const total = cuotasPendientes
           .filter((c) => cuotasSeleccionadas.includes(c.numero))
           .reduce((acc, c) => acc + Number(c.monto || 0), 0);
-        montoInput.value = round(total, 2);
+        const convertedTotal = convertSaleAmountToSelectedCurrency(total);
+        montoInput.value = convertedTotal === null ? '' : round(convertedTotal, 2);
+        updateResumenSaldo();
         return;
       }
 
-      montoInput.value = monedaSelect.value === 'USD' ? saldoMoneda : saldoGs;
+      const convertedSaldo = convertSaleAmountToSelectedCurrency(monedaVentaNormalizada === 'USD' ? saldoMoneda : saldoGs);
+      montoInput.value = convertedSaldo === null ? '' : convertedSaldo;
+      updateResumenSaldo();
     }
+
+    updateMontoSugerido();
 
     // Acciones
     const actions = document.createElement('div');
@@ -670,12 +870,17 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
     btnOk.style.color = '#e2e8f0';
     actions.appendChild(btnCancel);
     actions.appendChild(btnOk);
+    actions.style.position = 'sticky';
+    actions.style.bottom = '0';
+    actions.style.paddingTop = '12px';
+    actions.style.background = 'linear-gradient(180deg, rgba(15,23,42,0), rgba(15,23,42,1) 30%)';
     modal.appendChild(actions);
 
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
     btnCancel.addEventListener('click', () => {
+      restoreBodyScroll();
       document.body.removeChild(overlay);
       resolve(null);
     });
@@ -684,22 +889,31 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
       let pagos = [];
       if (cuotasPendientes.length) {
         if (!cuotasSeleccionadas.length) {
-          alert('Seleccioná al menos una cuota a pagar.');
+          errorNode.textContent = 'Seleccioná al menos una cuota a pagar.';
+          errorNode.style.display = 'block';
           return;
         }
         const esUsd = monedaSelect.value === 'USD';
         const total = cuotasPendientes
           .filter((c) => cuotasSeleccionadas.includes(c.numero))
           .reduce((acc, c) => acc + Number(c.monto || 0), 0);
+        const totalEsperado = convertSaleAmountToSelectedCurrency(total);
+        if (totalEsperado === null) {
+          errorNode.textContent = 'Ingresá un tipo de cambio válido para cobrar en USD.';
+          errorNode.style.display = 'block';
+          return;
+        }
         let monto = Number(montoInput.value);
         if (esUsd) {
-          if (Math.abs(monto - total) > 1) {
-            alert('El monto en USD debe coincidir con la suma de las cuotas seleccionadas.');
+          if (Math.abs(monto - totalEsperado) > 1) {
+            errorNode.textContent = 'El monto en USD debe coincidir con la suma de las cuotas seleccionadas.';
+            errorNode.style.display = 'block';
             return;
           }
         } else {
-          if (Math.abs(monto - total) > 1) {
-            alert('El monto debe coincidir con el total de las cuotas seleccionadas.');
+          if (Math.abs(monto - totalEsperado) > 1) {
+            errorNode.textContent = 'El monto debe coincidir con el total de las cuotas seleccionadas.';
+            errorNode.style.display = 'block';
             return;
           }
         }
@@ -711,26 +925,34 @@ function openCobroDialog({ saldo, monedaVenta, tipoCambioVenta, venta }) {
           cuotas: cuotasSeleccionadas.slice() // Enviar las cuotas seleccionadas
         }];
       } else {
+        const esUsd = monedaSelect.value === 'USD';
+        if (esUsd && !getTipoCambioCobro()) {
+          errorNode.textContent = 'Ingresá un tipo de cambio válido para cobrar en USD.';
+          errorNode.style.display = 'block';
+          return;
+        }
         pagos = [{
-          monedaCobro: (monedaVenta || 'PYG').toUpperCase(),
-          tipoCambio: (monedaVenta || '').toUpperCase() === 'USD' ? Number(cambioInput.value) : undefined,
+          monedaCobro: monedaSelect.value,
+          tipoCambio: esUsd ? getTipoCambioCobro() : undefined,
           monto: Number(montoInput.value),
           metodo: metodoSelect.value,
           cuotas: []
         }];
       }
+      errorNode.style.display = 'none';
+      restoreBodyScroll();
       document.body.removeChild(overlay);
       resolve({ pagos });
     });
   });
 }
 
-function printDailyReport(filters, showMessage) {
+async function printDailyReport(filters, showMessage) {
   if (!ventasState.lastList.length) {
     showMessage('No hay ventas cargadas para generar el reporte.', 'info');
     return;
   }
-  const rangeInfo = resolveDateRange(filters, showMessage);
+  const rangeInfo = await resolveDateRange(filters, showMessage);
   if (!rangeInfo) return;
   const { label } = rangeInfo;
   const ventas = filterVentasByRange(rangeInfo);
@@ -741,12 +963,12 @@ function printDailyReport(filters, showMessage) {
   openReportPdf('diario', filters || {}, rangeInfo, showMessage);
 }
 
-function downloadDailyXlsx(filters, showMessage) {
+async function downloadDailyXlsx(filters, showMessage) {
   if (!ventasState.lastList.length) {
     showMessage('No hay ventas cargadas para exportar.', 'info');
     return;
   }
-  const rangeInfo = resolveDateRange(filters, showMessage);
+  const rangeInfo = await resolveDateRange(filters, showMessage);
   if (!rangeInfo) return;
   const { label } = rangeInfo;
   const ventas = filterVentasByRange(rangeInfo);
@@ -757,13 +979,13 @@ function downloadDailyXlsx(filters, showMessage) {
   downloadReportXlsx(filters || {}, rangeInfo, showMessage);
 }
 
-function printMarginReport(filters, showMessage) {
+async function printMarginReport(filters, showMessage) {
   if (!ventasState.lastList.length) {
     showMessage('No hay ventas cargadas para generar el reporte.', 'info');
     return;
   }
 
-  const rangeInfo = resolveDateRange(filters, showMessage);
+  const rangeInfo = await resolveDateRange(filters, showMessage);
   if (!rangeInfo) return;
   const { label } = rangeInfo;
   const ventas = filterVentasByRange(rangeInfo);
@@ -874,23 +1096,28 @@ export const ventasModule = {
       label: 'Cobrar',
       className: 'btn primary small',
       shouldRender: ({ item }) => {
-        const saldo = Number(item?.saldo_pendiente ?? 0);
+        const saldo = getOperationalSaldoPendiente(item);
         return !item?.deleted_at && saldo > 0;
       },
       isDisabled: ({ item }) => {
-        const saldo = Number(item?.saldo_pendiente ?? 0);
+        const saldo = getOperationalSaldoPendiente(item);
         return !item || saldo <= 0;
       }
     }
   ],
   rowActionHandlers: {
     async facturar({ id, showMessage, reload }) {
-      const confirmed = window.confirm('¿Generar la factura para esta venta?');
+      const confirmed = await confirmDialog({
+        title: 'Generar factura',
+        description: '¿Generar la factura para esta venta?',
+        confirmLabel: 'Generar',
+        cancelLabel: 'Cancelar'
+      });
       if (!confirmed) return;
       try {
         await request(`/ventas/${id}/facturar`, { method: 'POST' });
         showMessage('Factura generada correctamente.', 'success');
-        await reload();
+        await reload({ preserveScroll: true });
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo generar la factura.', 'error');
@@ -909,12 +1136,18 @@ export const ventasModule = {
         showMessage('Las ventas facturadas no se anulan desde aquí. Debes emitir una nota de crédito.', 'warn');
         return;
       }
-      const confirmation = window.confirm('¿Anular esta venta? Se repondrá el stock de los productos.');
+      const confirmation = await confirmDialog({
+        title: 'Anular venta',
+        description: '¿Anular esta venta? Se repondrá el stock de los productos.',
+        confirmLabel: 'Anular venta',
+        cancelLabel: 'Cancelar',
+        danger: true
+      });
       if (!confirmation) return;
       try {
         await request(`/ventas/${id}/anular`, { method: 'POST' });
         showMessage('Venta anulada correctamente.', 'success');
-        await reload();
+        await reload({ preserveScroll: true });
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo anular la venta.', 'error');
@@ -939,12 +1172,23 @@ export const ventasModule = {
         return;
       }
 
-      const confirmed = window.confirm(
-        dialogResult.tipo_ajuste === 'PARCIAL'
+      const confirmed = await confirmDialog({
+        title: 'Emitir nota de crédito',
+        description: dialogResult.tipo_ajuste === 'PARCIAL'
           ? 'Se emitirá una nota de crédito parcial para los ítems seleccionados. ¿Deseas continuar?'
-          : 'Se emitirá una nota de crédito total para esta venta. Esta operación no debe repetirse. ¿Deseas continuar?'
-      );
+          : 'Se emitirá una nota de crédito total para esta venta. Esta operación no debe repetirse. ¿Deseas continuar?',
+        confirmLabel: 'Emitir',
+        cancelLabel: 'Cancelar',
+        danger: dialogResult.tipo_ajuste !== 'PARCIAL'
+      });
       if (!confirmed) return;
+
+      const pendingNoteWindow = createDeferredDocumentWindow({
+        pendingTitle: 'Generando nota de crédito...',
+        pendingDescription: 'La nota de crédito se está emitiendo. Esta pestaña mostrará el PDF apenas esté listo.',
+        blockedTitle: 'No se pudo abrir la nota de crédito',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la nota de crédito.'
+      });
 
       try {
         const response = await request(`/ventas/${id}/nota-credito`, {
@@ -957,20 +1201,23 @@ export const ventasModule = {
         const pdfUrl = response?.pdf_url;
         if (pdfUrl) {
           const finalUrl = /^https?:\/\//i.test(pdfUrl) ? pdfUrl : urlWithSession(pdfUrl);
-          const win = window.open(finalUrl, '_blank');
-          if (!win) {
+          const opened = pendingNoteWindow.navigate(finalUrl);
+          if (!opened) {
             showMessage('La nota fue emitida. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
           }
+        } else {
+          pendingNoteWindow.close();
         }
-        await reload();
+        await reload({ preserveScroll: true });
       } catch (error) {
+        pendingNoteWindow.close();
         console.error(error);
         showMessage(error.message || 'No se pudo emitir la nota de crédito.', 'error');
       }
     },
     async cobrar({ item, showMessage, reload }) {
       if (!item) return;
-      const saldo = Number(item.saldo_pendiente ?? 0);
+      const saldo = getOperationalSaldoPendiente(item);
       if (!Number.isFinite(saldo) || saldo <= 0) {
         showMessage('Esta venta no tiene saldo pendiente.', 'info');
         return;
@@ -983,6 +1230,15 @@ export const ventasModule = {
       });
 
       if (!dialogResult || !Array.isArray(dialogResult.pagos) || !dialogResult.pagos.length) return;
+
+      const pendingReceiptWindows = dialogResult.pagos.map(() =>
+        createDeferredDocumentWindow({
+          pendingTitle: 'Generando recibo...',
+          pendingDescription: 'El recibo se está preparando. Esta pestaña mostrará el PDF apenas esté listo.',
+          blockedTitle: 'No se pudo abrir el recibo',
+          blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF del recibo.'
+        })
+      );
 
       try {
         const payload = {
@@ -1014,27 +1270,34 @@ export const ventasModule = {
         }
 
         showMessage('Recibo registrado correctamente.', 'success');
-        recibos.forEach((rec) => {
+        recibos.forEach((rec, index) => {
           if (rec?.id) {
             const pdfUrl = urlWithSession(`/recibos/${rec.id}/pdf`);
-            const win = window.open(pdfUrl, '_blank');
-            if (!win) {
+            const opened = pendingReceiptWindows[index]?.navigate(pdfUrl)
+              ?? Boolean(openUrlInNewTab(pdfUrl, {
+                blockedTitle: 'No se pudo abrir el recibo',
+                blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF del recibo.'
+              }));
+            if (!opened) {
               showMessage('Recibo generado. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
             }
           }
         });
 
-        await reload();
+        pendingReceiptWindows.slice(recibos.length).forEach((entry) => entry.close());
+
+        await reload({ preserveScroll: true });
       } catch (error) {
+        pendingReceiptWindows.forEach((entry) => entry.close());
         console.error(error);
         showMessage(error.message || 'No se pudo registrar el recibo.', 'error');
       }
     }
   },
   moduleActionHandlers: {
-    'print-daily': ({ filters, showMessage }) => printDailyReport(filters, showMessage),
-    'print-margin': ({ filters, showMessage }) => printMarginReport(filters, showMessage),
-    'download-daily-xlsx': ({ filters, showMessage }) => downloadDailyXlsx(filters, showMessage)
+    'print-daily': async ({ filters, showMessage }) => printDailyReport(filters, showMessage),
+    'print-margin': async ({ filters, showMessage }) => printMarginReport(filters, showMessage),
+    'download-daily-xlsx': async ({ filters, showMessage }) => downloadDailyXlsx(filters, showMessage)
   },
   hooks: {
     afterModuleChange: () => renderVentasResumenCard(ventasState.lastResumen, ventasState.lastList.length),
@@ -1094,7 +1357,7 @@ export const ventasModule = {
         } else if (credito.tipo === 'PLAZO' || item.fecha_vencimiento) {
           resumen = `Plazo: ${formatDate(credito.fecha_vencimiento || item.fecha_vencimiento)}`;
         }
-        const saldo = Number(item.saldo_pendiente ?? 0);
+        const saldo = getOperationalSaldoPendiente(item);
         if (saldo > 0) {
           if (monedaVenta === 'USD') {
             const tipoCambio = Number(item.tipo_cambio || 0);
@@ -1132,7 +1395,7 @@ export const ventasModule = {
     {
       header: 'Saldo pendiente',
       render: (item) => {
-        const saldo = Number(item.saldo_pendiente ?? 0);
+        const saldo = getOperationalSaldoPendiente(item);
         if (saldo > 0) {
           return `<span class="badge warn">${formatCurrency(saldo, 'PYG')}</span>`;
         }
@@ -1231,59 +1494,91 @@ if (typeof window !== 'undefined') {
 
     if (tipo === 'factura' && venta.factura_electronica?.id) {
       const factura = venta.factura_electronica;
+      const recibosEnMemoria = normalizeRecibos(venta.recibos);
       const pdfPath = factura?.pdf_path;
+      const pendingFacturaWindow = createDeferredDocumentWindow({
+        pendingTitle: 'Abriendo factura...',
+        pendingDescription: 'Estamos preparando la factura electrónica.',
+        blockedTitle: 'No se pudo abrir la factura',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la factura.'
+      });
+      const pendingReceiptWindow = createDeferredDocumentWindow({
+        pendingTitle: recibosEnMemoria.length > 1 ? 'Abriendo recibos relacionados...' : 'Abriendo recibo...',
+        pendingDescription: recibosEnMemoria.length > 1
+          ? 'Estamos preparando la lista de recibos asociados a esta venta.'
+          : 'Estamos preparando el recibo relacionado.',
+        blockedTitle: 'No se pudieron abrir los recibos relacionados',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver los recibos relacionados.'
+      });
       if (pdfPath && /^https?:\/\//i.test(pdfPath)) {
-        const win = window.open(pdfPath, '_blank');
-        if (!win) {
-          alert('No se pudo abrir la factura. Desbloquea ventanas emergentes.');
-        }
+        pendingFacturaWindow.navigate(pdfPath);
       } else {
         const facturaUrl = pdfPath
           ? urlWithSession(pdfPath)
           : null;
         if (!facturaUrl) {
-          alert('No se encontró un PDF de factura disponible.');
+          pendingFacturaWindow.close();
+          pendingReceiptWindow.close();
+          infoDialog({
+            title: 'Factura sin PDF',
+            description: 'No se encontró un PDF de factura disponible.'
+          });
           return;
         }
-        const facturaWin = window.open(facturaUrl, '_blank');
-        if (!facturaWin) {
-          alert('No se pudo abrir la factura. Desbloquea ventanas emergentes.');
-        }
+        pendingFacturaWindow.navigate(facturaUrl);
       }
-      // Si es crédito o tiene saldo, abrir recibos asociados
-      try {
-        const recibos = await request(`/recibos?ventaId=${encodeURIComponent(ventaId)}`);
-        const lista = Array.isArray(recibos) ? recibos : Array.isArray(recibos?.data) ? recibos.data : [];
-        lista.forEach((rec) => {
-          if (rec?.id) {
-            window.open(urlWithSession(`/recibos/${encodeURIComponent(rec.id)}/pdf`), '_blank');
-          }
+
+      if (recibosEnMemoria.length) {
+        if (recibosEnMemoria.length === 1) {
+          pendingReceiptWindow.navigate(urlWithSession(`/recibos/${encodeURIComponent(recibosEnMemoria[0].id)}/pdf`));
+          return;
+        }
+        pendingReceiptWindow.writeHtml(renderRecibosBundleHtml(venta, recibosEnMemoria));
+        return;
+      }
+
+      const recibosAsociados = await resolveVentaRecibos(venta);
+      if (!recibosAsociados.length) {
+        pendingReceiptWindow.close();
+        return;
+      }
+      if (recibosAsociados.length === 1) {
+        pendingReceiptWindow.navigate(urlWithSession(`/recibos/${encodeURIComponent(recibosAsociados[0].id)}/pdf`));
+        return;
+      }
+      const rendered = pendingReceiptWindow.writeHtml(renderRecibosBundleHtml(venta, recibosAsociados));
+      if (!rendered) {
+        pendingReceiptWindow.close();
+        openUrlInNewTab(urlWithSession(`/recibos/${encodeURIComponent(recibosAsociados[0].id)}/pdf`), {
+          blockedTitle: 'No se pudo abrir el recibo',
+          blockedDescription: 'Desbloquea ventanas emergentes para ver el PDF del recibo.'
         });
-      } catch (err) {
-        console.error('[Recibos] No se pudieron abrir.', err);
       }
       return;
     }
     if (tipo === 'ticket') {
       const ticketUrl = urlWithSession(`/ventas/${encodeURIComponent(venta.id)}/ticket/pdf`);
-      const ticketWin = window.open(ticketUrl, '_blank');
-      if (!ticketWin) {
-        alert('No se pudo abrir el ticket. Desbloquea ventanas emergentes.');
-      }
+      openUrlInNewTab(ticketUrl, {
+        blockedTitle: 'No se pudo abrir el ticket',
+        blockedDescription: 'Desbloquea ventanas emergentes para ver el ticket.'
+      });
       return;
     }
     if (tipo === 'nota_credito') {
       const notaCredito = Array.isArray(venta.notas_credito) ? venta.notas_credito[0] : null;
       const pdfPath = notaCredito?.pdf_path;
       if (!pdfPath) {
-        alert('La nota de crédito no tiene PDF disponible todavía.');
+        infoDialog({
+          title: 'Nota de crédito sin PDF',
+          description: 'La nota de crédito no tiene PDF disponible todavía.'
+        });
         return;
       }
       const finalUrl = /^https?:\/\//i.test(pdfPath) ? pdfPath : urlWithSession(pdfPath);
-      const noteWin = window.open(finalUrl, '_blank');
-      if (!noteWin) {
-        alert('No se pudo abrir la nota de crédito. Desbloquea ventanas emergentes.');
-      }
+      openUrlInNewTab(finalUrl, {
+        blockedTitle: 'No se pudo abrir la nota de crédito',
+        blockedDescription: 'Desbloquea ventanas emergentes para ver el PDF de la nota de crédito.'
+      });
       return;
     }
   };

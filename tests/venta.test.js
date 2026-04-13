@@ -105,6 +105,8 @@ describe('Ventas API (integración)', () => {
     isEmailEnabled.mockReturnValue(false);
     await prisma.detalleVenta.deleteMany().catch(() => {});
     await prisma.movimientoStock.deleteMany().catch(() => {});
+    await prisma.reciboDetalle?.deleteMany?.().catch(() => {});
+    await prisma.recibo?.deleteMany?.().catch(() => {});
     await prisma.notaCreditoDetalle?.deleteMany?.().catch(() => {});
     await prisma.notaCreditoElectronica.deleteMany().catch(() => {});
     await prisma.facturaDigital.deleteMany().catch(() => {});
@@ -276,6 +278,57 @@ describe('Ventas API (integración)', () => {
         expect.objectContaining({ numero: 2, monto: 1000 })
       ]
     });
+  });
+
+  test('crea venta a credito con entrega inicial y financia solo el saldo restante', async () => {
+    const credito = {
+      tipo: 'CUOTAS',
+      entrega_inicial: 500,
+      metodo_entrega: 'efectivo',
+      cantidad_cuotas: 2,
+      cuotas: [
+        { numero: 1, monto: 750, fecha_vencimiento: '2026-05-10' },
+        { numero: 2, monto: 750, fecha_vencimiento: '2026-06-10' }
+      ]
+    };
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito,
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    expect(createRes.body.condicion_venta).toBe('CREDITO');
+    expect(createRes.body.es_credito).toBe(true);
+    expect(Number(createRes.body.saldo_pendiente)).toBeCloseTo(1500, 2);
+    expect(createRes.body.credito_config).toMatchObject({
+      tipo: 'CUOTAS',
+      entrega_inicial: 500,
+      entrega_inicial_gs: 500,
+      metodo_entrega: 'EFECTIVO',
+      saldo_financiado: 1500,
+      saldo_financiado_gs: 1500,
+      cuotas: [
+        expect.objectContaining({ numero: 1, monto: 750 }),
+        expect.objectContaining({ numero: 2, monto: 750 })
+      ]
+    });
+
+    const recibos = await prisma.recibo.findMany({ where: { sucursalId: '00000000-0000-0000-0000-000000000001' } });
+    expect(recibos).toHaveLength(1);
+    expect(Number(recibos[0].total)).toBeCloseTo(500, 2);
+    expect(Number(recibos[0].total_moneda)).toBeCloseTo(500, 2);
+    expect(recibos[0].metodo).toBe('EFECTIVO');
+
+    const aplicaciones = await prisma.reciboDetalle.findMany({ where: { ventaId: createRes.body.id } });
+    expect(aplicaciones).toHaveLength(1);
+    expect(Number(aplicaciones[0].monto)).toBeCloseTo(500, 2);
+    expect(Number(aplicaciones[0].saldo_previo)).toBeCloseTo(2000, 2);
+    expect(Number(aplicaciones[0].saldo_posterior)).toBeCloseTo(1500, 2);
   });
 
   test('mantiene el precio original en USD y recalcula guaranies con el cambio del dia', async () => {
@@ -592,8 +645,10 @@ describe('Ventas API (integración)', () => {
     const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
     expect(payloadFactpy?.moneda).toBe('USD');
     expect(Number(payloadFactpy?.cambio)).toBeCloseTo(6500, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(10, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(1, 8);
     expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.descuentoGlobal)).toBe(0);
     expect(Number(payloadFactpy?.totalPago)).toBeCloseTo(9, 4);
     expect(Number(payloadFactpy?.totalPagoMoneda)).toBeCloseTo(9, 4);
     expect(Number(payloadFactpy?.totalGs)).toBeCloseTo(58500, 2);
@@ -625,6 +680,7 @@ describe('Ventas API (integración)', () => {
 
     const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
     expect(payloadFactpy?.condicionPago).toBe(2);
+    expect(payloadFactpy?.pagos).toEqual([]);
     expect(payloadFactpy?.credito).toMatchObject({
       condicionCredito: 2,
       cantidadCuota: 2
@@ -632,6 +688,45 @@ describe('Ventas API (integración)', () => {
     expect(payloadFactpy?.credito?.cuotas).toEqual([
       expect.objectContaining({ numero: 1, monto: 1000, fechaVencimiento: '2026-05-10' }),
       expect.objectContaining({ numero: 2, monto: 1000, fechaVencimiento: '2026-06-10' })
+    ]);
+  });
+
+  test('factura una venta a cuotas con entrega inicial y envía a FactPy solo el pago realmente recibido', async () => {
+    const cuotas = [
+      { numero: 1, monto: 750, fecha_vencimiento: '2026-05-10' },
+      { numero: 2, monto: 750, fecha_vencimiento: '2026-06-10' }
+    ];
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        credito: { tipo: 'CUOTAS', entrega_inicial: 500, metodo_entrega: 'EFECTIVO', cuotas },
+        detalles: [{ productoId: producto.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .send({
+        condicion_pago: 'CREDITO',
+        credito: { tipo: 'CUOTAS', entrega_inicial: 500, metodo_entrega: 'EFECTIVO', cuotas }
+      })
+      .expect(200);
+
+    const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(payloadFactpy?.condicionPago).toBe(2);
+    expect(payloadFactpy?.pagos).toEqual([
+      expect.objectContaining({ tipoPago: '1', monto: 500 })
+    ]);
+    expect(payloadFactpy?.credito).toMatchObject({
+      condicionCredito: 2,
+      cantidadCuota: 2
+    });
+    expect(payloadFactpy?.credito?.cuotas).toEqual([
+      expect.objectContaining({ numero: 1, monto: 750, fechaVencimiento: '2026-05-10' }),
+      expect.objectContaining({ numero: 2, monto: 750, fechaVencimiento: '2026-06-10' })
     ]);
   });
 
@@ -845,10 +940,24 @@ describe('Ventas API (integración)', () => {
 
     expect(notaRes.body.nota_credito).toBeDefined();
     expect(notaRes.body.nota_credito.nro_nota).toMatch(/^001-001-/);
-  expect(notaRes.body.nota_credito.tipo_ajuste).toBe('TOTAL');
+    expect(notaRes.body.nota_credito.tipo_ajuste).toBe('TOTAL');
     expect(Number(notaRes.body.nota_credito.total)).toBeLessThan(0);
     expect(notaRes.body.nota_credito.estado).toBe('ENVIADO');
     expect(notaRes.body.pdf_url).toBe('/storage/facturas/mock.pdf');
+
+    const ventaActualizada = await prisma.venta.findUnique({ where: { id: createRes.body.id } });
+    expect(Number(ventaActualizada.saldo_pendiente)).toBeCloseTo(0, 2);
+
+    const productoActualizado = await prisma.producto.findUnique({ where: { id: producto.id } });
+    expect(Number(productoActualizado.stock_actual)).toBe(5);
+
+    const movimientosEntrada = await prisma.movimientoStock.findMany({ where: { productoId: producto.id } });
+    expect(movimientosEntrada.some((mov) => mov.tipo === 'ENTRADA' && mov.referencia_tipo === 'NotaCreditoElectronica')).toBe(true);
+
+    const listRes = await request(app).get('/ventas').expect(200);
+    const listedVenta = listRes.body.data.find((item) => item.id === createRes.body.id);
+    expect(listedVenta).toBeDefined();
+    expect(Number(listedVenta.saldo_pendiente)).toBeCloseTo(0, 2);
 
     await request(app)
       .post(`/ventas/${createRes.body.id}/nota-credito`)
@@ -947,6 +1056,12 @@ describe('Ventas API (integración)', () => {
       cantidad: 1,
       subtotal: 1000
     });
+
+    const productoActualizado = await prisma.producto.findUnique({ where: { id: producto.id } });
+    expect(Number(productoActualizado.stock_actual)).toBe(4);
+
+    const movimientos = await prisma.movimientoStock.findMany({ where: { productoId: producto.id } });
+    expect(movimientos.some((mov) => mov.tipo === 'ENTRADA' && mov.cantidad === 1 && mov.referencia_tipo === 'NotaCreditoElectronica')).toBe(true);
   });
 
   test('emite nota de crédito parcial en USD con descuento prorrateado por cantidad', async () => {

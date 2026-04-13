@@ -274,6 +274,73 @@ describe('Frontend dashboard modules', () => {
     await page.close();
   });
 
+  test('mantiene el scroll de la ventana al avanzar y retroceder paginas en el listado', async () => {
+    const productos = Array.from({ length: 24 }, (_, index) => seedProducto({
+      sku: `FRONT-PAG-${String(index + 1).padStart(3, '0')}`,
+      nombre: `Producto paginado ${index + 1}`,
+      stock_actual: 10 + index
+    }));
+    await Promise.all(productos);
+
+    const page = await newPageWithSession();
+    await page.setViewport({ width: 1280, height: 620 });
+
+    await clickTab(page, 'Productos');
+    await page.waitForFunction(() => document.querySelector('.tab-button.active')?.textContent.trim() === 'Productos');
+    await page.waitForFunction(() => {
+      const pager = document.getElementById('pagination');
+      return pager && pager.textContent.includes('Página 1 de');
+    });
+
+    await page.evaluate(() => {
+      window.scrollTo({ top: 540, behavior: 'auto' });
+    });
+
+    await page.waitForFunction(() => window.scrollY >= 500);
+    const before = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      paginationTop: document.getElementById('pagination')?.getBoundingClientRect().top ?? null
+    }));
+
+    const clickPageButton = async (pageNumber) => {
+      await page.evaluate((targetPage) => {
+        const button = document.querySelector(`#pagination button[data-page="${targetPage}"]`);
+        if (!button) {
+          throw new Error(`No se encontró el botón de la página ${targetPage}.`);
+        }
+        button.click();
+      }, pageNumber);
+      await page.waitForFunction((targetPage) => (
+        document.querySelector('#pagination button[aria-current="page"]')?.textContent.trim() === String(targetPage)
+      ), {}, pageNumber);
+      await new Promise((resolve) => setTimeout(resolve, 140));
+    };
+
+    await clickPageButton(2);
+    const afterForward = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      paginationTop: document.getElementById('pagination')?.getBoundingClientRect().top ?? null
+    }));
+
+    await clickPageButton(3);
+    const beforeBackward = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      paginationTop: document.getElementById('pagination')?.getBoundingClientRect().top ?? null
+    }));
+
+    await clickPageButton(2);
+    const afterBackward = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      paginationTop: document.getElementById('pagination')?.getBoundingClientRect().top ?? null
+    }));
+
+    expect(before.scrollY).toBeGreaterThan(0);
+    expect(Math.abs(afterForward.paginationTop - before.paginationTop)).toBeLessThanOrEqual(24);
+    expect(Math.abs(afterBackward.paginationTop - beforeBackward.paginationTop)).toBeLessThanOrEqual(24);
+
+    await page.close();
+  });
+
   test('productos respeta el primer cambio de tipo aunque la sugerencia inicial de SKU llegue tarde', async () => {
     const page = await newPageWithSession({ delayNextSkuTipo: 'DRON', delayNextSkuMs: 500 });
 
@@ -343,7 +410,10 @@ describe('Frontend dashboard modules', () => {
       const panel = document.querySelector('.panel-body');
       const listCard = document.querySelector('.list-card');
       const toggle = document.getElementById('toggle-form-card');
-      return panel?.classList.contains('form-focus-mode') && listCard?.style.display === 'none' && toggle?.textContent.includes('Ocultar');
+      const toggleText = toggle?.textContent || '';
+      return panel?.classList.contains('form-focus-mode')
+        && listCard?.style.display === 'none'
+        && (toggleText.includes('Ocultar') || toggleText.includes('Volver a la lista'));
     });
 
     const state = await page.evaluate(() => ({

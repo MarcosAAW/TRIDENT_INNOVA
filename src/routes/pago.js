@@ -7,6 +7,17 @@ const { requireSucursal } = require('../middleware/sucursalContext');
 
 const router = express.Router();
 
+function isEffectiveCreditNote(nota) {
+  return Boolean(nota) && String(nota.estado || '').toUpperCase() !== 'RECHAZADO';
+}
+
+function hasEffectiveTotalCreditNote(venta) {
+  const notas = Array.isArray(venta?.notas_credito) ? venta.notas_credito : [];
+  return notas.some(
+    (nota) => isEffectiveCreditNote(nota) && String(nota.tipo_ajuste || 'TOTAL').toUpperCase() === 'TOTAL'
+  );
+}
+
 const createPagoSchema = z.object({
   ventaId: z.string().uuid({ message: 'ventaId inválido' }),
   monto: z.coerce.number().positive('El monto debe ser mayor a cero'),
@@ -56,11 +67,25 @@ router.post('/', async (req, res) => {
   try {
     const result = await prisma.$transaction(async (tx) => {
       const venta = await tx.venta.findFirst({
-        where: { id: data.ventaId, sucursalId: req.sucursalId, deleted_at: null }
+        where: { id: data.ventaId, sucursalId: req.sucursalId, deleted_at: null },
+        include: {
+          notas_credito: {
+            where: { deleted_at: null },
+            select: {
+              id: true,
+              estado: true,
+              tipo_ajuste: true
+            }
+          }
+        }
       });
 
       if (!venta) {
         throw new Error('VENTA_NO_ENCONTRADA');
+      }
+
+      if (hasEffectiveTotalCreditNote(venta)) {
+        throw new Error('VENTA_REGULARIZADA_CON_NC');
       }
 
       const pago = await tx.pago.create({
@@ -93,6 +118,9 @@ router.post('/', async (req, res) => {
   } catch (err) {
     if (err?.message === 'VENTA_NO_ENCONTRADA') {
       return res.status(404).json({ error: 'Venta no encontrada en esta sucursal.' });
+    }
+    if (err?.message === 'VENTA_REGULARIZADA_CON_NC') {
+      return res.status(409).json({ error: 'La venta ya fue regularizada con una nota de crédito total.' });
     }
     console.error('[Pagos] No se pudo registrar el pago.', err);
     return res.status(500).json({ error: 'No se pudo registrar el pago.' });

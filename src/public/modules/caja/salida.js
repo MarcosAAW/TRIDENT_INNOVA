@@ -15,18 +15,18 @@ export async function crearSalidaCaja(initialData = {}) {
     throw new Error('Volvé a iniciar sesión para registrar salidas.');
   }
 
-  const descripcion = initialData.descripcion ?? window.prompt('Descripción de la salida de caja');
+  const descripcion = initialData.descripcion;
   if (!descripcion || !descripcion.trim()) {
     throw new Error('La descripción es obligatoria.');
   }
 
-  const montoInput = initialData.monto ?? window.prompt('Monto de la salida (Gs)');
-  if (montoInput === null) {
-    throw new Error('Registro cancelado.');
+  const montoInput = initialData.monto;
+  if (montoInput === undefined || montoInput === null || montoInput === '') {
+    throw new Error('El monto es obligatorio.');
   }
 
   const monto = parseNumber(montoInput);
-  const observacion = initialData.observacion ?? window.prompt('Observación (opcional)') ?? undefined;
+  const observacion = initialData.observacion ?? undefined;
 
   return request('/salidas-caja', {
     method: 'POST',

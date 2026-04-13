@@ -1,5 +1,6 @@
 import { formatCurrency } from '../common/format.js';
 import { request, buildQuery, urlWithSession } from '../common/api.js';
+import { openUrlInNewTab } from '../common/dialogs.js';
 import { createProducto, fetchNextSku } from './nuevo.js';
 import { updateProducto } from './editar.js';
 import { deleteProducto } from './eliminar.js';
@@ -27,8 +28,7 @@ function printProductLabel(item) {
   const fecha = new Date().toLocaleDateString('es-PY');
   const win = window.open('', '', 'width=360,height=480');
   if (!win) {
-    window.alert('No se pudo abrir la ventana de impresión. Verificá el bloqueador de ventanas emergentes.');
-    return;
+    throw new Error('No se pudo abrir la ventana de impresión. Verificá el bloqueador de ventanas emergentes.');
   }
 
   win.document.open();
@@ -205,11 +205,17 @@ export const productosModule = {
   moduleActionHandlers: {
     'inventory-report': () => {
       const url = urlWithSession('/productos/reporte/inventario');
-      window.open(url, '_blank', 'noopener');
+      openUrlInNewTab(url, {
+        blockedTitle: 'No se pudo abrir el reporte',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF del inventario.'
+      });
     },
     'inventory-report-xlsx': () => {
       const url = urlWithSession('/productos/reporte/inventario.xlsx');
-      window.open(url, '_blank', 'noopener');
+      openUrlInNewTab(url, {
+        blockedTitle: 'No se pudo iniciar la descarga',
+        blockedDescription: 'Desbloquea las ventanas emergentes para descargar el Excel del inventario.'
+      });
     }
   },
   rowActions: [

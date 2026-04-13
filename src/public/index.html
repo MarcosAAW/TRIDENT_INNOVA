@@ -34,17 +34,28 @@
         <h1>Trident Innova EAS</h1>
         <p>Sistema administrativo de Trident Innova.</p>
         <div id="session-info" class="session-info" hidden>
-            <span id="session-user"></span>
+          <div class="session-info__identity">
+            <span class="session-info__eyebrow">Sesión activa</span>
+            <div class="session-info__principal">
+              <span id="session-user-name" class="session-info__name"></span>
+              <span id="session-user-role" class="session-info__role" hidden></span>
+            </div>
+          </div>
+          <div class="session-info__meta">
             <span id="sucursal-active" class="sucursal-badge" hidden></span>
             <div id="sucursal-picker" class="sucursal-picker" hidden>
               <label for="sucursal-selector">Sucursal</label>
               <select id="sucursal-selector" aria-label="Seleccionar sucursal"></select>
             </div>
+          </div>
+          <div class="session-info__actions">
             <button type="button" class="btn ghost small" id="logout-button" title="Cerrar sesión" aria-label="Cerrar sesión">
               <svg class="logout-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
                 <path d="M16 13v-2H7V8l-5 4 5 4v-3zM20 3h-8v2h8v14h-8v2h8a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z" fill="currentColor"/>
               </svg>
+              <span>Cerrar sesión</span>
             </button>
+          </div>
         </div>
       </div>
     </div>
@@ -58,13 +69,15 @@
           <p>Gestiona módulos (productos, clientes, ventas y más) desde un solo lugar.</p>
         </div>
         <div class="panel-controls">
-          <button type="button" class="btn primary small" id="toggle-form-card" aria-expanded="false">Nuevo registro</button>
           <div class="module-tabs-card">
             <div class="module-tabs-card__header">
               <span>Módulos disponibles</span>
               <small>Elegí qué querés gestionar</small>
             </div>
-            <div class="entity-tabs" role="tablist"></div>
+            <div class="entity-tabs" aria-label="Módulos"></div>
+            <div class="module-tabs-card__actions">
+              <button type="button" class="btn primary small" id="toggle-form-card" aria-expanded="false">Nuevo registro</button>
+            </div>
           </div>
         </div>
       </div>
@@ -85,6 +98,7 @@
 
         <div class="list-card">
           <div class="list-actions">
+            <button type="button" class="btn ghost mobile-filter-toggle" id="toggle-filters" aria-expanded="false">Filtros</button>
             <form id="filter-form" class="filter-form">
               <input type="search" name="search" id="search-input" placeholder="Buscar por nombre, SKU o RUC" aria-label="Texto de búsqueda">
               <div id="filter-extra" class="filter-extra"></div>

@@ -1,6 +1,7 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency, formatNumber, formatDate } from '../common/format.js';
 import { loadSession } from '../auth/session.js';
+import { createDeferredDocumentWindow, openUrlInNewTab } from '../common/dialogs.js';
 import { resolveProductUnitPricing } from '../common/pricing.js';
 
 const IVA_OPTIONS = [
@@ -15,11 +16,47 @@ const IVA_DIVISOR = {
   0: null
 };
 
+const FACTURA_PDF_POLL_ATTEMPTS = 6;
+const FACTURA_PDF_POLL_DELAY_MS = 1200;
+
 function getIvaLabel(value) {
   const numeric = Number(value);
   if (numeric === 0) return 'IVA Exentas (0%)';
   if (!Number.isFinite(numeric)) return 'IVA 10%';
   return `IVA ${numeric}%`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function isExternalDocumentUrl(url) {
+  return /^https?:\/\//i.test(String(url || ''));
+}
+
+function isCanonicalFacturaPdfUrl(url) {
+  if (!url || typeof window === 'undefined') return false;
+  try {
+    const resolved = new URL(String(url), window.location.origin);
+    return /^https?:$/i.test(resolved.protocol) && resolved.origin !== window.location.origin;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function mergeVentaFacturaState(venta, facturaElectronica) {
+  if (!venta) return null;
+  if (!facturaElectronica) return venta;
+  return {
+    ...venta,
+    factura_electronicaId: venta.factura_electronicaId || facturaElectronica.id || null,
+    factura_electronica: {
+      ...(venta.factura_electronica || {}),
+      ...facturaElectronica
+    }
+  };
 }
 
 function numberToWordsEs(num) {
@@ -92,6 +129,8 @@ const posState = {
   condicionVenta: 'CONTADO',
   fechaVencimiento: null,
   creditTipo: 'PLAZO',
+  entregaInicial: 0,
+  metodoEntrega: 'EFECTIVO',
   cantidadCuotas: 3,
   cuotas: [],
   comprobante: 'FACTURA',
@@ -116,6 +155,7 @@ let clientSearchTimer = null;
 let productSearchToken = 0;
 let clientSearchToken = 0;
 let globalKeydownHandler = null;
+let checkoutMediaQuery = null;
 
 function ensureDom(container) {
   if (posDom && posDom.root === container) {
@@ -142,74 +182,121 @@ function ensureDom(container) {
             <div class="pos-search-results" id="pos-client-results"></div>
           </div>
         </div>
+        <section class="pos-overview" id="pos-overview">
+          <div class="pos-overview__stats">
+            <article class="pos-overview__card">
+              <span>Cliente</span>
+              <strong id="pos-overview-client">Eventual</strong>
+            </article>
+            <article class="pos-overview__card">
+              <span>Ítems</span>
+              <strong id="pos-overview-items">0</strong>
+            </article>
+            <article class="pos-overview__card">
+              <span>Total actual</span>
+              <strong id="pos-overview-total">Gs. 0</strong>
+            </article>
+          </div>
+          <div class="pos-overview__actions">
+            <button type="button" class="btn ghost small" id="pos-overview-search">Buscar productos</button>
+            <button type="button" class="btn ghost small" id="pos-overview-checkout">Ir al cobro</button>
+          </div>
+        </section>
         <div class="pos-cart-list" id="pos-cart-list">
           <p class="empty">Agrega productos para iniciar la venta.</p>
         </div>
-        <div class="pos-summary">
-          <div class="pos-summary-row">
-            <label for="pos-comprobante">Comprobante</label>
-            <select id="pos-comprobante">
-              <option value="FACTURA">Factura</option>
-              <option value="TICKET">Ticket</option>
-            </select>
-          </div>
-          <div class="pos-summary-row">
-            <label for="pos-currency">Moneda de cobro</label>
-            <select id="pos-currency">
-              <option value="PYG">Guaraníes (PYG)</option>
-              <option value="USD">Dólares (USD)</option>
-            </select>
-          </div>
-          <div class="pos-summary-row" id="pos-exchange-row" hidden>
-            <label for="pos-exchange">Tipo de cambio</label>
-            <input type="number" id="pos-exchange" min="0" step="0.0001" placeholder="0.0000">
-          </div>
-          <div class="pos-summary-row">
-            <label for="pos-iva">IVA aplicado</label>
-            <select id="pos-iva">
-              ${IVA_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
-            </select>
-          </div>
-          <div class="pos-summary-row">
-            <label for="pos-discount">Descuento <span data-discount-unit>(auto)</span></label>
-            <input type="number" id="pos-discount" min="0" step="0.01" placeholder="0">
-          </div>
-          <div class="pos-summary-row">
-            <label for="pos-condicion">Condición de venta</label>
-            <select id="pos-condicion">
-              <option value="CONTADO">Contado</option>
-              <option value="CREDITO">Crédito</option>
-            </select>
-          </div>
-          <div class="pos-summary-row" id="pos-credit-row" hidden>
-            <label for="pos-credit-type">Modalidad crédito</label>
-            <select id="pos-credit-type">
-              <option value="PLAZO">Plazo</option>
-              <option value="CUOTAS">Cuotas</option>
-            </select>
-          </div>
-          <div class="pos-summary-row" id="pos-credit-plazo-row" hidden>
-            <label for="pos-fecha-venc">Vencimiento (plazo)</label>
-            <input type="date" id="pos-fecha-venc">
-          </div>
-          <div class="pos-summary-row" id="pos-credit-cuotas-row" hidden>
-            <label for="pos-cantidad-cuotas">Cuotas</label>
-            <div class="pos-cuotas-inline">
-              <input type="number" id="pos-cantidad-cuotas" min="1" step="1" value="3">
-              <button type="button" class="btn ghost small" id="pos-cuotas-generar">Generar plan</button>
+        <section class="pos-checkout" id="pos-checkout">
+          <button type="button" class="pos-checkout-toggle" id="pos-checkout-toggle" aria-expanded="true">
+            <span class="pos-checkout-toggle__copy">
+              <strong>Resumen y cobro</strong>
+              <small>Comprobante, moneda, IVA y cierre</small>
+            </span>
+            <span class="pos-checkout-toggle__totals">
+              <small id="pos-mini-subtotal">Subtotal: Gs. 0</small>
+              <strong id="pos-mini-total">Gs. 0</strong>
+            </span>
+          </button>
+          <div class="pos-checkout-body" id="pos-checkout-body">
+            <div class="pos-summary">
+              <div class="pos-summary-row">
+                <label for="pos-comprobante">Comprobante</label>
+                <select id="pos-comprobante">
+                  <option value="FACTURA">Factura</option>
+                  <option value="TICKET">Ticket</option>
+                </select>
+              </div>
+              <div class="pos-summary-row">
+                <label for="pos-currency">Moneda de cobro</label>
+                <select id="pos-currency">
+                  <option value="PYG">Guaraníes (PYG)</option>
+                  <option value="USD">Dólares (USD)</option>
+                </select>
+              </div>
+              <div class="pos-summary-row" id="pos-exchange-row" hidden>
+                <label for="pos-exchange">Tipo de cambio</label>
+                <input type="number" id="pos-exchange" min="0" step="0.0001" placeholder="0.0000">
+              </div>
+              <div class="pos-summary-row">
+                <label for="pos-iva">IVA aplicado</label>
+                <select id="pos-iva">
+                  ${IVA_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}
+                </select>
+              </div>
+              <div class="pos-summary-row">
+                <label for="pos-discount">Descuento <span data-discount-unit>(auto)</span></label>
+                <input type="number" id="pos-discount" min="0" step="0.01" placeholder="0">
+              </div>
+              <div class="pos-summary-row">
+                <label for="pos-condicion">Condición de venta</label>
+                <select id="pos-condicion">
+                  <option value="CONTADO">Contado</option>
+                  <option value="CREDITO">Crédito</option>
+                </select>
+              </div>
+              <div class="pos-summary-row" id="pos-credit-row" hidden>
+                <label for="pos-credit-type">Modalidad crédito</label>
+                <select id="pos-credit-type">
+                  <option value="PLAZO">Plazo</option>
+                  <option value="CUOTAS">Cuotas</option>
+                </select>
+              </div>
+              <div class="pos-summary-row" id="pos-credit-entrega-row" hidden>
+                <label for="pos-credit-entrega">Entrega inicial</label>
+                <input type="number" id="pos-credit-entrega" min="0" step="0.01" placeholder="0">
+              </div>
+              <div class="pos-summary-row" id="pos-credit-metodo-row" hidden>
+                <label for="pos-credit-metodo">Método entrega</label>
+                <select id="pos-credit-metodo">
+                  <option value="EFECTIVO">Efectivo</option>
+                  <option value="TRANSFERENCIA">Transferencia</option>
+                  <option value="TARJETA">Tarjeta</option>
+                  <option value="CHEQUE">Cheque</option>
+                </select>
+              </div>
+              <div class="pos-summary-row" id="pos-credit-plazo-row" hidden>
+                <label for="pos-fecha-venc">Vencimiento (plazo)</label>
+                <input type="date" id="pos-fecha-venc">
+              </div>
+              <div class="pos-summary-row" id="pos-credit-cuotas-row" hidden>
+                <label for="pos-cantidad-cuotas">Cuotas</label>
+                <div class="pos-cuotas-inline">
+                  <input type="number" id="pos-cantidad-cuotas" min="1" step="1" value="3">
+                  <button type="button" class="btn ghost small" id="pos-cuotas-generar">Generar plan</button>
+                </div>
+              </div>
+              <div class="pos-cuotas-list" id="pos-cuotas-list" hidden></div>
+              <div class="pos-summary-totals" id="pos-summary-totals"></div>
             </div>
+            <div class="pos-actions">
+              <button type="button" class="btn primary" id="pos-confirm">Confirmar venta</button>
+              <button type="button" class="btn ghost" id="pos-clear">Limpiar</button>
+              <button type="button" class="btn ghost" id="pos-print" hidden>Imprimir factura</button>
+              <button type="button" class="btn ghost" id="pos-ticket" hidden>Imprimir ticket</button>
+            </div>
+            <div id="pos-feedback" class="feedback"></div>
+            <div class="pos-last-sale" id="pos-last-sale" hidden></div>
           </div>
-          <div class="pos-cuotas-list" id="pos-cuotas-list" hidden></div>
-          <div class="pos-summary-totals" id="pos-summary-totals"></div>
-        </div>
-        <div class="pos-actions">
-          <button type="button" class="btn primary" id="pos-confirm">Confirmar venta</button>
-          <button type="button" class="btn ghost" id="pos-clear">Limpiar</button>
-          <button type="button" class="btn ghost" id="pos-print" hidden>Imprimir factura</button>
-          <button type="button" class="btn ghost" id="pos-ticket" hidden>Imprimir ticket</button>
-        </div>
-        <div id="pos-feedback" class="feedback"></div>
-        <div class="pos-last-sale" id="pos-last-sale" hidden></div>
+        </section>
       </section>
       <section class="pos-column pos-products">
         <label for="pos-product-search">Buscar productos</label>
@@ -230,6 +317,11 @@ function ensureDom(container) {
   posDom = {
     wrapper: container,
     root: layout,
+    overviewClient: layout?.querySelector('#pos-overview-client') || null,
+    overviewItems: layout?.querySelector('#pos-overview-items') || null,
+    overviewTotal: layout?.querySelector('#pos-overview-total') || null,
+    overviewSearchButton: layout?.querySelector('#pos-overview-search') || null,
+    overviewCheckoutButton: layout?.querySelector('#pos-overview-checkout') || null,
     clientSelected: layout?.querySelector('#pos-client-selected') || null,
     clientClearButton: layout?.querySelector('#pos-client-clear') || null,
     clientSearchInput: layout?.querySelector('#pos-client-search') || null,
@@ -237,6 +329,11 @@ function ensureDom(container) {
     productSearchInput: layout?.querySelector('#pos-product-search') || null,
     productResults: layout?.querySelector('#pos-product-results') || null,
     cartList: layout?.querySelector('#pos-cart-list') || null,
+    checkout: layout?.querySelector('#pos-checkout') || null,
+    checkoutToggle: layout?.querySelector('#pos-checkout-toggle') || null,
+    checkoutBody: layout?.querySelector('#pos-checkout-body') || null,
+    miniSubtotal: layout?.querySelector('#pos-mini-subtotal') || null,
+    miniTotal: layout?.querySelector('#pos-mini-total') || null,
     discountInput: layout?.querySelector('#pos-discount') || null,
     discountUnit: layout?.querySelector('[data-discount-unit]') || null,
     ivaSelect: layout?.querySelector('#pos-iva') || null,
@@ -247,6 +344,10 @@ function ensureDom(container) {
     comprobanteSelect: layout?.querySelector('#pos-comprobante') || null,
     creditRow: layout?.querySelector('#pos-credit-row') || null,
     creditTypeSelect: layout?.querySelector('#pos-credit-type') || null,
+    creditEntregaRow: layout?.querySelector('#pos-credit-entrega-row') || null,
+    creditEntregaInput: layout?.querySelector('#pos-credit-entrega') || null,
+    creditMetodoRow: layout?.querySelector('#pos-credit-metodo-row') || null,
+    creditMetodoSelect: layout?.querySelector('#pos-credit-metodo') || null,
     creditPlazoRow: layout?.querySelector('#pos-credit-plazo-row') || null,
     creditCuotasRow: layout?.querySelector('#pos-credit-cuotas-row') || null,
     cantidadCuotasInput: layout?.querySelector('#pos-cantidad-cuotas') || null,
@@ -266,6 +367,7 @@ function ensureDom(container) {
   toggleCreditFields();
   attachEventListeners();
   attachGlobalShortcuts();
+  attachCheckoutMediaListener();
 
   if (posDom.root && !posDom.root.hasAttribute('tabindex')) {
     posDom.root.setAttribute('tabindex', '-1');
@@ -280,6 +382,7 @@ function ensureDom(container) {
     posDom.ticketButton.dataset.defaultLabel = posDom.ticketButton.textContent || 'Imprimir ticket';
   }
 
+  syncCheckoutForViewport();
   focusProductSearch();
   updateActionStates();
 }
@@ -371,6 +474,18 @@ function attachEventListeners() {
       renderClientSection();
       clearClientSearch();
       focusClientSearch();
+    });
+  }
+
+  if (posDom.overviewSearchButton) {
+    posDom.overviewSearchButton.addEventListener('click', () => {
+      focusProductSearch({ select: true, preventScroll: false });
+    });
+  }
+
+  if (posDom.overviewCheckoutButton) {
+    posDom.overviewCheckoutButton.addEventListener('click', () => {
+      expandCheckoutAndScroll();
     });
   }
 
@@ -493,12 +608,25 @@ function attachEventListeners() {
         posState.cuotas = [];
         posState.cantidadCuotas = 3;
       } else {
-        const totals = computeTotals();
-        if (totals.total > 0) {
-          generateCuotasPlan();
-        }
+        syncCuotasPlanWithCurrentCredit();
       }
       toggleCreditFields();
+      renderSummary();
+    });
+  }
+
+  if (posDom.creditEntregaInput) {
+    posDom.creditEntregaInput.addEventListener('input', (event) => {
+      const value = Number(event.target.value);
+      posState.entregaInicial = Number.isFinite(value) && value > 0 ? round2(value) : 0;
+      syncCuotasPlanWithCurrentCredit();
+      renderSummary();
+    });
+  }
+
+  if (posDom.creditMetodoSelect) {
+    posDom.creditMetodoSelect.addEventListener('change', (event) => {
+      posState.metodoEntrega = String(event.target.value || 'EFECTIVO').toUpperCase();
       renderSummary();
     });
   }
@@ -507,6 +635,10 @@ function attachEventListeners() {
     posDom.cantidadCuotasInput.addEventListener('input', (event) => {
       const value = Math.max(1, Math.round(Number(event.target.value) || 1));
       posState.cantidadCuotas = value;
+      if (posState.creditTipo === 'CUOTAS' && posState.cuotas.length) {
+        syncCuotasPlanWithCurrentCredit();
+        renderSummary();
+      }
     });
   }
 
@@ -547,6 +679,13 @@ function attachEventListeners() {
     posDom.clearButton.addEventListener('click', () => {
     clearCart();
   });
+  }
+
+  if (posDom.checkoutToggle) {
+    posDom.checkoutToggle.addEventListener('click', () => {
+      if (!isMobileCheckout()) return;
+      setCheckoutExpanded(!posDom.checkout?.classList.contains('is-expanded'));
+    });
   }
 
   if (posDom.confirmButton) {
@@ -755,6 +894,8 @@ function clearCart() {
   posState.condicionVenta = 'CONTADO';
   posState.fechaVencimiento = null;
   posState.creditTipo = 'PLAZO';
+  posState.entregaInicial = 0;
+  posState.metodoEntrega = 'EFECTIVO';
   posState.cantidadCuotas = 3;
   posState.cuotas = [];
   posState.lastSale = null;
@@ -763,6 +904,8 @@ function clearCart() {
   if (posDom.ivaSelect) posDom.ivaSelect.value = '10';
   if (posDom.condicionSelect) posDom.condicionSelect.value = 'CONTADO';
   if (posDom.comprobanteSelect) posDom.comprobanteSelect.value = 'FACTURA';
+  if (posDom.creditEntregaInput) posDom.creditEntregaInput.value = '';
+  if (posDom.creditMetodoSelect) posDom.creditMetodoSelect.value = 'EFECTIVO';
   if (posDom.fechaVencInput) posDom.fechaVencInput.value = '';
   if (posDom.creditTypeSelect) posDom.creditTypeSelect.value = 'PLAZO';
   if (posDom.cantidadCuotasInput) posDom.cantidadCuotasInput.value = 3;
@@ -779,6 +922,7 @@ function clearCart() {
   if (posDom.printButton) {
     posDom.printButton.hidden = true;
   }
+  syncCheckoutForViewport();
   updateActionStates();
   focusProductSearch();
 }
@@ -799,6 +943,7 @@ function renderClientSection() {
     wrapper.classList.remove('has-client');
     posDom.clientClearButton.hidden = true;
   }
+  renderOverview();
   updateActionStates();
 }
 
@@ -1002,13 +1147,45 @@ function round2(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function syncCuotasPlanWithCurrentCredit() {
+  if (posState.condicionVenta !== 'CREDITO' || posState.creditTipo !== 'CUOTAS') {
+    return;
+  }
+  const totals = computeTotals();
+  if (!(Number(totals.total || 0) > 0)) {
+    posState.cuotas = [];
+    renderCuotasList();
+    return;
+  }
+  generateCuotasPlan();
+}
+
+function getFinancedAmount(totals, cambio) {
+  const totalVenta = posState.moneda === 'USD' && cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const entregaInicial = round2(posState.entregaInicial || 0);
+  return round2(Math.max(totalVenta - entregaInicial, 0));
+}
+
+function validateEntregaInicial(totals, cambio) {
+  if (posState.condicionVenta !== 'CREDITO') return null;
+  const totalVenta = posState.moneda === 'USD' && cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const entregaInicial = round2(posState.entregaInicial || 0);
+  if (entregaInicial < 0) return 'La entrega inicial no puede ser negativa.';
+  if (entregaInicial >= totalVenta && totalVenta > 0) {
+    return 'La entrega inicial debe ser menor al total para usar crédito.';
+  }
+  return null;
+}
+
 function renderCurrencyControls() {
   if (!posDom) return;
   if (posDom.currencySelect) {
     posDom.currencySelect.value = posState.moneda || 'PYG';
   }
   if (posDom.exchangeRow) {
-    posDom.exchangeRow.hidden = posState.moneda !== 'USD';
+    const showExchange = posState.moneda === 'USD';
+    posDom.exchangeRow.hidden = !showExchange;
+    posDom.exchangeRow.style.display = showExchange ? '' : 'none';
   }
   if (posDom.exchangeInput) {
     const activeElement = typeof document !== 'undefined' ? document.activeElement : null;
@@ -1038,7 +1215,9 @@ function renderSummary() {
   const showUsd = requiereCambio && cambio;
   const currencyMain = showUsd ? 'USD' : 'PYG';
   const planCurrency = posState.moneda === 'USD' && cambio ? 'USD' : 'PYG';
-  const planTotalBase = planCurrency === 'USD' ? totalUsd : totals.total;
+  const entregaInicial = isCredito ? round2(posState.entregaInicial || 0) : 0;
+  const financedAmount = isCredito ? getFinancedAmount(totals, cambio) : 0;
+  const planTotalBase = planCurrency === 'USD' ? financedAmount : financedAmount || totals.total;
 
   let summaryHtml = `
     <div class="row"><span>Subtotal</span><strong>${formatCurrency(showUsd ? subtotalUsd : totals.subtotal, currencyMain)}</strong></div>
@@ -1062,6 +1241,8 @@ function renderSummary() {
     const isPlazo = posState.creditTipo === 'PLAZO';
     summaryHtml += `
       <div class="row"><span>Modalidad</span><strong>${isPlazo ? 'Plazo' : 'Cuotas'}</strong></div>
+      <div class="row"><span>Entrega inicial</span><strong>${formatCurrency(entregaInicial, planCurrency)}</strong></div>
+      <div class="row"><span>Saldo financiado</span><strong>${formatCurrency(financedAmount, planCurrency)}</strong></div>
     `;
     if (isPlazo) {
       summaryHtml += `
@@ -1078,6 +1259,13 @@ function renderSummary() {
   }
 
   posDom.summaryTotals.innerHTML = summaryHtml;
+  if (posDom.miniSubtotal) {
+    posDom.miniSubtotal.textContent = `Subtotal: ${formatCurrency(showUsd ? subtotalUsd : totals.subtotal, currencyMain)}`;
+  }
+  if (posDom.miniTotal) {
+    posDom.miniTotal.textContent = formatCurrency(showUsd ? totalUsd : totals.total, currencyMain);
+  }
+  renderOverview();
   const lastSaleEstado = String(posState.lastSale?.estado || '').toUpperCase();
   const lastSaleEsTicket = lastSaleEstado === 'TICKET';
   if (posDom.printButton) {
@@ -1099,6 +1287,7 @@ function toggleCreditFields() {
     posState.condicionVenta = 'CONTADO';
     posState.fechaVencimiento = null;
     posState.creditTipo = 'PLAZO';
+    posState.entregaInicial = 0;
     posState.cuotas = [];
   }
   const isCredito = posState.condicionVenta === 'CREDITO';
@@ -1113,13 +1302,31 @@ function toggleCreditFields() {
   if (posDom.creditTypeSelect) {
     posDom.creditTypeSelect.value = posState.creditTipo;
   }
+  if (posDom.creditEntregaRow) {
+    posDom.creditEntregaRow.hidden = !isCredito;
+    posDom.creditEntregaRow.style.display = isCredito ? '' : 'none';
+  }
+  if (posDom.creditMetodoRow) {
+    posDom.creditMetodoRow.hidden = !isCredito;
+    posDom.creditMetodoRow.style.display = isCredito ? '' : 'none';
+  }
+  if (posDom.creditEntregaInput) {
+    posDom.creditEntregaInput.value = posState.entregaInicial ? String(posState.entregaInicial) : '';
+  }
+  if (posDom.creditMetodoSelect) {
+    posDom.creditMetodoSelect.value = posState.metodoEntrega || 'EFECTIVO';
+  }
 
   // Si no es crédito, ocultamos todo lo relacionado y salimos
   if (!isCredito) {
+    if (posDom.creditEntregaRow) { posDom.creditEntregaRow.hidden = true; posDom.creditEntregaRow.style.display = 'none'; }
+    if (posDom.creditMetodoRow) { posDom.creditMetodoRow.hidden = true; posDom.creditMetodoRow.style.display = 'none'; }
     if (posDom.creditPlazoRow) { posDom.creditPlazoRow.hidden = true; posDom.creditPlazoRow.style.display = 'none'; }
     if (posDom.creditCuotasRow) { posDom.creditCuotasRow.hidden = true; posDom.creditCuotasRow.style.display = 'none'; }
     if (posDom.cuotasList) { posDom.cuotasList.hidden = true; posDom.cuotasList.style.display = 'none'; }
     posState.fechaVencimiento = null;
+    posState.entregaInicial = 0;
+    posState.metodoEntrega = 'EFECTIVO';
     posState.cuotas = [];
     posState.cantidadCuotas = 3;
     posState.creditTipo = 'PLAZO';
@@ -1171,9 +1378,9 @@ function renderCuotasList() {
     .map(
       (cuota, idx) => `
         <tr data-pos-cuota-idx="${idx}">
-          <td>#${idx + 1}</td>
-          <td><input type="number" min="0" step="0.01" data-pos-cuota-monto value="${round2(cuota.monto)}"></td>
-          <td><input type="date" data-pos-cuota-fecha value="${cuota.fecha_vencimiento || ''}"></td>
+          <td data-label="Nro">#${idx + 1}</td>
+          <td data-label="Monto"><input type="number" min="0" step="0.01" data-pos-cuota-monto value="${round2(cuota.monto)}"></td>
+          <td data-label="Vencimiento"><input type="date" data-pos-cuota-fecha value="${cuota.fecha_vencimiento || ''}"></td>
         </tr>
       `
     )
@@ -1189,10 +1396,15 @@ function renderCuotasList() {
 function generateCuotasPlan() {
   const totals = computeTotals();
   const cambio = posState.moneda === 'USD' && Number(posState.tipoCambio) > 0 ? Number(posState.tipoCambio) : null;
-  const total = cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const entregaError = validateEntregaInicial(totals, cambio);
+  if (entregaError) {
+    setFeedback(entregaError, 'error');
+    return;
+  }
+  const total = getFinancedAmount(totals, cambio);
   const n = Math.max(1, posState.cantidadCuotas || 1);
   if (!Number.isFinite(total) || total <= 0) {
-    setFeedback('Agrega productos antes de generar cuotas.', 'error');
+    setFeedback('La entrega inicial no puede cubrir todo el saldo financiado.', 'error');
     return;
   }
   posState.creditTipo = 'CUOTAS';
@@ -1201,12 +1413,14 @@ function generateCuotasPlan() {
 }
 
 function validateCuotas(totals, cambio) {
-  const expected = posState.moneda === 'USD' && cambio ? round2(totals.totalMoneda || 0) : round2(totals.total);
+  const entregaError = validateEntregaInicial(totals, cambio);
+  if (entregaError) return entregaError;
+  const expected = getFinancedAmount(totals, cambio);
   const cuotas = Array.isArray(posState.cuotas) ? posState.cuotas : [];
   if (!cuotas.length) return 'Genera el plan de cuotas antes de continuar.';
   const sum = round2(cuotas.reduce((acc, c) => acc + Number(c.monto || 0), 0));
   if (Math.abs(sum - expected) > 0.01) {
-    return 'La suma de cuotas debe igualar el total de la venta.';
+    return 'La suma de cuotas debe igualar el saldo financiado.';
   }
   const missingDate = cuotas.some((c) => !c.fecha_vencimiento);
   if (missingDate) return 'Completa las fechas de vencimiento de todas las cuotas.';
@@ -1314,6 +1528,16 @@ async function confirmSale() {
     }
   }
 
+  if (isCredito) {
+    const entregaError = validateEntregaInicial(totals, cambio);
+    if (entregaError) {
+      setFeedback(entregaError, 'error');
+      updateActionStates();
+      if (posDom?.creditEntregaInput) posDom.creditEntregaInput.focus();
+      return;
+    }
+  }
+
   if (posState.moneda === 'USD') {
     const tipoCambioValido = Number(posState.tipoCambio);
     if (!Number.isFinite(tipoCambioValido) || tipoCambioValido <= 0) {
@@ -1332,12 +1556,16 @@ async function confirmSale() {
       if (isPlazo) {
         creditoPayload = {
           tipo: 'PLAZO',
-          fecha_vencimiento: posState.fechaVencimiento || undefined
+          fecha_vencimiento: posState.fechaVencimiento || undefined,
+          entrega_inicial: round2(posState.entregaInicial || 0),
+          metodo_entrega: round2(posState.entregaInicial || 0) > 0 ? posState.metodoEntrega : undefined
         };
       }
       if (isCuotas) {
         creditoPayload = {
           tipo: 'CUOTAS',
+          entrega_inicial: round2(posState.entregaInicial || 0),
+          metodo_entrega: round2(posState.entregaInicial || 0) > 0 ? posState.metodoEntrega : undefined,
           cantidad_cuotas: Math.max(1, posState.cuotas.length || posState.cantidadCuotas || 1),
           cuotas: (posState.cuotas || []).map((c, idx) => ({
             numero: idx + 1,
@@ -1386,11 +1614,15 @@ async function confirmSale() {
     posState.cart = [];
     posState.descuento = 0;
     posState.creditTipo = 'PLAZO';
+    posState.entregaInicial = 0;
+    posState.metodoEntrega = 'EFECTIVO';
     posState.cantidadCuotas = 3;
     posState.cuotas = [];
     posState.lastCreditoConfig = creditoPayload || null;
     if (posDom.discountInput) posDom.discountInput.value = '';
     if (posDom.creditTypeSelect) posDom.creditTypeSelect.value = 'PLAZO';
+    if (posDom.creditEntregaInput) posDom.creditEntregaInput.value = '';
+    if (posDom.creditMetodoSelect) posDom.creditMetodoSelect.value = 'EFECTIVO';
     if (posDom.cantidadCuotasInput) posDom.cantidadCuotasInput.value = 3;
     if (posDom.cuotasList) posDom.cuotasList.innerHTML = '';
     renderCart();
@@ -1415,47 +1647,121 @@ async function generateInvoice() {
     posDom.printButton.disabled = true;
     posDom.printButton.textContent = 'Generando...';
   }
+  let pendingInvoiceWindow = null;
   try {
-    setFeedback('Generando factura digital...', 'info');
-    const facturarBody = {};
-    if (posState.lastSale?.condicion_venta) {
-      facturarBody.condicion_pago = posState.lastSale.condicion_venta;
-    }
-    if (posState.lastCreditoConfig) {
-      facturarBody.credito = posState.lastCreditoConfig;
-      if (posState.lastCreditoConfig.fecha_vencimiento && !facturarBody.fecha_vencimiento) {
-        facturarBody.fecha_vencimiento = posState.lastCreditoConfig.fecha_vencimiento;
+    let currentSale = posState.lastSale;
+    try {
+      const refreshedSale = await fetchVentaById(posState.lastSale.id);
+      if (refreshedSale) {
+        currentSale = refreshedSale;
+        posState.lastSale = refreshedSale;
+        renderLastSale();
       }
-    } else if (posState.lastSale?.fecha_vencimiento) {
-      facturarBody.fecha_vencimiento = posState.lastSale.fecha_vencimiento;
+    } catch (refreshError) {
+      console.warn('[POS] No se pudo refrescar la venta antes de facturar.', refreshError);
     }
 
-    const response = await request(`/ventas/${posState.lastSale.id}/facturar`, {
+    const existingPdfUrl = getFacturaPdfUrl(currentSale?.factura_electronica);
+    const existingCanonicalPdfUrl = isCanonicalFacturaPdfUrl(existingPdfUrl) ? existingPdfUrl : null;
+    if (currentSale?.factura_electronica?.id) {
+      if (existingCanonicalPdfUrl) {
+        const opened = openUrlInNewTab(existingCanonicalPdfUrl, {
+          blockedTitle: 'No se pudo abrir la factura',
+          blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la factura.'
+        });
+        if (!opened) {
+          setFeedback('No se pudo abrir la factura. Desbloquea las ventanas emergentes para descargar el PDF.', 'warn');
+        } else {
+          setFeedback('Factura electrónica abierta en una nueva pestaña.', 'success');
+        }
+        return;
+      }
+
+      setFeedback('La factura ya fue emitida. Esperando el PDF canónico de FactPy...', 'info');
+      const refreshed = await waitForCanonicalFacturaPdf(currentSale.id);
+      if (refreshed?.venta) {
+        posState.lastSale = refreshed.venta;
+        renderLastSale();
+      }
+      if (refreshed?.pdfUrl) {
+        const opened = openUrlInNewTab(refreshed.pdfUrl, {
+          blockedTitle: 'No se pudo abrir la factura',
+          blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la factura.'
+        });
+        if (!opened) {
+          setFeedback('No se pudo abrir la factura. Desbloquea las ventanas emergentes para descargar el PDF.', 'warn');
+        } else {
+          setFeedback('Factura electrónica abierta en una nueva pestaña.', 'success');
+        }
+      } else {
+        setFeedback('La factura ya fue emitida, pero FactPy aún no devolvió el PDF. Ábrela luego desde Ventas con "Ver factura".', 'warn');
+      }
+      return;
+    }
+
+    setFeedback('Generando factura digital...', 'info');
+    pendingInvoiceWindow = createDeferredDocumentWindow({
+      pendingTitle: 'Generando factura...',
+      pendingDescription: 'La factura electrónica se está procesando. Esta pestaña mostrará el PDF apenas esté listo.',
+      blockedTitle: 'No se pudo abrir la factura',
+      blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la factura.'
+    });
+    const facturarBody = {};
+    if (currentSale?.condicion_venta) {
+      facturarBody.condicion_pago = currentSale.condicion_venta;
+    }
+    const creditConfig = posState.lastCreditoConfig || currentSale?.credito_config || null;
+    if (creditConfig) {
+      facturarBody.credito = creditConfig;
+      if (creditConfig.fecha_vencimiento && !facturarBody.fecha_vencimiento) {
+        facturarBody.fecha_vencimiento = creditConfig.fecha_vencimiento;
+      }
+    } else if (currentSale?.fecha_vencimiento) {
+      facturarBody.fecha_vencimiento = currentSale.fecha_vencimiento;
+    }
+
+    const response = await request(`/ventas/${currentSale.id}/facturar`, {
       method: 'POST',
       body: facturarBody
     });
-    const venta = response?.venta || response;
-    const facturaElectronica = response?.factura || venta?.factura_electronica;
-    const pdfUrl = getFacturaPdfUrl(facturaElectronica);
+    let facturaElectronica = response?.factura || null;
+    let venta = mergeVentaFacturaState(response?.venta || response, facturaElectronica);
+    facturaElectronica = venta?.factura_electronica || facturaElectronica;
+    let pdfUrl = isCanonicalFacturaPdfUrl(getFacturaPdfUrl(facturaElectronica))
+      ? getFacturaPdfUrl(facturaElectronica)
+      : null;
     const facturaTipo = 'electrónica';
     if (!venta) {
       throw new Error('No se recibió la venta generada.');
     }
+
+    if (!pdfUrl) {
+      const refreshed = await waitForCanonicalFacturaPdf(venta.id);
+      if (refreshed?.venta) {
+        venta = mergeVentaFacturaState(refreshed.venta, facturaElectronica);
+        facturaElectronica = venta.factura_electronica;
+      }
+      if (refreshed?.pdfUrl) {
+        pdfUrl = refreshed.pdfUrl;
+      }
+    }
+
+    posState.lastSale = mergeVentaFacturaState(venta, facturaElectronica);
+    renderLastSale();
+
     if (pdfUrl) {
-      const win = window.open(pdfUrl, '_blank');
-      if (!win) {
+      const opened = pendingInvoiceWindow.navigate(pdfUrl);
+      if (!opened) {
         setFeedback(`Factura ${facturaTipo} generada. Desbloquea las ventanas emergentes para descargar el PDF.`, 'warn');
       } else {
-        win.focus();
         setFeedback(`Factura ${facturaTipo} generada. El PDF se abrió en una nueva pestaña.`, 'success');
       }
     } else {
-      openInvoiceWindow(venta, facturaElectronica);
-      setFeedback(`Factura ${facturaTipo} generada. Puedes imprimirla desde la ventana emergente.`, 'success');
+      pendingInvoiceWindow.close();
+      setFeedback(`Factura ${facturaTipo} generada, pero FactPy aún no devolvió el PDF. Ábrela luego desde Ventas con "Ver factura".`, 'warn');
     }
-    posState.lastSale = venta;
-    renderLastSale();
   } catch (error) {
+    pendingInvoiceWindow?.close();
     console.error(error);
     setFeedback(error.message || 'No se pudo generar la factura digital.', 'error');
   } finally {
@@ -1478,6 +1784,47 @@ function getFacturaPdfUrl(facturaElectronica) {
   return null;
 }
 
+async function fetchVentaById(id) {
+  if (!id) return null;
+  const query = buildQuery({ search: id });
+  const response = await request(`/ventas?${query}`);
+  const ventas = Array.isArray(response?.data)
+    ? response.data
+    : Array.isArray(response?.ventas)
+      ? response.ventas
+      : Array.isArray(response)
+        ? response
+        : [];
+  return ventas.find((venta) => venta?.id === id) || null;
+}
+
+async function waitForCanonicalFacturaPdf(ventaId, {
+  attempts = FACTURA_PDF_POLL_ATTEMPTS,
+  delayMs = FACTURA_PDF_POLL_DELAY_MS
+} = {}) {
+  let latestVenta = null;
+
+  for (let index = 0; index < attempts; index += 1) {
+    latestVenta = await fetchVentaById(ventaId);
+    const latestPdfPath = latestVenta?.factura_electronica?.pdf_path;
+    if (isCanonicalFacturaPdfUrl(latestPdfPath)) {
+      return {
+        venta: latestVenta,
+        pdfUrl: latestPdfPath
+      };
+    }
+
+    if (index < attempts - 1) {
+      await delay(delayMs);
+    }
+  }
+
+  return {
+    venta: latestVenta,
+    pdfUrl: null
+  };
+}
+
 async function generateTicket() {
   if (!posState.lastSale) {
     setFeedback('Registra una venta antes de imprimir el ticket.', 'info');
@@ -1495,11 +1842,13 @@ async function generateTicket() {
   }
   try {
     const ticketUrl = urlWithSession(`/ventas/${encodeURIComponent(posState.lastSale.id)}/ticket/pdf`);
-    const win = window.open(ticketUrl, '_blank');
+    const win = openUrlInNewTab(ticketUrl, {
+      blockedTitle: 'No se pudo abrir el ticket',
+      blockedDescription: 'Desbloquea las ventanas emergentes para ver el ticket.'
+    });
     if (!win) {
       setFeedback('No se pudo abrir el ticket. Desbloquea las ventanas emergentes.', 'warn');
     } else {
-      win.focus();
       setFeedback('Ticket PDF abierto en una nueva pestaña.', 'success');
     }
   } catch (error) {
@@ -1710,8 +2059,9 @@ function updateActionStates() {
   const isCuotas = isCredito && posState.creditTipo === 'CUOTAS';
   const totals = computeTotals();
   const hasVencimiento = !!posState.fechaVencimiento;
+  const entregaValid = !isCredito || validateEntregaInicial(totals, cambio) === null;
   const cuotasValid = !isCuotas || validateCuotas(totals, cambio) === null;
-  const creditoOk = !isCredito || (hasCliente && (!isPlazo || hasVencimiento) && cuotasValid);
+  const creditoOk = !isCredito || (hasCliente && entregaValid && (!isPlazo || hasVencimiento) && cuotasValid);
   const canConfirm = hasCart && (!requiereTipoCambio || tipoCambioValido) && creditoOk;
 
   if (posDom.confirmButton) {
@@ -1733,6 +2083,40 @@ function updateActionStates() {
   }
   if (posDom.ticketButton) {
     posDom.ticketButton.disabled = posState.loading || posDom.ticketButton.hidden;
+  }
+
+  if (posDom.checkoutToggle) {
+    posDom.checkoutToggle.disabled = posState.loading && !isMobileCheckout();
+  }
+
+  if (posDom.overviewSearchButton) {
+    posDom.overviewSearchButton.disabled = posState.loading;
+  }
+
+  if (posDom.overviewCheckoutButton) {
+    posDom.overviewCheckoutButton.disabled = posState.loading || !hasCart;
+  }
+}
+
+function renderOverview() {
+  if (!posDom) return;
+  const totals = computeTotals();
+  const requiereCambio = posState.moneda === 'USD';
+  const tipoCambioValido = requiereCambio && Number(posState.tipoCambio) > 0;
+  const currencyMain = requiereCambio && tipoCambioValido ? 'USD' : 'PYG';
+  const totalMain = requiereCambio && tipoCambioValido ? (totals.totalMoneda || 0) : totals.total;
+  const itemCount = posState.cart.reduce((acc, item) => acc + Number(item.cantidad || 0), 0);
+  const clientLabel = posState.cliente?.nombre_razon_social || 'Eventual';
+
+  if (posDom.overviewClient) {
+    posDom.overviewClient.textContent = clientLabel;
+    posDom.overviewClient.title = clientLabel;
+  }
+  if (posDom.overviewItems) {
+    posDom.overviewItems.textContent = formatNumber(itemCount, 0);
+  }
+  if (posDom.overviewTotal) {
+    posDom.overviewTotal.textContent = formatCurrency(totalMain, currencyMain);
   }
 }
 
@@ -1794,6 +2178,58 @@ function renderPos(container) {
   renderSummary();
   renderLastSale();
   updateActionStates();
+}
+
+function isMobileCheckout() {
+  if (checkoutMediaQuery) {
+    return checkoutMediaQuery.matches;
+  }
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+}
+
+function setCheckoutExpanded(expanded) {
+  if (!posDom?.checkout || !posDom?.checkoutToggle || !posDom?.checkoutBody) return;
+  const shouldExpand = !isMobileCheckout() || Boolean(expanded);
+  posDom.checkout.classList.toggle('is-expanded', shouldExpand);
+  posDom.checkoutBody.hidden = !shouldExpand;
+  posDom.checkoutToggle.setAttribute('aria-expanded', shouldExpand ? 'true' : 'false');
+}
+
+function expandCheckoutAndScroll() {
+  if (!posDom?.checkout) return;
+  setCheckoutExpanded(true);
+  if (typeof posDom.checkout.scrollIntoView === 'function') {
+    posDom.checkout.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function syncCheckoutForViewport() {
+  if (!posDom?.checkout) return;
+  if (isMobileCheckout()) {
+    const shouldExpand = posState.cart.length === 0 || posState.condicionVenta === 'CREDITO' || Boolean(posState.lastSale);
+    setCheckoutExpanded(shouldExpand);
+    return;
+  }
+  setCheckoutExpanded(true);
+}
+
+function attachCheckoutMediaListener() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  if (!checkoutMediaQuery) {
+    checkoutMediaQuery = window.matchMedia('(max-width: 768px)');
+  }
+  if (checkoutMediaQuery.__posCheckoutBound) return;
+
+  const listener = () => {
+    syncCheckoutForViewport();
+  };
+
+  if (typeof checkoutMediaQuery.addEventListener === 'function') {
+    checkoutMediaQuery.addEventListener('change', listener);
+  } else if (typeof checkoutMediaQuery.addListener === 'function') {
+    checkoutMediaQuery.addListener(listener);
+  }
+  checkoutMediaQuery.__posCheckoutBound = true;
 }
 
 function escapeHtml(value) {

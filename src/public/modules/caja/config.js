@@ -1,5 +1,6 @@
 import { formatCurrency, formatDate } from '../common/format.js';
 import { buildQuery, request, urlWithSession } from '../common/api.js';
+import { openUrlInNewTab } from '../common/dialogs.js';
 import { createCierreCaja, prepareCierrePayload, fetchEstadoCaja, crearAperturaCaja } from './nuevo.js';
 import { crearSalidaCaja } from './salida.js';
 import { fetchCierreDetalle } from './detalle.js';
@@ -7,6 +8,219 @@ import { fetchCierreDetalle } from './detalle.js';
 let resumenContainer = null;
 let formElement = null;
 let estadoActual = null;
+
+function openCajaDialog({ title, description, fields, submitLabel = 'Guardar' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'caja-dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'caja-dialog';
+
+    const heading = document.createElement('h3');
+    heading.textContent = title || 'Completar datos';
+    dialog.appendChild(heading);
+
+    if (description) {
+      const descriptionNode = document.createElement('p');
+      descriptionNode.className = 'caja-dialog__description';
+      descriptionNode.textContent = description;
+      dialog.appendChild(descriptionNode);
+    }
+
+    const form = document.createElement('form');
+    form.className = 'caja-dialog__form';
+
+    const cleanup = (value) => {
+      overlay.remove();
+      resolve(value);
+    };
+
+    fields.forEach((field) => {
+      const wrapper = document.createElement('label');
+      wrapper.className = 'caja-dialog__field';
+
+      const label = document.createElement('span');
+      label.textContent = field.label;
+      wrapper.appendChild(label);
+
+      const input = field.type === 'textarea'
+        ? document.createElement('textarea')
+        : document.createElement('input');
+
+      if (field.type && field.type !== 'textarea') {
+        input.type = field.type;
+      }
+
+      input.name = field.name;
+      if (field.placeholder) input.placeholder = field.placeholder;
+      if (field.value !== undefined && field.value !== null) input.value = String(field.value);
+      if (field.step !== undefined) input.step = field.step;
+      if (field.min !== undefined) input.min = field.min;
+      if (field.rows !== undefined && input.tagName === 'TEXTAREA') input.rows = field.rows;
+      if (field.required) input.required = true;
+
+      wrapper.appendChild(input);
+      form.appendChild(wrapper);
+    });
+
+    const actions = document.createElement('div');
+    actions.className = 'caja-dialog__actions';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'btn ghost';
+    cancelButton.textContent = 'Cancelar';
+    cancelButton.addEventListener('click', () => cleanup(null));
+
+    const submitButton = document.createElement('button');
+    submitButton.type = 'submit';
+    submitButton.className = 'btn primary';
+    submitButton.textContent = submitLabel;
+
+    actions.append(cancelButton, submitButton);
+    form.appendChild(actions);
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const values = {};
+      fields.forEach((field) => {
+        const control = form.elements[field.name];
+        values[field.name] = control?.value ?? '';
+      });
+      cleanup(values);
+    });
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup(null);
+      }
+    });
+
+    document.addEventListener(
+      'keydown',
+      function onKeydown(event) {
+        if (event.key === 'Escape') {
+          document.removeEventListener('keydown', onKeydown);
+          cleanup(null);
+        }
+      },
+      { once: true }
+    );
+
+    dialog.appendChild(form);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const firstInput = form.querySelector('input, textarea');
+    if (firstInput) {
+      firstInput.focus();
+      if (typeof firstInput.select === 'function') {
+        firstInput.select();
+      }
+    }
+  });
+}
+
+function openCajaInfoDialog({ title, description, content, closeLabel = 'Cerrar' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'caja-dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'caja-dialog caja-dialog--info';
+
+    const heading = document.createElement('h3');
+    heading.textContent = title || 'Detalle';
+    dialog.appendChild(heading);
+
+    if (description) {
+      const descriptionNode = document.createElement('p');
+      descriptionNode.className = 'caja-dialog__description';
+      descriptionNode.textContent = description;
+      dialog.appendChild(descriptionNode);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'caja-dialog__body';
+    if (typeof content === 'string') {
+      body.innerHTML = content;
+    } else if (content) {
+      body.appendChild(content);
+    }
+    dialog.appendChild(body);
+
+    const actions = document.createElement('div');
+    actions.className = 'caja-dialog__actions';
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'btn primary';
+    closeButton.textContent = closeLabel;
+
+    const cleanup = () => {
+      overlay.remove();
+      resolve();
+    };
+
+    closeButton.addEventListener('click', cleanup);
+    actions.appendChild(closeButton);
+    dialog.appendChild(actions);
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) {
+        cleanup();
+      }
+    });
+
+    document.addEventListener(
+      'keydown',
+      function onKeydown(event) {
+        if (event.key === 'Escape') {
+          document.removeEventListener('keydown', onKeydown);
+          cleanup();
+        }
+      },
+      { once: true }
+    );
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    closeButton.focus();
+  });
+}
+
+async function promptSalidaCaja() {
+  return openCajaDialog({
+    title: 'Registrar salida de caja',
+    description: 'Cargá el motivo y el monto para registrar una salida manual.',
+    submitLabel: 'Registrar salida',
+    fields: [
+      {
+        name: 'descripcion',
+        label: 'Descripción',
+        type: 'text',
+        required: true,
+        placeholder: 'Ej. compra chica, viático, entrega'
+      },
+      {
+        name: 'monto',
+        label: 'Monto (Gs)',
+        type: 'number',
+        min: '0.01',
+        step: '0.01',
+        required: true
+      },
+      {
+        name: 'observacion',
+        label: 'Observación',
+        type: 'textarea',
+        rows: 3,
+        placeholder: 'Opcional'
+      }
+    ]
+  });
+}
 
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
@@ -104,6 +318,14 @@ function renderResumen(estado, error) {
     { label: 'Efectivo esperado', value: formatCurrency(totales.efectivoEsperado, 'PYG') }
   ];
 
+  if (Number(totales.tarjeta) > 0) {
+    totalCards.splice(3, 0, { label: 'Cobros tarjeta', value: formatCurrency(totales.tarjeta, 'PYG') });
+  }
+
+  if (Number(totales.transferencia) > 0) {
+    totalCards.splice(4, 0, { label: 'Cobros transferencia', value: formatCurrency(totales.transferencia, 'PYG') });
+  }
+
   if (Number(totales.ventasUsd) > 0) {
     totalCards.splice(2, 0, { label: 'Ventas USD', value: formatCurrency(totales.ventasUsd, 'USD') });
   }
@@ -195,6 +417,14 @@ function resumenEnTexto(estado) {
     `Efectivo esperado: ${formatCurrency(totales.efectivoEsperado, 'PYG')}`
   ];
 
+  if (Number(totales.tarjeta) > 0) {
+    lineas.splice(4, 0, `Cobros tarjeta: ${formatCurrency(totales.tarjeta, 'PYG')}`);
+  }
+
+  if (Number(totales.transferencia) > 0) {
+    lineas.splice(5, 0, `Cobros transferencia: ${formatCurrency(totales.transferencia, 'PYG')}`);
+  }
+
   if (Number(totales.ventasUsd) > 0) {
     lineas.splice(3, 0, `Ventas USD: ${formatCurrency(totales.ventasUsd, 'USD')}`);
   }
@@ -270,16 +500,37 @@ export const cajaModule = {
   moduleActionHandlers: {
     'abrir-caja': async ({ showMessage, reload }) => {
       try {
-        const saldoPrompt = window.prompt(
-          'Saldo inicial de la apertura (Gs)',
-          estadoActual?.totales?.saldoInicial ?? '0'
-        );
-        if (saldoPrompt === null) return;
-        const observacion = window.prompt('Observaciones (opcional)') ?? undefined;
-        await crearAperturaCaja({ saldo_inicial: saldoPrompt, observaciones: observacion });
+        const payload = await openCajaDialog({
+          title: 'Apertura de caja',
+          description: 'Registrá el saldo inicial y una observación opcional para iniciar la jornada.',
+          submitLabel: 'Registrar apertura',
+          fields: [
+            {
+              name: 'saldo_inicial',
+              label: 'Saldo inicial (Gs)',
+              type: 'number',
+              min: '0',
+              step: '0.01',
+              required: true,
+              value: estadoActual?.totales?.saldoInicial ?? '0'
+            },
+            {
+              name: 'observaciones',
+              label: 'Observaciones',
+              type: 'textarea',
+              rows: 3,
+              placeholder: 'Opcional'
+            }
+          ]
+        });
+        if (!payload) return;
+        await crearAperturaCaja({
+          saldo_inicial: payload.saldo_inicial,
+          observaciones: payload.observaciones
+        });
         showMessage('Apertura registrada correctamente.', 'success');
         await actualizarResumen({ showMessage });
-        await reload();
+        await reload({ preserveScroll: true });
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo registrar la apertura.', 'error');
@@ -291,16 +542,26 @@ export const cajaModule = {
         showMessage('No hay una apertura activa.', 'info');
         return;
       }
-      window.alert(resumenEnTexto(estadoActual));
+      const lines = resumenEnTexto(estadoActual)
+        .split('\n')
+        .map((line) => `<li>${escapeHtml(line)}</li>`)
+        .join('');
+      await openCajaInfoDialog({
+        title: 'Estado de caja',
+        description: 'Resumen actual de la caja abierta.',
+        content: `<ul class="caja-dialog__list">${lines}</ul>`
+      });
     },
     'registrar-salida': async ({ showMessage, reload }) => {
       try {
         const aperturaDisponible = await ensureAperturaActivaParaAccion({ showMessage });
         if (!aperturaDisponible) return;
-        await crearSalidaCaja();
+        const payload = await promptSalidaCaja();
+        if (!payload) return;
+        await crearSalidaCaja(payload);
         showMessage('Salida registrada correctamente.', 'success');
         await actualizarResumen({ showMessage });
-        await reload();
+        await reload({ preserveScroll: true });
       } catch (error) {
         if (error.message === 'Registro cancelado.') return;
         console.error(error);
@@ -335,9 +596,24 @@ export const cajaModule = {
           return;
         }
         const list = salidas
-          .map((salida) => `${formatDate(salida.fecha)} · ${salida.descripcion} · ${formatCurrency(salida.monto, 'PYG')}`)
-          .join('\n');
-        window.alert(`Salidas registradas:\n\n${list}`);
+          .map(
+            (salida) =>
+              `<li><strong>${escapeHtml(salida.descripcion)}</strong><span>${escapeHtml(
+                formatDate(salida.fecha)
+              )}</span><span>${escapeHtml(formatCurrency(salida.monto, 'PYG'))}</span>${
+                salida.observacion
+                  ? `<small>${escapeHtml(salida.observacion)}</small>`
+                  : ''
+              }</li>`
+          )
+          .join('');
+        await openCajaInfoDialog({
+          title: 'Salidas registradas',
+          description: `Cierre con ${salidas.length} salida${salidas.length === 1 ? '' : 's'} asociada${
+            salidas.length === 1 ? '' : 's'
+          }.`,
+          content: `<ul class="caja-dialog__list caja-dialog__list--salidas">${list}</ul>`
+        });
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudieron obtener las salidas.', 'error');
@@ -346,15 +622,20 @@ export const cajaModule = {
     'descargar-reporte': ({ id }) => {
       if (!id) return;
       const url = urlWithSession(`/cierres-caja/${id}/reporte`);
-      window.open(url, '_blank', 'noopener');
+      openUrlInNewTab(url, {
+        blockedTitle: 'No se pudo abrir el reporte',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF del cierre de caja.'
+      });
     },
     'registrar-salida-cierre': async ({ id, showMessage, reload }) => {
       if (!id) return;
       try {
-        await crearSalidaCaja({ cierreId: id });
+        const payload = await promptSalidaCaja();
+        if (!payload) return;
+        await crearSalidaCaja({ ...payload, cierreId: id });
         showMessage('Salida registrada en el cierre.', 'success');
         if (typeof reload === 'function') {
-          await reload();
+          await reload({ preserveScroll: true });
         }
       } catch (error) {
         if (error.message === 'Registro cancelado.') return;

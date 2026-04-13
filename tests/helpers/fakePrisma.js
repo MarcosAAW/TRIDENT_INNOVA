@@ -16,6 +16,8 @@ class FakePrisma {
       venta: [],
       detalleVenta: [],
       movimientoStock: [],
+      recibo: [],
+      reciboDetalle: [],
       facturaElectronica: [],
       facturaDigital: [],
       notaCreditoElectronica: [],
@@ -79,6 +81,19 @@ class FakePrisma {
       create: async ({ data }) => this._movimientoCreate(data),
       findMany: async ({ where = {} } = {}) => this._movimientoFindMany(where),
       deleteMany: async () => this._movimientoDeleteMany()
+    };
+
+    this.recibo = {
+      create: async ({ data }) => this._reciboCreate(data),
+      findFirst: async (args = {}) => this._reciboFindFirst(args),
+      findMany: async (args = {}) => this._reciboFindMany(args),
+      deleteMany: async () => this._reciboDeleteMany()
+    };
+
+    this.reciboDetalle = {
+      create: async ({ data }) => this._reciboDetalleCreate(data),
+      findMany: async (args = {}) => this._reciboDetalleFindMany(args),
+      deleteMany: async () => this._reciboDetalleDeleteMany()
     };
 
     this.facturaElectronica = {
@@ -709,6 +724,120 @@ class FakePrisma {
   _movimientoDeleteMany() {
     const count = this.state.movimientoStock.length;
     this.state.movimientoStock = [];
+    return { count };
+  }
+
+  // Recibo -----------------------------------------------------------------
+
+  _reciboCreate(data) {
+    const now = this._nowISO();
+    const record = {
+      id: data.id || randomUUID(),
+      numero: data.numero ?? null,
+      clienteId: data.clienteId ?? null,
+      usuarioId: data.usuarioId,
+      sucursalId: data.sucursalId ?? null,
+      fecha: data.fecha ? new Date(data.fecha).toISOString() : now,
+      total: this._toNumber(data.total),
+      total_moneda: data.total_moneda != null ? this._toNumber(data.total_moneda) : null,
+      moneda: data.moneda ?? 'PYG',
+      tipo_cambio: data.tipo_cambio != null ? this._toNumber(data.tipo_cambio) : null,
+      metodo: data.metodo,
+      referencia: data.referencia ?? null,
+      observacion: data.observacion ?? null,
+      estado: data.estado ?? 'PENDIENTE',
+      created_at: data.created_at ?? now,
+      updated_at: data.updated_at ?? now
+    };
+    this.state.recibo.push(record);
+    return this._clone(record);
+  }
+
+  _reciboFindFirst({ where = {}, orderBy, select } = {}) {
+    let results = this.state.recibo;
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
+    }
+    if (where.numero && Object.prototype.hasOwnProperty.call(where.numero, 'not')) {
+      results = results.filter((item) => item.numero !== where.numero.not);
+    }
+    if (orderBy?.numero === 'desc') {
+      results = [...results].sort((a, b) => String(b.numero || '').localeCompare(String(a.numero || '')));
+    }
+    const record = results[0];
+    if (!record) return null;
+    if (!select) return this._clone(record);
+    return Object.keys(select).reduce((acc, key) => {
+      if (select[key]) acc[key] = this._clone(record[key]);
+      return acc;
+    }, {});
+  }
+
+  _reciboFindMany({ where = {}, select } = {}) {
+    let results = this.state.recibo;
+    if (where.sucursalId) {
+      results = results.filter((item) => item.sucursalId === where.sucursalId);
+    }
+    if (where.clienteId) {
+      results = results.filter((item) => item.clienteId === where.clienteId);
+    }
+    if (where.usuarioId) {
+      results = results.filter((item) => item.usuarioId === where.usuarioId);
+    }
+    if (where.fecha) {
+      const { gte, lte } = where.fecha;
+      results = results.filter((item) => {
+        const fecha = new Date(item.fecha);
+        if (gte && fecha < new Date(gte)) return false;
+        if (lte && fecha > new Date(lte)) return false;
+        return true;
+      });
+    }
+    if (!select) {
+      return results.map((item) => this._clone(item));
+    }
+    return results.map((record) =>
+      Object.keys(select).reduce((acc, key) => {
+        if (select[key]) acc[key] = this._clone(record[key]);
+        return acc;
+      }, {})
+    );
+  }
+
+  _reciboDeleteMany() {
+    const count = this.state.recibo.length;
+    this.state.recibo = [];
+    return { count };
+  }
+
+  _reciboDetalleCreate(data) {
+    const record = {
+      id: data.id || randomUUID(),
+      reciboId: data.reciboId,
+      ventaId: data.ventaId,
+      monto: this._toNumber(data.monto),
+      monto_moneda: data.monto_moneda != null ? this._toNumber(data.monto_moneda) : null,
+      saldo_previo: data.saldo_previo != null ? this._toNumber(data.saldo_previo) : null,
+      saldo_posterior: data.saldo_posterior != null ? this._toNumber(data.saldo_posterior) : null
+    };
+    this.state.reciboDetalle.push(record);
+    return this._clone(record);
+  }
+
+  _reciboDetalleFindMany({ where = {} } = {}) {
+    let results = this.state.reciboDetalle;
+    if (where.ventaId) {
+      results = results.filter((item) => item.ventaId === where.ventaId);
+    }
+    if (where.reciboId) {
+      results = results.filter((item) => item.reciboId === where.reciboId);
+    }
+    return results.map((item) => this._clone(item));
+  }
+
+  _reciboDetalleDeleteMany() {
+    const count = this.state.reciboDetalle.length;
+    this.state.reciboDetalle = [];
     return { count };
   }
 

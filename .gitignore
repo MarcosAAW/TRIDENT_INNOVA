@@ -9,3 +9,6 @@ coverage/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+trident_local.dump
+trident_local.sql
+tmp-jest-*.json

@@ -126,6 +126,8 @@ const creditoCuotaSchema = z.object({
 const creditoConfigSchema = z.object({
   tipo: z.enum(['PLAZO', 'CUOTAS']).default('PLAZO'),
   descripcion: z.string().trim().min(1).max(10).optional(),
+  entrega_inicial: z.coerce.number().min(0).optional(),
+  metodo_entrega: z.string().trim().min(1).max(30).optional(),
   cantidad_cuotas: z.coerce.number().int().min(1).optional(),
   cuotas: z.array(creditoCuotaSchema).min(1).optional(),
   fecha_vencimiento: z.coerce.date().optional()
@@ -197,6 +199,140 @@ const createVentaSchema = z.object({
 });
 
 class VentaValidationError extends Error {}
+
+function normalizeMetodoEntrega(value) {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim().toUpperCase();
+  return normalized || undefined;
+}
+
+function getVentaTotalCreditoMoneda(moneda, totalGs, totalMoneda) {
+  if (String(moneda || 'PYG').toUpperCase() === 'USD') {
+    return round(Number(totalMoneda) || 0, 2);
+  }
+  return round(Number(totalGs) || 0, 2);
+}
+
+function normalizeCreditoConfigForVenta(creditoConfig, {
+  moneda,
+  tipoCambio,
+  totalGs,
+  totalMoneda,
+  fechaVencimientoDefault
+} = {}) {
+  if (!creditoConfig) return null;
+
+  const monedaVenta = String(moneda || 'PYG').toUpperCase();
+  const totalVentaGs = round(Number(totalGs) || 0, 2);
+  const totalVentaMoneda = getVentaTotalCreditoMoneda(monedaVenta, totalVentaGs, totalMoneda);
+  const tipo = creditoConfig?.tipo === 'CUOTAS' ? 'CUOTAS' : 'PLAZO';
+  const entregaInicial = round(Number(creditoConfig?.entrega_inicial) || 0, 2);
+
+  if (entregaInicial < 0) {
+    throw new VentaValidationError('La entrega inicial no puede ser negativa.');
+  }
+
+  if (entregaInicial >= totalVentaMoneda && totalVentaMoneda > 0) {
+    throw new VentaValidationError('La entrega inicial debe ser menor al total para ventas a crédito.');
+  }
+
+  const cambio = Number(tipoCambio) || 0;
+  if (monedaVenta === 'USD' && entregaInicial > 0 && (!Number.isFinite(cambio) || cambio <= 0)) {
+    throw new VentaValidationError('La venta en USD requiere tipo de cambio válido para registrar la entrega inicial.');
+  }
+
+  const entregaInicialGs = monedaVenta === 'USD'
+    ? round(entregaInicial * cambio, 2)
+    : entregaInicial;
+  const saldoFinanciadoMoneda = round(Math.max(totalVentaMoneda - entregaInicial, 0), 2);
+  const saldoFinanciadoGs = round(Math.max(totalVentaGs - entregaInicialGs, 0), 2);
+
+  const normalizedBase = {
+    tipo,
+    saldo_financiado: saldoFinanciadoMoneda,
+    saldo_financiado_gs: saldoFinanciadoGs
+  };
+
+  if (entregaInicial > 0) {
+    normalizedBase.entrega_inicial = entregaInicial;
+    normalizedBase.entrega_inicial_gs = entregaInicialGs;
+  }
+
+  const metodoEntrega = normalizeMetodoEntrega(creditoConfig?.metodo_entrega);
+  if (metodoEntrega) {
+    normalizedBase.metodo_entrega = metodoEntrega;
+  }
+
+  if (tipo === 'CUOTAS') {
+    const cuotas = normalizeCuotas(creditoConfig?.cuotas);
+    if (!cuotas.length) {
+      throw new VentaValidationError('Debes indicar al menos una cuota para ventas a crédito.');
+    }
+    const totalCuotas = round(cuotas.reduce((acc, cuota) => acc + Number(cuota.monto || 0), 0), 2);
+    if (Math.abs(totalCuotas - saldoFinanciadoMoneda) > 0.01) {
+      throw new VentaValidationError('La suma de cuotas debe igualar el saldo financiado.');
+    }
+    return {
+      ...normalizedBase,
+      cantidad_cuotas: Math.max(1, Number(creditoConfig?.cantidad_cuotas) || cuotas.length || 1),
+      cuotas
+    };
+  }
+
+  const descripcion = creditoConfig?.descripcion && String(creditoConfig.descripcion).trim()
+    ? String(creditoConfig.descripcion).trim().slice(0, 10)
+    : undefined;
+  if (descripcion) {
+    normalizedBase.descripcion = descripcion;
+  }
+
+  const fechaVencimiento = creditoConfig?.fecha_vencimiento || fechaVencimientoDefault;
+  if (fechaVencimiento) {
+    normalizedBase.fecha_vencimiento = new Date(fechaVencimiento);
+  }
+
+  return normalizedBase;
+}
+
+function buildVentaCreditoState({
+  condicionVenta,
+  creditoInput,
+  fechaVencimiento,
+  moneda,
+  tipoCambio,
+  totalGs,
+  totalMoneda
+}) {
+  const esCredito = condicionVenta === 'CREDITO';
+  if (!esCredito) {
+    return {
+      esCredito: false,
+      fechaVencimiento: null,
+      saldoPendiente: null,
+      creditoConfig: null
+    };
+  }
+
+  const creditoBase = creditoInput || { tipo: 'PLAZO' };
+  const creditoConfig = normalizeCreditoConfigForVenta(creditoBase, {
+    moneda,
+    tipoCambio,
+    totalGs,
+    totalMoneda,
+    fechaVencimientoDefault: fechaVencimiento || creditoBase?.fecha_vencimiento || null
+  });
+
+  return {
+    esCredito: true,
+    fechaVencimiento: creditoConfig?.fecha_vencimiento || fechaVencimiento || null,
+    saldoPendiente: Number(creditoConfig?.saldo_financiado_gs ?? totalGs ?? 0),
+    creditoConfig
+  };
+}
+
+function creditoConfigComparable(value) {
+  return JSON.stringify(serialize(value || null));
+}
 
 const MAX_DECIMAL_VALUE = 10_000_000_000;
 const IVA_DIVISOR = {
@@ -370,9 +506,10 @@ function buildVentaWhere(filters, sucursalId) {
   }
 
   if (filters.search) {
-    const term = filters.search;
+    const term = String(filters.search).trim();
+    const isUuidTerm = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(term);
     where.OR = [
-      { id: { contains: term, mode: 'insensitive' } },
+      ...(isUuidTerm ? [{ id: term }] : []),
       { estado: { contains: term, mode: 'insensitive' } },
       { cliente: { nombre_razon_social: { contains: term, mode: 'insensitive' } } },
       { cliente: { ruc: { contains: term, mode: 'insensitive' } } },
@@ -408,6 +545,25 @@ function normalizeCurrency(value) {
   return 'PYG';
 }
 
+function isEffectiveCreditNote(nota) {
+  if (!nota || nota.deleted_at) return false;
+  return String(nota.estado || '').toUpperCase() !== 'RECHAZADO';
+}
+
+function hasEffectiveTotalCreditNote(venta) {
+  const notas = Array.isArray(venta?.notas_credito) ? venta.notas_credito : [];
+  return notas.some(
+    (nota) => isEffectiveCreditNote(nota) && String(nota.tipo_ajuste || 'TOTAL').toUpperCase() === 'TOTAL'
+  );
+}
+
+function getOperationalSaldoPendiente(venta) {
+  if (hasEffectiveTotalCreditNote(venta)) {
+    return 0;
+  }
+  return Number(venta?.saldo_pendiente ?? venta?.total ?? 0);
+}
+
 function normalizeCondicionVenta(value, creditoConfig) {
   const normalized = (value || '').toString().toUpperCase();
   if (normalized.includes('CREDITO') || normalized.includes('CRÉDITO')) return 'CREDITO';
@@ -418,6 +574,75 @@ function normalizeCondicionVenta(value, creditoConfig) {
 function round(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round(Number(value) * factor + Number.EPSILON) / factor;
+}
+
+function parseReciboSeq(numero) {
+  if (!numero) return null;
+  const digits = String(numero).replace(/\D/g, '');
+  if (!digits) return null;
+  const parsed = Number(digits);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function buildReciboNumero(tx, sucursalId) {
+  const ultimo = await tx.recibo.findFirst({
+    where: {
+      sucursalId,
+      numero: { not: null }
+    },
+    orderBy: { numero: 'desc' },
+    select: { numero: true }
+  });
+  const lastSeq = parseReciboSeq(ultimo?.numero);
+  const next = (lastSeq || 0) + 1;
+  return String(next).padStart(10, '0');
+}
+
+async function createInitialDeliveryReceipt(tx, {
+  venta,
+  creditoState,
+  moneda,
+  tipoCambio,
+  usuarioId,
+  clienteId,
+  sucursalId
+}) {
+  const entregaMoneda = round(Number(creditoState?.creditoConfig?.entrega_inicial || 0), 4);
+  const entregaGs = round(Number(creditoState?.creditoConfig?.entrega_inicial_gs || 0), 2);
+  if (!(entregaMoneda > 0) || !(entregaGs > 0)) {
+    return null;
+  }
+
+  const metodo = String(creditoState?.creditoConfig?.metodo_entrega || 'EFECTIVO').toUpperCase();
+  const numero = await buildReciboNumero(tx, sucursalId);
+
+  const recibo = await tx.recibo.create({
+    data: {
+      numero,
+      clienteId: clienteId || null,
+      usuarioId,
+      sucursalId,
+      total: entregaGs,
+      total_moneda: entregaMoneda,
+      moneda,
+      tipo_cambio: moneda === 'USD' ? tipoCambio : null,
+      metodo,
+      observacion: `Entrega inicial aplicada a venta ${venta.id}`
+    }
+  });
+
+  await tx.reciboDetalle.create({
+    data: {
+      reciboId: recibo.id,
+      ventaId: venta.id,
+      monto: entregaGs,
+      monto_moneda: entregaMoneda,
+      saldo_previo: round(Number(venta.total || 0), 2),
+      saldo_posterior: round(Number(creditoState.saldoPendiente || 0), 2)
+    }
+  });
+
+  return recibo;
 }
 
 function ensureWithinLimit(value, label) {
@@ -459,10 +684,61 @@ router.get('/', async (req, res) => {
       orderBy: { fecha: 'desc' }
     });
 
+    const ventaIds = ventas.map((venta) => venta.id).filter(Boolean);
+    const recibosPorVentaId = new Map();
+    if (ventaIds.length) {
+      const recibosRelacionados = await prisma.recibo.findMany({
+        where: {
+          sucursalId: req.sucursalId,
+          aplicaciones: {
+            some: {
+              ventaId: {
+                in: ventaIds
+              }
+            }
+          }
+        },
+        select: {
+          id: true,
+          numero: true,
+          fecha: true,
+          aplicaciones: {
+            select: {
+              ventaId: true
+            }
+          }
+        },
+        orderBy: { fecha: 'desc' }
+      });
+
+      recibosRelacionados.forEach((recibo) => {
+        const ventaIdsAsociadas = Array.from(
+          new Set(
+            (Array.isArray(recibo.aplicaciones) ? recibo.aplicaciones : [])
+              .map((aplicacion) => aplicacion?.ventaId)
+              .filter(Boolean)
+          )
+        );
+
+        ventaIdsAsociadas.forEach((ventaId) => {
+          const existentes = recibosPorVentaId.get(ventaId) || [];
+          if (!existentes.some((item) => item.id === recibo.id)) {
+            existentes.push({
+              id: recibo.id,
+              numero: recibo.numero,
+              fecha: recibo.fecha
+            });
+            recibosPorVentaId.set(ventaId, existentes);
+          }
+        });
+      });
+    }
+
     // Agregar campo pdf_url y exponer info de crédito (tipo, cuotas, etc.)
     const data = serialize(ventas).map((venta) => {
       let pdf_url = null;
       let pdf_path = venta.factura_electronica?.pdf_path || null;
+      const recibos = recibosPorVentaId.get(venta.id) || [];
       if (venta.factura_electronica && venta.factura_electronica.pdf_path) {
         pdf_url = venta.factura_electronica.pdf_path;
         pdf_path = pdf_url;
@@ -480,7 +756,13 @@ router.get('/', async (req, res) => {
       if (!credito && venta.es_credito && venta.fecha_vencimiento) {
         credito = { tipo: 'PLAZO', fecha_vencimiento: venta.fecha_vencimiento };
       }
-      return { ...venta, pdf_url, credito };
+      return {
+        ...venta,
+        pdf_url,
+        credito,
+        recibos,
+        saldo_pendiente: getOperationalSaldoPendiente(venta)
+      };
     });
     const resumen = data.reduce(
       (acc, venta) => {
@@ -716,6 +998,48 @@ router.post('/:id/nota-credito', authorizeRoles('ADMIN'), async (req, res) => {
       }
     }
 
+    if (String(notaActualizada.estado || '').toUpperCase() !== 'RECHAZADO') {
+      const detalleVentaMap = new Map(
+        (Array.isArray(venta.detalles) ? venta.detalles : []).map((detalle) => [detalle.id, detalle])
+      );
+
+      await prisma.$transaction(async (tx) => {
+        for (const detalleNota of notaCreditoCalculada.detalles) {
+          if (!detalleNota.productoId || !(Number(detalleNota.cantidad) > 0)) {
+            continue;
+          }
+
+          const detalleVenta = detalleVentaMap.get(detalleNota.detalleVentaId);
+          const producto = detalleVenta?.producto || await tx.producto.findUnique({ where: { id: detalleNota.productoId } });
+          if (!producto) {
+            continue;
+          }
+
+          await applyProductoStockDelta(tx, producto, req.sucursalId, Number(detalleNota.cantidad));
+          await tx.movimientoStock.create({
+            data: {
+              productoId: detalleNota.productoId,
+              tipo: 'ENTRADA',
+              cantidad: Number(detalleNota.cantidad),
+              motivo: `Nota de crédito ${notaActualizada.nro_nota || ''}: ${motivo}`.trim(),
+              referencia_id: notaActualizada.id,
+              referencia_tipo: 'NotaCreditoElectronica',
+              usuario_id: venta.usuarioId
+            }
+          });
+        }
+
+        if (String(notaActualizada.tipo_ajuste || 'TOTAL').toUpperCase() === 'TOTAL') {
+          await tx.venta.update({
+            where: { id: venta.id },
+            data: {
+              saldo_pendiente: 0
+            }
+          });
+        }
+      });
+    }
+
     return res.status(201).json({
       nota_credito: serialize(notaActualizada),
       pdf_url: notaActualizada.pdf_path || null
@@ -851,9 +1175,15 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
       }
 
       const condicionVenta = normalizeCondicionVenta(payload.condicion_venta, payload.credito);
-      const esCredito = condicionVenta === 'CREDITO';
-      const fechaVencimiento = payload.fecha_vencimiento || payload.credito?.fecha_vencimiento || null;
-      const saldoPendiente = esCredito ? total : null;
+      const creditoState = buildVentaCreditoState({
+        condicionVenta,
+        creditoInput: payload.credito,
+        fechaVencimiento: payload.fecha_vencimiento || payload.credito?.fecha_vencimiento || null,
+        moneda: monedaSeleccionada,
+        tipoCambio: tipoCambioSeleccionado,
+        totalGs: total,
+        totalMoneda: totalEnMonedaSeleccionada
+      });
 
       let clienteId = payload.clienteId || null;
       if (clienteId) {
@@ -878,12 +1208,24 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
           total_moneda: totalEnMonedaSeleccionada,
           iva_porcentaje: ivaPorcentaje,
           condicion_venta: condicionVenta,
-          es_credito: esCredito,
-          fecha_vencimiento: fechaVencimiento || undefined,
-          saldo_pendiente: saldoPendiente,
-          credito_config: payload.credito ? payload.credito : null
+          es_credito: creditoState.esCredito,
+          fecha_vencimiento: creditoState.fechaVencimiento || undefined,
+          saldo_pendiente: creditoState.saldoPendiente,
+          credito_config: creditoState.creditoConfig
         }
       });
+
+      if (creditoState.esCredito && Number(creditoState.creditoConfig?.entrega_inicial_gs || 0) > 0) {
+        await createInitialDeliveryReceipt(tx, {
+          venta,
+          creditoState,
+          moneda: monedaSeleccionada,
+          tipoCambio: tipoCambioSeleccionado,
+          usuarioId: payload.usuarioId,
+          clienteId,
+          sucursalId: req.sucursalId
+        });
+      }
 
       for (const detalle of detallePayloads) {
         await tx.detalleVenta.create({
@@ -992,6 +1334,7 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
     let venta = null;
     let factura = null;
     let lastError = null;
+    let localPdfWebPath = null;
 
     for (let attempt = 0; attempt < MAX_FACTURA_REINTENTOS && !venta; attempt += 1) {
       try {
@@ -1022,33 +1365,48 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
             facturarInput.condicion_pago || ventaActual.condicion_venta,
             facturarInput.credito
           );
-          const esCreditoFacturacion = condicionVentaFacturacion === 'CREDITO';
-          const fechaVencimientoFacturacion =
-            facturarInput.fecha_vencimiento || facturarInput.credito?.fecha_vencimiento || ventaActual.fecha_vencimiento || null;
-          const saldoPendienteFacturacion = esCreditoFacturacion
-            ? Number(ventaActual.saldo_pendiente ?? ventaActual.total ?? 0)
-            : null;
+          const creditoStateFacturacion = buildVentaCreditoState({
+            condicionVenta: condicionVentaFacturacion,
+            creditoInput: facturarInput.credito || ventaActual.credito_config,
+            fechaVencimiento:
+              facturarInput.fecha_vencimiento ||
+              facturarInput.credito?.fecha_vencimiento ||
+              ventaActual.fecha_vencimiento ||
+              ventaActual.credito_config?.fecha_vencimiento ||
+              null,
+            moneda: ventaActual.moneda,
+            tipoCambio: ventaActual.tipo_cambio,
+            totalGs: ventaActual.total,
+            totalMoneda: ventaActual.total_moneda
+          });
+          const creditoConfigChanged =
+            creditoConfigComparable(creditoStateFacturacion.creditoConfig) !== creditoConfigComparable(ventaActual.credito_config);
 
           if (
             condicionVentaFacturacion !== ventaActual.condicion_venta ||
-            esCreditoFacturacion !== ventaActual.es_credito ||
-            fechaVencimientoFacturacion ||
-            (!esCreditoFacturacion && ventaActual.saldo_pendiente)
+            creditoStateFacturacion.esCredito !== ventaActual.es_credito ||
+            String(creditoStateFacturacion.fechaVencimiento || '') !== String(ventaActual.fecha_vencimiento || '') ||
+            (!creditoStateFacturacion.esCredito && ventaActual.saldo_pendiente) ||
+            creditoConfigChanged ||
+            (creditoStateFacturacion.esCredito &&
+              Math.abs(Number(ventaActual.saldo_pendiente || 0) - Number(creditoStateFacturacion.saldoPendiente || 0)) > 0.01)
           ) {
             await tx.venta.update({
               where: { id: ventaActual.id },
               data: {
                 condicion_venta: condicionVentaFacturacion,
-                es_credito: esCreditoFacturacion,
-                fecha_vencimiento: fechaVencimientoFacturacion || undefined,
-                saldo_pendiente: esCreditoFacturacion ? saldoPendienteFacturacion : null
+                es_credito: creditoStateFacturacion.esCredito,
+                fecha_vencimiento: creditoStateFacturacion.fechaVencimiento || undefined,
+                saldo_pendiente: creditoStateFacturacion.esCredito ? creditoStateFacturacion.saldoPendiente : null,
+                credito_config: creditoStateFacturacion.creditoConfig
               }
             });
 
             ventaActual.condicion_venta = condicionVentaFacturacion;
-            ventaActual.es_credito = esCreditoFacturacion;
-            ventaActual.fecha_vencimiento = fechaVencimientoFacturacion;
-            ventaActual.saldo_pendiente = esCreditoFacturacion ? saldoPendienteFacturacion : null;
+            ventaActual.es_credito = creditoStateFacturacion.esCredito;
+            ventaActual.fecha_vencimiento = creditoStateFacturacion.fechaVencimiento;
+            ventaActual.saldo_pendiente = creditoStateFacturacion.esCredito ? creditoStateFacturacion.saldoPendiente : null;
+            ventaActual.credito_config = creditoStateFacturacion.creditoConfig;
           }
 
           if (ventaActual.deleted_at || (ventaActual.estado && ventaActual.estado.toUpperCase() === 'ANULADA')) {
@@ -1143,6 +1501,7 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
     let facturaActualizada = factura;
     try {
       const files = await generarArchivosFactura(venta, factura);
+      localPdfWebPath = files?.pdfWebPath || null;
       if (files?.pdfWebPath && files.pdfWebPath !== factura.pdf_path) {
         facturaActualizada = await prisma.facturaElectronica.update({
           where: { id: factura.id },
@@ -1183,13 +1542,16 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
           timestamp: new Date().toISOString()
         };
 
+        const factpyXmlUrl = normalizeFactpyExternalUrl(respuestaFactpy?.xmlLink);
+        const factpyPdfUrl = normalizeFactpyExternalUrl(respuestaFactpy?.kude);
+
         facturaActualizada = await prisma.facturaElectronica.update({
           where: { id: facturaActualizada.id },
           data: {
             respuesta_set: mergedRespuesta,
             qr_data: respuestaFactpy?.cdc || facturaActualizada.qr_data,
-            xml_path: respuestaFactpy?.xmlLink || facturaActualizada.xml_path,
-            pdf_path: respuestaFactpy?.kude || facturaActualizada.pdf_path,
+            xml_path: factpyXmlUrl || facturaActualizada.xml_path,
+            pdf_path: factpyPdfUrl || facturaActualizada.pdf_path,
             estado: estadoFactpy
           }
         });
@@ -1213,7 +1575,11 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
       }
     }
 
-    res.json({ venta: serialize(venta), factura: serialize(facturaActualizada) });
+    res.json({
+      venta: serialize(venta),
+      factura: serialize(facturaActualizada),
+      factura_local_pdf_url: localPdfWebPath
+    });
   } catch (err) {
     if (err instanceof VentaValidationError) {
       return res.status(400).json({ error: err.message });
@@ -2473,6 +2839,18 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
 
   const creditoConfig = opciones?.credito || venta?.credito_config || venta?.factura_electronica?.respuesta_set?.credito;
   const fechaVencimiento = opciones?.fecha_vencimiento || creditoConfig?.fecha_vencimiento || venta?.fecha_vencimiento;
+  const entregaInicial = round(Number(creditoConfig?.entrega_inicial) || 0, 4);
+  const saldoFinanciado = Number.isFinite(Number(creditoConfig?.saldo_financiado))
+    ? round(Number(creditoConfig.saldo_financiado), 4)
+    : round(Math.max(totalPago - entregaInicial, 0), 4);
+  const pagos = entregaInicial > 0
+    ? [
+        {
+          tipoPago: '1',
+          monto: entregaInicial
+        }
+      ]
+    : [];
 
   const cuotasNormalizadas = normalizeCuotas(creditoConfig?.cuotas);
   if (creditoConfig && (creditoConfig?.tipo === 'CUOTAS' || cuotasNormalizadas.length)) {
@@ -2481,7 +2859,7 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
       : [
           {
             numero: 1,
-            monto: totalPago,
+            monto: saldoFinanciado,
             fechaVencimiento: toDateOnlyString(fechaVencimiento) || toDateOnlyString(fechaEmision)
           }
         ];
@@ -2490,12 +2868,7 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
     return {
       condicionVenta,
       condicionPago: 2,
-      pagos: [
-        {
-          tipoPago: '1',
-          monto: totalPago
-        }
-      ],
+      pagos,
       credito: {
         condicionCredito: 2,
           cantidadCuota: cantidadCuota,
@@ -2514,12 +2887,7 @@ function buildCreditoSection(venta, opciones, totalPago, fechaEmision) {
   return {
     condicionVenta,
     condicionPago: 2,
-    pagos: [
-      {
-        tipoPago: '1',
-        monto: totalPago
-      }
-    ],
+    pagos,
     credito: {
       condicionCredito: 1,
       descripcion
@@ -2581,7 +2949,7 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     return round(valor, 2);
   };
 
-  const items = Array.isArray(venta?.detalles)
+  const rawItems = Array.isArray(venta?.detalles)
     ? venta.detalles.map((detalle, idx) => {
         const cantidad = Number(detalle?.cantidad) || 1;
         const snapshot = getSaleDetailSnapshot(detalle, venta);
@@ -2590,15 +2958,12 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
         const precioUnitario = moneda === 'USD'
           ? (snapshot.unitCurrency ?? precioUnitarioConvertido ?? round(precioUnitarioGs, 4))
           : (snapshot.unitCurrency ?? round(precioUnitarioGs, 2));
-        const precioTotal = moneda === 'USD'
+        const precioTotalBruto = moneda === 'USD'
           ? round(snapshot.subtotalCurrency ?? (precioUnitario * cantidad), 4)
           : round(snapshot.subtotalCurrency ?? (precioUnitario * cantidad), 2);
         const ivaTasaRaw =
           detalle?.iva_porcentaje ?? detalle?.producto?.iva_porcentaje ?? venta?.iva_porcentaje;
         const ivaTasa = Number.isFinite(Number(ivaTasaRaw)) ? Number(ivaTasaRaw) : 10;
-        const divisor = ivaTasa === 5 ? 1.05 : ivaTasa === 10 ? 1.1 : 1;
-        const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
-        const liqIvaItem = ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
         const descripcion = detalle?.producto?.nombre || 'Item de venta';
         const codigo = detalle?.producto?.sku || detalle?.productoId || `ITEM-${idx + 1}`;
         return {
@@ -2609,35 +2974,52 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
           ivaAfecta: ivaTasa === 0 ? 0 : 1,
           cantidad,
           precioUnitario,
-          precioTotal,
-          baseGravItem,
-          liqIvaItem
+          precioTotalBruto
         };
       })
     : [];
 
-  const totalPagoBruto = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
+  const totalPagoBruto = round(rawItems.reduce((sum, item) => sum + (Number(item.precioTotalBruto) || 0), 0), 4);
   const descuentoAplicable = totalPagoBruto > 0 ? Math.min(descuentoTotal, totalPagoBruto) : 0;
-  const itemsConDescuento = totalPagoBruto > 0 && descuentoAplicable > 0
-    ? items.map((item) => {
-        const proporcion = Number(item.precioTotal) / totalPagoBruto;
-        const descuentoItem = round(proporcion * descuentoAplicable, 4);
-        const precioTotalAjustado = Math.max(round(item.precioTotal - descuentoItem, 4), 0);
-        const precioUnitarioAjustado = item.cantidad ? round(precioTotalAjustado / item.cantidad, 4) : precioTotalAjustado;
-        const divisor = item.ivaTasa === 5 ? 1.05 : 1.1;
-        const baseGravItem = Number((precioTotalAjustado / divisor).toFixed(8));
-        const liqIvaItem = Number((precioTotalAjustado - baseGravItem).toFixed(8));
-        return {
-          ...item,
-          precioUnitario: precioUnitarioAjustado,
-          precioTotal: precioTotalAjustado,
-          baseGravItem,
-          liqIvaItem
-        };
-      })
-    : items;
+  const decimals = moneda === 'USD' ? 4 : 2;
+  const lastIndex = rawItems.length - 1;
+  let descuentoAsignado = 0;
 
-  const totalPago = round(itemsConDescuento.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
+  const items = rawItems.map((item, idx) => {
+    const bruto = Number(item.precioTotalBruto) || 0;
+    const descuentoLinea = (() => {
+      if (descuentoAplicable <= 0 || totalPagoBruto <= 0) return 0;
+      if (idx === lastIndex) {
+        return round(Math.max(descuentoAplicable - descuentoAsignado, 0), decimals);
+      }
+      const proporcional = round((descuentoAplicable * bruto) / totalPagoBruto, decimals);
+      descuentoAsignado += proporcional;
+      return proporcional;
+    })();
+    const descuentoUnitario = item.cantidad > 0
+      ? Number((descuentoLinea / item.cantidad).toFixed(8))
+      : 0;
+    const precioTotal = round(Math.max(bruto - descuentoLinea, 0), decimals);
+    const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
+    const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
+    const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
+
+    return {
+      descripcion: item.descripcion,
+      codigo: item.codigo,
+      unidadMedida: item.unidadMedida,
+      ivaTasa: item.ivaTasa,
+      ivaAfecta: item.ivaAfecta,
+      cantidad: item.cantidad,
+      descuento: descuentoUnitario,
+      precioUnitario: item.precioUnitario,
+      precioTotal,
+      baseGravItem,
+      liqIvaItem
+    };
+  });
+
+  const totalPago = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
 
   const totalMoneda = moneda === 'USD'
     ? round(Number(venta?.total_moneda) || totalPago, 4)
@@ -2679,9 +3061,10 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       dncp: 0
     },
     codigoSeguridadAleatorio: random9,
-    items: itemsConDescuento,
+    items,
     pagos: credito.pagos,
     ...(credito.credito ? { credito: credito.credito } : {}),
+    descuentoGlobal: 0,
     totalPago,
     totalGs,
     // mantenemos totalPagoGs para compatibilidad con integraciones previas

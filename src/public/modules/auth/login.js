@@ -15,7 +15,8 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
   const feedback = document.getElementById('login-feedback');
   const logoutButton = document.getElementById('logout-button');
   const sessionInfo = document.getElementById('session-info');
-  const sessionUser = document.getElementById('session-user');
+  const sessionUserName = document.getElementById('session-user-name');
+  const sessionUserRole = document.getElementById('session-user-role');
   const sucursalActive = document.getElementById('sucursal-active');
   const sucursalPicker = document.getElementById('sucursal-picker');
   const sucursalSelector = document.getElementById('sucursal-selector');
@@ -97,16 +98,29 @@ export function initAuth({ onAuthenticated, onLogout } = {}) {
   }
 
   function renderSessionInfo(usuario) {
-    if (!sessionInfo || !sessionUser) return;
+    if (!sessionInfo || !sessionUserName) return;
     if (!usuario) {
       sessionInfo.hidden = true;
-      sessionUser.textContent = '';
+      sessionUserName.textContent = '';
+      if (sessionUserRole) {
+        sessionUserRole.textContent = '';
+        sessionUserRole.hidden = true;
+      }
       toggleSucursalPicker(null);
       updateSucursalBadge('');
       return;
     }
     sessionInfo.hidden = false;
-    sessionUser.textContent = usuario.rol ? `${usuario.nombre} · ${usuario.rol}` : usuario.nombre;
+    sessionUserName.textContent = usuario.nombre || 'Usuario';
+    if (sessionUserRole) {
+      if (usuario.rol) {
+        sessionUserRole.hidden = false;
+        sessionUserRole.textContent = usuario.rol;
+      } else {
+        sessionUserRole.textContent = '';
+        sessionUserRole.hidden = true;
+      }
+    }
     renderSucursalSelector(usuario);
   }
 

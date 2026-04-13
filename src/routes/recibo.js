@@ -11,6 +11,17 @@ const { requireSucursal } = require('../middleware/sucursalContext');
 const router = express.Router();
 const MAX_RECIBO_REINTENTOS = 3;
 
+function isEffectiveCreditNote(nota) {
+  return Boolean(nota) && String(nota.estado || '').toUpperCase() !== 'RECHAZADO';
+}
+
+function hasEffectiveTotalCreditNote(venta) {
+  const notas = Array.isArray(venta?.notas_credito) ? venta.notas_credito : [];
+  return notas.some(
+    (nota) => isEffectiveCreditNote(nota) && String(nota.tipo_ajuste || 'TOTAL').toUpperCase() === 'TOTAL'
+  );
+}
+
 const ventaAplicacionSchema = z.object({
   ventaId: z.string().uuid({ message: 'ventaId inválido' }),
   monto: z.coerce.number().positive('El monto debe ser mayor a cero'),
@@ -192,6 +203,16 @@ router.post('/', async (req, res) => {
               id: { in: uniqueVentaIds },
               sucursalId: req.sucursalId,
               deleted_at: null
+            },
+            include: {
+              notas_credito: {
+                where: { deleted_at: null },
+                select: {
+                  id: true,
+                  estado: true,
+                  tipo_ajuste: true
+                }
+              }
             }
           });
 
@@ -200,7 +221,7 @@ router.post('/', async (req, res) => {
           }
 
           const ventaMap = new Map(ventas.map((v) => [v.id, v]));
-          const saldos = new Map(ventas.map((v) => [v.id, Number(v.saldo_pendiente ?? v.total ?? 0)]));
+          const saldos = new Map(ventas.map((v) => [v.id, hasEffectiveTotalCreditNote(v) ? 0 : Number(v.saldo_pendiente ?? v.total ?? 0)]));
           const clienteId = data.clienteId || ventas[0]?.clienteId || null;
           let numeroPersonalizado = data.numero || null;
           const recibosCreados = [];
@@ -210,17 +231,20 @@ router.post('/', async (req, res) => {
             const tipoCambioPago = monedaPago === 'USD' ? Number(pago.tipo_cambio) : null;
             const aplicacionesCalculadas = pago.ventas.map((item) => {
               const venta = ventaMap.get(item.ventaId);
+              if (hasEffectiveTotalCreditNote(venta)) {
+                throw new Error(`VENTA_REGULARIZADA_CON_NC:${item.ventaId}`);
+              }
               const saldoPrevio = saldos.get(item.ventaId) ?? Number(venta?.saldo_pendiente ?? venta?.total ?? 0);
               const ventaMoneda = normalizeCurrency(venta?.moneda || venta?.moneda_venta);
               const ventaEsUsd = ventaMoneda === 'USD';
               const montoMoneda = Number(item.monto || 0);
               const cuotasSeleccionadas = Array.isArray(item.cuotas) ? item.cuotas : [];
+              const montoCuotasSeleccionadas = getSelectedCuotasPendingAmount(venta, cuotasSeleccionadas);
               let montoGs = monedaPago === 'USD' && tipoCambioPago ? montoMoneda * tipoCambioPago : montoMoneda;
               let saldoPrevioMonedaVenta = null;
 
               if (ventaEsUsd && monedaPago === 'USD') {
                 saldoPrevioMonedaVenta = getVentaSaldoPendienteMoneda(venta, saldoPrevio);
-                const montoCuotasSeleccionadas = getSelectedCuotasPendingAmount(venta, cuotasSeleccionadas);
                 if (montoCuotasSeleccionadas > 0 && montoMoneda > montoCuotasSeleccionadas + 0.01) {
                   throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
                 }
@@ -230,6 +254,28 @@ router.post('/', async (req, res) => {
                 if (saldoPrevioMonedaVenta > 0) {
                   montoGs = roundAmount((saldoPrevio * montoMoneda) / saldoPrevioMonedaVenta, 2);
                 }
+              } else {
+                const montoMaximoGs = montoCuotasSeleccionadas > 0
+                  ? Math.min(montoCuotasSeleccionadas, saldoPrevio)
+                  : saldoPrevio;
+
+                if (monedaPago === 'USD' && tipoCambioPago) {
+                  const montoMaximoUsd = ceilAmount(montoMaximoGs / tipoCambioPago, 2);
+                  if (montoMoneda > montoMaximoUsd + 0.01) {
+                    throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
+                  }
+                  montoGs = roundAmount(montoMoneda * tipoCambioPago, 2);
+                  const toleranciaResidualGs = getUsdMinorUnitInGs(tipoCambioPago);
+                  const saldoResidualGs = roundAmount(montoMaximoGs - montoGs, 2);
+                  if (saldoResidualGs >= 0 && saldoResidualGs <= toleranciaResidualGs) {
+                    montoGs = montoMaximoGs;
+                  }
+                  if (montoGs > montoMaximoGs + 0.01) {
+                    montoGs = montoMaximoGs;
+                  }
+                } else if (montoGs > montoMaximoGs + 0.01) {
+                  throw new Error(`MONTO_EXCEDE_SALDO:${item.ventaId}`);
+                }
               }
 
               if (montoGs > saldoPrevio + 0.01) {
@@ -238,7 +284,14 @@ router.post('/', async (req, res) => {
                 }
                 montoGs = saldoPrevio;
               }
-              const saldoPosterior = Math.max(saldoPrevio - montoGs, 0);
+              let saldoPosterior = Math.max(saldoPrevio - montoGs, 0);
+              if (monedaPago === 'USD' && tipoCambioPago) {
+                const toleranciaResidualGs = getUsdMinorUnitInGs(tipoCambioPago);
+                if (saldoPosterior > 0 && saldoPosterior <= toleranciaResidualGs) {
+                  montoGs = saldoPrevio;
+                  saldoPosterior = 0;
+                }
+              }
               saldos.set(item.ventaId, saldoPosterior);
               return {
                 ...item,
@@ -394,6 +447,10 @@ router.post('/', async (req, res) => {
       const ventaId = err.message.split(':')[1];
       return res.status(400).json({ error: `El monto supera el saldo pendiente de la venta ${ventaId}.` });
     }
+    if (err?.message?.startsWith('VENTA_REGULARIZADA_CON_NC:')) {
+      const ventaId = err.message.split(':')[1];
+      return res.status(409).json({ error: `La venta ${ventaId} ya fue regularizada con una nota de crédito total.` });
+    }
     console.error('[Recibos] No se pudo crear el recibo.', err);
     return res.status(500).json({ error: 'No se pudo crear el recibo.' });
   }
@@ -418,6 +475,15 @@ function normalizeCurrency(value) {
 function roundAmount(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.round((Number(value) || 0) * factor) / factor;
+}
+
+function ceilAmount(value, decimals = 2) {
+  const factor = 10 ** decimals;
+  return Math.ceil(((Number(value) || 0) * factor) - Number.EPSILON) / factor;
+}
+
+function getUsdMinorUnitInGs(tipoCambio) {
+  return roundAmount(Number(tipoCambio || 0) * 0.01, 2);
 }
 
 function getVentaCreditoCuotas(venta) {

@@ -40,6 +40,19 @@ function ensureDate(input, fallback = new Date()) {
   return date;
 }
 
+function normalizeMetodoCobro(value) {
+  const metodo = String(value || 'EFECTIVO').trim().toUpperCase();
+  if (metodo.includes('TRANSFER')) return 'TRANSFERENCIA';
+  if (metodo.includes('TARJETA')) return 'TARJETA';
+  return 'EFECTIVO';
+}
+
+function isVentaCredito(venta) {
+  if (venta?.es_credito === true) return true;
+  const condicion = String(venta?.condicion_venta || '').trim().toUpperCase();
+  return condicion === 'CREDITO' || condicion === 'CRÉDITO';
+}
+
 const currencyFormatter = new Intl.NumberFormat('es-PY', { style: 'currency', currency: 'PYG' });
 const currencyFormatterUsd = new Intl.NumberFormat('es-PY', { style: 'currency', currency: 'USD' });
 
@@ -126,6 +139,26 @@ async function calcularResumen(client, { usuarioId, fechaHasta, sucursalId }) {
       total: true,
       total_moneda: true,
       moneda: true,
+      estado: true,
+      es_credito: true,
+      condicion_venta: true
+    }
+  });
+
+  const recibos = await client.recibo.findMany({
+    where: {
+      usuarioId,
+      sucursalId,
+      fecha: {
+        gte: fechaInicio,
+        lte: upperBound
+      }
+    },
+    select: {
+      total: true,
+      total_moneda: true,
+      moneda: true,
+      metodo: true,
       estado: true
     }
   });
@@ -151,7 +184,58 @@ async function calcularResumen(client, { usuarioId, fechaHasta, sucursalId }) {
 
   const totalVentasGs = totalesVentas.gs;
   const totalVentasUsd = totalesVentas.usd;
-  const totalEfectivoUsd = totalVentasUsd; // por ahora todas las ventas USD se consideran efectivo
+
+  const ingresosContado = ventas
+    .filter((venta) => {
+      if (venta?.estado && String(venta.estado).toUpperCase() === 'ANULADA') return false;
+      return !isVentaCredito(venta);
+    })
+    .reduce(
+      (acc, venta) => {
+        acc.efectivo += Number(venta.total || 0);
+        if ((venta.moneda || 'PYG').toUpperCase() === 'USD') {
+          const usdAmount = Number(venta.total_moneda || 0);
+          if (Number.isFinite(usdAmount)) {
+            acc.efectivoUsd += usdAmount;
+          }
+        }
+        return acc;
+      },
+      { efectivo: 0, efectivoUsd: 0 }
+    );
+
+  const cobrosRegistrados = recibos
+    .filter((recibo) => {
+      const estado = String(recibo?.estado || '').trim().toUpperCase();
+      return estado !== 'ANULADO';
+    })
+    .reduce(
+      (acc, recibo) => {
+        const metodo = normalizeMetodoCobro(recibo.metodo);
+        const totalGs = Number(recibo.total || 0);
+        const totalMoneda = Number(recibo.total_moneda || 0);
+        const moneda = String(recibo.moneda || 'PYG').trim().toUpperCase();
+
+        if (metodo === 'TARJETA') {
+          acc.tarjeta += totalGs;
+        } else if (metodo === 'TRANSFERENCIA') {
+          acc.transferencia += totalGs;
+        } else {
+          acc.efectivo += totalGs;
+          if (moneda === 'USD' && Number.isFinite(totalMoneda)) {
+            acc.efectivoUsd += totalMoneda;
+          }
+        }
+
+        return acc;
+      },
+      { efectivo: 0, efectivoUsd: 0, tarjeta: 0, transferencia: 0 }
+    );
+
+  const totalEfectivoGs = round(ingresosContado.efectivo + cobrosRegistrados.efectivo);
+  const totalEfectivoUsd = round(ingresosContado.efectivoUsd + cobrosRegistrados.efectivoUsd);
+  const totalTarjeta = round(cobrosRegistrados.tarjeta);
+  const totalTransferencia = round(cobrosRegistrados.transferencia);
 
   const salidasPendientes = await client.salidaCaja.findMany({
     where: {
@@ -170,7 +254,7 @@ async function calcularResumen(client, { usuarioId, fechaHasta, sucursalId }) {
   const totalSalidas = salidasPendientes.reduce((acc, salida) => acc + Number(salida.monto || 0), 0);
   const saldoInicial = Number(apertura.saldo_inicial || 0);
 
-  const efectivoEsperadoGs = round(saldoInicial + totalVentasGs - totalSalidas);
+  const efectivoEsperadoGs = round(saldoInicial + totalEfectivoGs - totalSalidas);
   const efectivoEsperadoUsd = round(totalEfectivoUsd);
 
   return {
@@ -180,9 +264,9 @@ async function calcularResumen(client, { usuarioId, fechaHasta, sucursalId }) {
       ventas: round(totalVentasGs),
       ventasUsd: round(totalVentasUsd),
       efectivoUsd: round(totalEfectivoUsd),
-      efectivo: round(totalVentasGs),
-      tarjeta: 0,
-      transferencia: 0,
+      efectivo: totalEfectivoGs,
+      tarjeta: totalTarjeta,
+      transferencia: totalTransferencia,
       saldoInicial: round(saldoInicial),
       salidas: round(totalSalidas),
       efectivoEsperado: efectivoEsperadoGs,
@@ -338,7 +422,14 @@ router.post('/', validate(createCierreSchema), async (req, res) => {
     const totalVentasUsd = resumen.totales.ventasUsd || 0;
     const totalEfectivoUsd = resumen.totales.efectivoUsd || 0;
 
-    const totalEfectivoVentas = round(Math.max(resumen.totales.ventas - totalTarjeta - totalTransferencia, 0));
+    const totalEfectivoVentas = round(
+      Math.max(
+        Number(resumen.totales.efectivo || 0) -
+          (totalTarjeta - Number(resumen.totales.tarjeta || 0)) -
+          (totalTransferencia - Number(resumen.totales.transferencia || 0)),
+        0
+      )
+    );
     const efectivoEsperado = round(
       resumen.totales.saldoInicial + totalEfectivoVentas - resumen.totales.salidas
     );

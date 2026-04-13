@@ -202,6 +202,102 @@ describe('Cierre de Caja API', () => {
     expect(estadoPosterior.body.error).toMatch(/apertura activa/i);
   });
 
+  test('estado y cierre cuentan solo cobros reales para ventas a crédito con entrega inicial', async () => {
+    await crearApertura({ saldo: 250000, minuto: 0 });
+
+    const ventaCredito = await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        subtotal: 1000000,
+        total: 1000000,
+        estado: 'COMPLETADA',
+        fecha: fechaRelativa(30),
+        moneda: 'PYG',
+        condicion_venta: 'CREDITO',
+        es_credito: true,
+        saldo_pendiente: 700000,
+        credito_config: {
+          entrega_inicial: 300000,
+          entrega_inicial_gs: 300000,
+          metodo_entrega: 'EFECTIVO'
+        }
+      }
+    });
+
+    const reciboEntrega = await prisma.recibo.create({
+      data: {
+        numero: 'REC-INI-001',
+        clienteId: null,
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        fecha: fechaRelativa(31),
+        total: 300000,
+        moneda: 'PYG',
+        metodo: 'EFECTIVO',
+        estado: 'CONFIRMADO'
+      }
+    });
+
+    await prisma.reciboDetalle.create({
+      data: {
+        reciboId: reciboEntrega.id,
+        ventaId: ventaCredito.id,
+        monto: 300000,
+        saldo_previo: 1000000,
+        saldo_posterior: 700000
+      }
+    });
+
+    const reciboCuota = await prisma.recibo.create({
+      data: {
+        numero: 'REC-CUO-001',
+        clienteId: null,
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        fecha: fechaRelativa(120),
+        total: 200000,
+        moneda: 'PYG',
+        metodo: 'TRANSFERENCIA',
+        estado: 'CONFIRMADO'
+      }
+    });
+
+    await prisma.reciboDetalle.create({
+      data: {
+        reciboId: reciboCuota.id,
+        ventaId: ventaCredito.id,
+        monto: 200000,
+        saldo_previo: 700000,
+        saldo_posterior: 500000
+      }
+    });
+
+    const estadoRes = await request(app)
+      .get(`/cierres-caja/estado?usuarioId=${usuario.id}`)
+      .expect(200);
+
+    expect(estadoRes.body.totales.ventas).toBeCloseTo(1000000, 2);
+    expect(estadoRes.body.totales.efectivo).toBeCloseTo(300000, 2);
+    expect(estadoRes.body.totales.transferencia).toBeCloseTo(200000, 2);
+    expect(estadoRes.body.totales.tarjeta).toBeCloseTo(0, 2);
+    expect(estadoRes.body.totales.efectivoEsperado).toBeCloseTo(550000, 2);
+
+    const cierreRes = await request(app)
+      .post('/cierres-caja')
+      .send({
+        usuarioId: usuario.id,
+        fecha_cierre: fechaRelativa(300),
+        efectivo_declarado: 550000
+      })
+      .expect(201);
+
+    expect(cierreRes.body.total_ventas).toBeCloseTo(1000000, 2);
+    expect(cierreRes.body.total_efectivo).toBeCloseTo(300000, 2);
+    expect(cierreRes.body.total_transferencia).toBeCloseTo(200000, 2);
+    expect(Number(cierreRes.body.diferencia)).toBeCloseTo(0, 2);
+  });
+
   test('registrar salida sin cierre y listarla', async () => {
     await crearSalidaPendiente(100000, { descripcion: 'Compra insumos' });
 

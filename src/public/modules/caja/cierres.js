@@ -146,6 +146,62 @@ function buildDetalleMensaje(cierre) {
   return lineas.join('\n');
 }
 
+function openDetalleDialog(message) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'caja-dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'caja-dialog caja-dialog--info';
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Detalle del cierre';
+
+    const description = document.createElement('p');
+    description.className = 'caja-dialog__description';
+    description.textContent = 'Resumen del cierre y sus salidas asociadas.';
+
+    const body = document.createElement('div');
+    body.className = 'caja-dialog__body';
+
+    const list = document.createElement('ul');
+    list.className = 'caja-dialog__list';
+    String(message || '')
+      .split('\n')
+      .filter(Boolean)
+      .forEach((line) => {
+        const item = document.createElement('li');
+        item.textContent = line;
+        list.appendChild(item);
+      });
+    body.appendChild(list);
+
+    const actions = document.createElement('div');
+    actions.className = 'caja-dialog__actions';
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'btn primary';
+    closeButton.textContent = 'Cerrar';
+
+    const cleanup = () => {
+      overlay.remove();
+      resolve();
+    };
+
+    closeButton.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) cleanup();
+    });
+
+    actions.appendChild(closeButton);
+    dialog.append(heading, description, body, actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    closeButton.focus();
+  });
+}
+
 export const cierresCajaModule = {
   key: 'cierres-caja',
   label: 'Cierres de Caja',
@@ -208,12 +264,12 @@ export const cierresCajaModule = {
       try {
         const detalle = await request(`/caja/cierres/${id}`);
         const mensaje = buildDetalleMensaje(detalle);
-        if (typeof window !== 'undefined') {
-          window.alert(mensaje);
-        } else {
-          showMessage('Detalle disponible en la consola.', 'info');
-          console.info(mensaje);
+        if (typeof document !== 'undefined') {
+          await openDetalleDialog(mensaje);
+          return;
         }
+        showMessage('Detalle disponible en la consola.', 'info');
+        console.info(mensaje);
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo obtener el detalle del cierre.', 'error');

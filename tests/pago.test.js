@@ -164,4 +164,50 @@ describe('Pagos API', () => {
 
     expect(response.body.error).toMatch(/venta no encontrada/i);
   });
+
+  test('rechaza pagos sobre una venta regularizada con nota de crédito total', async () => {
+    const factura = await prisma.facturaElectronica.create({
+      data: {
+        ventaId: ventaCredito.id,
+        sucursalId: sucursal.id,
+        nro_factura: '001-001-PAGO-NC',
+        timbrado: '12345678',
+        fecha_emision: new Date('2026-06-01T10:00:00.000Z'),
+        estado: 'PAGADA'
+      }
+    });
+
+    await prisma.venta.update({
+      where: { id: ventaCredito.id },
+      data: { saldo_pendiente: 0 }
+    });
+
+    await prisma.notaCreditoElectronica.create({
+      data: {
+        ventaId: ventaCredito.id,
+        facturaElectronicaId: factura.id,
+        sucursalId: sucursal.id,
+        nro_nota: '001-001-0000002',
+        timbrado: '12345678',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 2,
+        motivo: 'Anulación total de prueba',
+        tipo_ajuste: 'TOTAL',
+        moneda: 'PYG',
+        total: -300000,
+        estado: 'ENVIADO'
+      }
+    });
+
+    const response = await auth(request(app).post('/pagos'))
+      .send({
+        ventaId: ventaCredito.id,
+        monto: 10000,
+        metodo: 'EFECTIVO'
+      })
+      .expect(409);
+
+    expect(response.body.error).toMatch(/nota de crédito total|regularizada/i);
+  });
 });

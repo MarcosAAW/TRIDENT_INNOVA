@@ -1,10 +1,12 @@
 import { formatCurrency, formatDate, formatNumber } from './format.js';
+import { confirmDialog } from './dialogs.js';
 
 export function initDashboard(modules) {
   if (!Array.isArray(modules) || !modules.length) {
     throw new Error('Debes registrar al menos un módulo.');
   }
 
+  const navigation = buildModuleNavigation(modules);
   const moduleMap = new Map(modules.map((mod) => [mod.key, mod]));
 
   const state = {
@@ -14,7 +16,9 @@ export function initDashboard(modules) {
     page: 1,
     pageSize: modules[0].pageSize || 20,
     editingId: null,
-    formCollapsed: true
+    formCollapsed: true,
+    filtersCollapsed: true,
+    secondaryTabsExpanded: isSecondaryModuleKey(modules[0].key)
   };
   let loadRequestSeq = 0;
 
@@ -31,17 +35,25 @@ export function initDashboard(modules) {
     });
   });
 
-  dom.filterForm.addEventListener('submit', (event) => {
-    event.preventDefault();
-    state.page = 1;
-    loadList({ preserveScroll: true });
+  if (dom.filterForm) {
+    dom.filterForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      state.page = 1;
+      loadList({ preserveScroll: true });
+    });
+  }
+
+  document.addEventListener('dashboard:reload-list', (event) => {
+    const preserveScroll = event?.detail?.preserveScroll !== false;
+    loadList({ preserveScroll });
   });
 
   if (dom.listActions) {
-    dom.listActions.addEventListener('click', (event) => {
+    dom.listActions.addEventListener('click', async (event) => {
       const button = event.target.closest('button[data-module-action]');
       if (!button) return;
       event.preventDefault();
+      if (button.dataset.busy === '1') return;
       const mod = getCurrentModule();
       if (!mod) return;
       const action = button.dataset.moduleAction;
@@ -49,20 +61,29 @@ export function initDashboard(modules) {
         ? mod.moduleActionHandlers[action]
         : null;
       if (!handler) return;
+      button.dataset.busy = '1';
+      button.disabled = true;
       try {
         const filters = collectFilters(mod);
-        handler({ action, module: mod, filters, event, reload: loadList, showMessage });
+        await Promise.resolve(handler({ action, module: mod, filters, event, reload: loadList, showMessage }));
       } catch (error) {
         console.error(error);
         showMessage(error.message || 'No se pudo ejecutar la acción solicitada.', 'error');
+      } finally {
+        window.setTimeout(() => {
+          button.disabled = false;
+          delete button.dataset.busy;
+        }, 500);
       }
     });
   }
 
-  dom.includeDeleted.addEventListener('change', () => {
-    state.page = 1;
-    loadList({ preserveScroll: true });
-  });
+  if (dom.includeDeleted) {
+    dom.includeDeleted.addEventListener('change', () => {
+      state.page = 1;
+      loadList({ preserveScroll: true });
+    });
+  }
 
   dom.cancelButton.addEventListener('click', () => {
     setFormModeCreate({ autoExpand: false });
@@ -74,34 +95,36 @@ export function initDashboard(modules) {
     await submitForm();
   });
 
-  dom.tableBody.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-action]');
-    if (!button) return;
-    const { action, id } = button.dataset;
-    if (!id || !action) return;
-    const mod = getCurrentModule();
-    if (!mod) return;
-    if (action === 'edit') {
-      startEdit(id);
-      return;
-    }
-    if (action === 'delete') {
-      handleDelete(id);
-      return;
-    }
-    const item = state.items.find((entry) => entry.id === id);
-    if (!item) return;
-    const handler = mod.rowActionHandlers && typeof mod.rowActionHandlers[action] === 'function'
-      ? mod.rowActionHandlers[action]
-      : null;
-    if (handler) {
-      handler({ action, id, item, module: mod, event, reload: loadList, showMessage });
-      return;
-    }
-    if (typeof mod.hooks?.onRowAction === 'function') {
-      mod.hooks.onRowAction({ action, id, item, module: mod, event, reload: loadList, showMessage });
-    }
-  });
+  if (dom.tableWrapper) {
+    dom.tableWrapper.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const { action, id } = button.dataset;
+      if (!id || !action) return;
+      const mod = getCurrentModule();
+      if (!mod) return;
+      if (action === 'edit') {
+        startEdit(id);
+        return;
+      }
+      if (action === 'delete') {
+        handleDelete(id);
+        return;
+      }
+      const item = state.items.find((entry) => entry.id === id);
+      if (!item) return;
+      const handler = mod.rowActionHandlers && typeof mod.rowActionHandlers[action] === 'function'
+        ? mod.rowActionHandlers[action]
+        : null;
+      if (handler) {
+        handler({ action, id, item, module: mod, event, reload: loadList, showMessage });
+        return;
+      }
+      if (typeof mod.hooks?.onRowAction === 'function') {
+        mod.hooks.onRowAction({ action, id, item, module: mod, event, reload: loadList, showMessage });
+      }
+    });
+  }
 
   dom.pagination.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-page]');
@@ -109,7 +132,17 @@ export function initDashboard(modules) {
     const nextPage = Number(button.dataset.page);
     if (Number.isNaN(nextPage) || nextPage === state.page) return;
     state.page = nextPage;
-    loadList({ preserveScroll: false });
+    loadList({ preserveScroll: true, preserveAnchor: true });
+  });
+
+  dom.pagination.addEventListener('change', (event) => {
+    const select = event.target.closest('select[data-page-size]');
+    if (!select) return;
+    const nextPageSize = Number(select.value);
+    if (!Number.isFinite(nextPageSize) || nextPageSize <= 0 || nextPageSize === state.pageSize) return;
+    state.pageSize = nextPageSize;
+    state.page = 1;
+    loadList({ preserveScroll: true, preserveAnchor: true });
   });
 
   if (dom.toggleFormCardButton) {
@@ -124,10 +157,41 @@ export function initDashboard(modules) {
     });
   }
 
+  if (dom.toggleFiltersButton) {
+    dom.toggleFiltersButton.addEventListener('click', () => {
+      setFiltersCollapsed(!state.filtersCollapsed);
+    });
+  }
+
   function renderTabs() {
-    dom.tabs.innerHTML = modules
-      .map((mod) => `<button type="button" class="tab-button" data-module="${mod.key}" role="tab">${mod.label}</button>`)
+    const secondaryExpanded = state.secondaryTabsExpanded;
+    const primaryTabs = navigation.primary
+      .map((mod) => renderTabButton(mod))
       .join('');
+    const secondaryGroups = navigation.secondaryGroups
+      .map(
+        (group) => `
+          <section class="entity-tabs__group">
+            <span class="entity-tabs__group-title">${escapeHtml(group.label)}</span>
+            <div class="entity-tabs__group-list" role="tablist" aria-label="${escapeHtml(group.label)}">
+              ${group.modules.map((mod) => renderTabButton(mod)).join('')}
+            </div>
+          </section>
+        `
+      )
+      .join('');
+
+    dom.tabs.innerHTML = `
+      <div class="entity-tabs__primary" role="tablist" aria-label="Módulos principales">
+        ${primaryTabs}
+      </div>
+      <button type="button" class="btn ghost entity-tabs__toggle" data-secondary-toggle aria-expanded="${secondaryExpanded ? 'true' : 'false'}">
+        ${secondaryExpanded ? 'Ocultar más módulos' : 'Más módulos'}
+      </button>
+      <div class="entity-tabs__secondary${secondaryExpanded ? ' is-expanded' : ''}">
+        ${secondaryGroups}
+      </div>
+    `;
 
     dom.tabs.querySelectorAll('.tab-button').forEach((tab) => {
       tab.addEventListener('click', () => {
@@ -136,6 +200,17 @@ export function initDashboard(modules) {
         switchModule(key, { preserveScroll: true });
       });
     });
+
+    const secondaryToggle = dom.tabs.querySelector('[data-secondary-toggle]');
+    if (secondaryToggle) {
+      secondaryToggle.addEventListener('click', () => {
+        state.secondaryTabsExpanded = !state.secondaryTabsExpanded;
+        syncSecondaryTabsVisibility();
+      });
+    }
+
+    updateActiveTabButtons();
+    syncSecondaryTabsVisibility();
   }
 
   function switchModule(key, options = {}) {
@@ -155,12 +230,13 @@ export function initDashboard(modules) {
     state.page = 1;
     state.pageSize = mod.pageSize || 20;
     state.formCollapsed = mod.supportsForm === false ? false : true;
+    state.filtersCollapsed = shouldUseFilterToggle(mod) && shouldCollapseFiltersByDefault();
+    if (isSecondaryModuleKey(key)) {
+      state.secondaryTabsExpanded = true;
+    }
 
-    dom.tabs.querySelectorAll('.tab-button').forEach((tab) => {
-      const isActive = tab.dataset.module === key;
-      tab.classList.toggle('active', isActive);
-      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
-    });
+    updateActiveTabButtons();
+    syncSecondaryTabsVisibility();
 
     dom.form.reset();
     dom.searchInput.value = '';
@@ -174,6 +250,7 @@ export function initDashboard(modules) {
     renderFormFields(mod);
     setFormModeCreate({ autoExpand: false });
     setFormCollapsed(state.formCollapsed, mod);
+    setFiltersCollapsed(state.filtersCollapsed, mod);
     renderTable([], mod);
     renderPagination(mod);
 
@@ -185,13 +262,13 @@ export function initDashboard(modules) {
   }
 
   async function loadList(options = {}) {
-    const { preserveScroll = true } = options;
+    const { preserveScroll = true, preserveAnchor = false } = options;
     const mod = getCurrentModule();
     if (!mod) return;
     const requestSeq = ++loadRequestSeq;
     const requestedModuleKey = mod.key;
 
-    const scrollSnapshot = captureScrollSnapshot(preserveScroll);
+    const scrollSnapshot = captureScrollSnapshot(preserveScroll, preserveAnchor);
     const filters = collectFilters(mod);
 
     try {
@@ -210,7 +287,7 @@ export function initDashboard(modules) {
 
       renderTable(state.items, mod);
       renderPagination(mod);
-      restoreScrollPosition(preserveScroll, scrollSnapshot);
+      restoreScrollPosition(preserveScroll, scrollSnapshot, preserveAnchor);
     } catch (error) {
       if (requestSeq !== loadRequestSeq || state.moduleKey !== requestedModuleKey) {
         return;
@@ -220,23 +297,33 @@ export function initDashboard(modules) {
     }
   }
 
-  function captureScrollSnapshot(shouldPreserve) {
+  function captureScrollSnapshot(shouldPreserve, shouldPreserveAnchor = false) {
     if (!shouldPreserve || typeof window === 'undefined') {
       return null;
     }
+    const anchorElement = shouldPreserveAnchor ? (dom.pagination || dom.tableWrapper || dom.listCard || null) : null;
     return {
       windowY: window.scrollY || 0,
-      listCardY: dom.listCard ? dom.listCard.scrollTop : null
+      listCardY: dom.listCard ? dom.listCard.scrollTop : null,
+      anchorTop: anchorElement ? anchorElement.getBoundingClientRect().top : null
     };
   }
 
-  function restoreScrollPosition(shouldPreserve, snapshot) {
+  function restoreScrollPosition(shouldPreserve, snapshot, shouldPreserveAnchor = false) {
     if (typeof window === 'undefined') {
       return;
     }
     const applyScroll = () => {
       if (shouldPreserve && snapshot) {
         window.scrollTo({ top: snapshot.windowY ?? 0, behavior: 'auto' });
+        const anchorElement = shouldPreserveAnchor ? (dom.pagination || dom.tableWrapper || dom.listCard || null) : null;
+        if (anchorElement && typeof snapshot.anchorTop === 'number') {
+          const currentAnchorTop = anchorElement.getBoundingClientRect().top;
+          const delta = currentAnchorTop - snapshot.anchorTop;
+          if (Math.abs(delta) > 0.5) {
+            window.scrollBy({ top: delta, behavior: 'auto' });
+          }
+        }
         if (dom.listCard && typeof snapshot.listCardY === 'number') {
           dom.listCard.scrollTop = snapshot.listCardY;
         }
@@ -250,7 +337,13 @@ export function initDashboard(modules) {
       }
     };
     if (typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(applyScroll);
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(applyScroll);
+      });
+      if (shouldPreserve && snapshot && shouldPreserveAnchor) {
+        window.setTimeout(applyScroll, 0);
+        window.setTimeout(applyScroll, 80);
+      }
     } else {
       applyScroll();
     }
@@ -261,9 +354,15 @@ export function initDashboard(modules) {
     dom.filterExtra.innerHTML = '';
     if (dom.filterForm) {
       dom.filterForm.hidden = Boolean(mod.hideFilters);
+      dom.filterForm.classList.toggle('filter-form--simple', !shouldUseFilterToggle(mod));
     }
     if (dom.listActions) {
       dom.listActions.style.display = mod.hideFilters ? 'none' : '';
+    }
+    if (dom.toggleFiltersButton) {
+      const showToggle = shouldUseFilterToggle(mod);
+      dom.toggleFiltersButton.hidden = !showToggle;
+      dom.toggleFiltersButton.style.display = showToggle ? '' : 'none';
     }
 
     if (dom.listActions) {
@@ -578,6 +677,10 @@ export function initDashboard(modules) {
         tableElement.style.display = 'none';
       }
       let customContainer = dom.tableWrapper.querySelector('.module-custom-view');
+      const mobileContainer = dom.tableWrapper.querySelector('.module-mobile-list');
+      if (mobileContainer) {
+        mobileContainer.remove();
+      }
       if (!customContainer) {
         customContainer = document.createElement('div');
         customContainer.className = 'module-custom-view';
@@ -601,12 +704,19 @@ export function initDashboard(modules) {
     if (dom.tableWrapper) {
       const tableElement = dom.tableElement || dom.tableWrapper.querySelector('table');
       const customContainer = dom.tableWrapper.querySelector('.module-custom-view');
+      let mobileContainer = dom.tableWrapper.querySelector('.module-mobile-list');
       if (customContainer) {
         customContainer.remove();
+      }
+      if (!mobileContainer) {
+        mobileContainer = document.createElement('div');
+        mobileContainer.className = 'module-mobile-list';
+        dom.tableWrapper.appendChild(mobileContainer);
       }
       if (tableElement) {
         tableElement.style.display = '';
       }
+      mobileContainer.innerHTML = renderMobileCards(items, mod, { supportsEdit, supportsDelete, customActions, columns });
     }
 
     dom.tableHead.innerHTML = '';
@@ -627,28 +737,8 @@ export function initDashboard(modules) {
     const rowsHtml = items
       .map((item) => {
         const cells = columns.map((col) => `<td>${formatCellValue(col, item)}</td>`).join('');
-        let actions = '';
         const actionContext = { item, module: mod, state };
-        const canEdit = typeof mod.canEdit === 'function' ? mod.canEdit(actionContext) : true;
-        const canDelete = typeof mod.canDelete === 'function' ? mod.canDelete(actionContext) : true;
-        if (supportsEdit && canEdit) {
-          actions += `<button type="button" class="btn ghost small" data-action="edit" data-id="${item.id}">Editar</button>`;
-        }
-        if (supportsDelete && canDelete) {
-          actions += `<button type="button" class="btn danger small" data-action="delete" data-id="${item.id}">Eliminar</button>`;
-        }
-        if (customActions.length) {
-          customActions.forEach((definition) => {
-            if (!definition || !definition.action || !definition.label) return;
-            if (typeof definition.shouldRender === 'function' && !definition.shouldRender(actionContext)) {
-              return;
-            }
-            const className = definition.className || 'btn ghost small';
-            const isDisabled = typeof definition.isDisabled === 'function' ? definition.isDisabled(actionContext) : false;
-            const disabledAttr = isDisabled ? ' disabled' : '';
-            actions += `<button type="button" class="${className}" data-action="${definition.action}" data-id="${item.id}"${disabledAttr}>${escapeHtml(definition.label)}</button>`;
-          });
-        }
+        const actions = buildRowActions(item, mod, { supportsEdit, supportsDelete, customActions });
         const actionCell = hasActions ? `<td class="actions-cell">${actions}</td>` : '';
         const rowClasses = [];
         if (item.deleted_at) rowClasses.push('is-deleted');
@@ -660,6 +750,81 @@ export function initDashboard(modules) {
       .join('');
 
     dom.tableBody.innerHTML = rowsHtml;
+  }
+
+  function renderMobileCards(items, mod, options) {
+    const { columns = [] } = options;
+    if (!items.length) {
+      return '<div class="module-mobile-empty">Sin registros.</div>';
+    }
+
+    return items
+      .map((item) => {
+        const rowClasses = ['module-mobile-card'];
+        if (item.deleted_at) rowClasses.push('is-deleted');
+        if (item.stock_bajo) rowClasses.push('low-stock');
+        if (state.editingId === item.id) rowClasses.push('editing');
+
+        const titleColumn = columns[0] || null;
+        const title = titleColumn ? formatCellValue(titleColumn, item) : escapeHtml(item.id || getModuleSingular(mod));
+        const detailRows = columns
+          .slice(1)
+          .map((column) => {
+            const value = formatCellValue(column, item);
+            if (!value || value === '-') return '';
+            return `
+              <div class="module-mobile-card__detail">
+                <span>${escapeHtml(column.header || '')}</span>
+                <strong>${value}</strong>
+              </div>
+            `;
+          })
+          .filter(Boolean)
+          .join('');
+
+        const actions = buildRowActions(item, mod, options);
+
+        return `
+          <article class="${rowClasses.join(' ')}" data-id="${item.id}">
+            <div class="module-mobile-card__header">
+              <h4>${title}</h4>
+              ${item.deleted_at ? '<span class="badge error">Eliminado</span>' : ''}
+            </div>
+            ${detailRows ? `<div class="module-mobile-card__details">${detailRows}</div>` : ''}
+            ${actions ? `<div class="module-mobile-card__actions">${actions}</div>` : ''}
+          </article>
+        `;
+      })
+      .join('');
+  }
+
+  function buildRowActions(item, mod, options) {
+    const { supportsEdit, supportsDelete, customActions } = options;
+    const actionContext = { item, module: mod, state };
+    const canEdit = typeof mod.canEdit === 'function' ? mod.canEdit(actionContext) : true;
+    const canDelete = typeof mod.canDelete === 'function' ? mod.canDelete(actionContext) : true;
+    let actions = '';
+
+    if (supportsEdit && canEdit) {
+      actions += `<button type="button" class="btn ghost small" data-action="edit" data-id="${item.id}">Editar</button>`;
+    }
+    if (supportsDelete && canDelete) {
+      actions += `<button type="button" class="btn danger small" data-action="delete" data-id="${item.id}">Eliminar</button>`;
+    }
+    if (customActions.length) {
+      customActions.forEach((definition) => {
+        if (!definition || !definition.action || !definition.label) return;
+        if (typeof definition.shouldRender === 'function' && !definition.shouldRender(actionContext)) {
+          return;
+        }
+        const className = definition.className || 'btn ghost small';
+        const isDisabled = typeof definition.isDisabled === 'function' ? definition.isDisabled(actionContext) : false;
+        const disabledAttr = isDisabled ? ' disabled' : '';
+        actions += `<button type="button" class="${className}" data-action="${definition.action}" data-id="${item.id}"${disabledAttr}>${escapeHtml(definition.label)}</button>`;
+      });
+    }
+
+    return actions;
   }
 
   function formatCellValue(column, item) {
@@ -687,6 +852,17 @@ export function initDashboard(modules) {
     const currentPage = meta.page || state.page || 1;
     const totalPages = meta.totalPages || Math.max(1, Math.ceil((meta.total || 0) / (meta.pageSize || state.pageSize)));
     const total = meta.total ?? state.items.length;
+    const currentPageSize = meta.pageSize || state.pageSize || mod.pageSize || 10;
+    const pageSizeOptions = getPageSizeOptions(mod, currentPageSize);
+    const pageButtons = buildPageButtonModel(currentPage, totalPages)
+      .map((entry) => {
+        if (entry === 'ellipsis') {
+          return '<span class="pagination-ellipsis">…</span>';
+        }
+        const isActive = entry === currentPage;
+        return `<button type="button" class="pager-btn pager-btn--number${isActive ? ' is-active' : ''}" data-page="${entry}" ${isActive ? 'aria-current="page"' : ''}>${entry}</button>`;
+      })
+      .join('');
 
     const prevDisabled = currentPage <= 1 ? 'disabled' : '';
     const nextDisabled = currentPage >= totalPages ? 'disabled' : '';
@@ -695,8 +871,18 @@ export function initDashboard(modules) {
       <div class="pagination-info">
         Página ${currentPage} de ${totalPages} · ${total} registros
       </div>
+      <label class="pagination-size">
+        <span>Ver</span>
+        <select data-page-size aria-label="Cantidad de registros por página">
+          ${pageSizeOptions
+            .map((option) => `<option value="${option}" ${option === currentPageSize ? 'selected' : ''}>${option}</option>`)
+            .join('')}
+        </select>
+        <span>por página</span>
+      </label>
       <div class="pagination-controls">
         <button type="button" class="pager-btn" data-page="${currentPage - 1}" ${prevDisabled}>Anterior</button>
+        <div class="pagination-pages">${pageButtons}</div>
         <button type="button" class="pager-btn" data-page="${currentPage + 1}" ${nextDisabled}>Siguiente</button>
       </div>
     `;
@@ -747,8 +933,12 @@ export function initDashboard(modules) {
     }
 
     setFormCollapsed(false);
+    setFiltersCollapsed(true, mod);
     state.editingId = id;
-  dom.formTitle.textContent = `Editar ${getModuleSingular(mod)}`;
+    if (dom.formCard) {
+      dom.formCard.classList.add('is-editing');
+    }
+    dom.formTitle.textContent = `Editar ${getModuleSingular(mod)}`;
     dom.submitButton.textContent = 'Actualizar';
     dom.submitButton.dataset.originalText = 'Actualizar';
     dom.cancelButton.hidden = false;
@@ -793,6 +983,7 @@ export function initDashboard(modules) {
     });
 
     highlightRow(id);
+    scrollFormCardIntoView();
     if (typeof mod.hooks?.afterEditStart === 'function') {
       mod.hooks.afterEditStart({ form: dom.form, module: mod, item: values });
     }
@@ -815,7 +1006,14 @@ export function initDashboard(modules) {
     }
 
     const confirmMessage = action.confirmMessage || '¿Eliminar este registro?';
-    if (!window.confirm(confirmMessage)) {
+    const confirmed = await confirmDialog({
+      title: 'Confirmar eliminación',
+      description: confirmMessage,
+      confirmLabel: 'Eliminar',
+      cancelLabel: 'Cancelar',
+      danger: true
+    });
+    if (!confirmed) {
       return;
     }
 
@@ -895,6 +1093,9 @@ export function initDashboard(modules) {
     dom.submitButton.textContent = 'Guardar';
     dom.submitButton.dataset.originalText = 'Guardar';
     dom.cancelButton.hidden = true;
+    if (dom.formCard) {
+      dom.formCard.classList.remove('is-editing');
+    }
     clearRowHighlight();
 
     if (typeof mod.hooks?.onResetForm === 'function') {
@@ -921,7 +1122,7 @@ export function initDashboard(modules) {
       dom.listCard.style.display = focusFormLayout ? 'none' : '';
     }
     if (dom.listActions) {
-      dom.listActions.style.display = focusFormLayout ? 'none' : '';
+      dom.listActions.style.display = focusFormLayout || mod?.hideFilters ? 'none' : '';
     }
     if (dom.pagination) {
       dom.pagination.style.display = focusFormLayout ? 'none' : '';
@@ -931,7 +1132,8 @@ export function initDashboard(modules) {
       dom.toggleFormCardButton.style.display = hasForm ? '' : 'none';
       if (hasForm) {
         const singular = getModuleSingular(mod);
-        dom.toggleFormCardButton.textContent = shouldHide ? `Nuevo ${singular}` : 'Ocultar formulario';
+        const openLabel = focusFormLayout ? 'Volver a la lista' : 'Ocultar formulario';
+        dom.toggleFormCardButton.textContent = shouldHide ? `Nuevo ${singular}` : openLabel;
         dom.toggleFormCardButton.setAttribute('aria-expanded', (!shouldHide).toString());
         dom.toggleFormCardButton.classList.toggle('primary', shouldHide);
         dom.toggleFormCardButton.classList.toggle('ghost', !shouldHide);
@@ -939,6 +1141,158 @@ export function initDashboard(modules) {
         dom.toggleFormCardButton.setAttribute('aria-expanded', 'false');
       }
     }
+  }
+
+  function setFiltersCollapsed(collapsed, modOverride) {
+    const mod = modOverride || getCurrentModule();
+    const hasFilters = !mod?.hideFilters;
+    const canCollapse = shouldUseFilterToggle(mod);
+    state.filtersCollapsed = hasFilters && canCollapse ? Boolean(collapsed) : false;
+
+    if (dom.filterForm) {
+      dom.filterForm.classList.toggle('is-collapsed-mobile', hasFilters && canCollapse && state.filtersCollapsed);
+    }
+    if (dom.toggleFiltersButton) {
+      const showToggle = hasFilters && canCollapse;
+      dom.toggleFiltersButton.hidden = !showToggle;
+      dom.toggleFiltersButton.style.display = showToggle ? '' : 'none';
+      dom.toggleFiltersButton.setAttribute('aria-expanded', (!state.filtersCollapsed).toString());
+      dom.toggleFiltersButton.textContent = state.filtersCollapsed ? 'Mostrar filtros' : 'Ocultar filtros';
+    }
+  }
+
+  function scrollFormCardIntoView() {
+    if (!dom.formCard || typeof dom.formCard.scrollIntoView !== 'function') return;
+    const focusTarget = dom.form?.querySelector('input, select, textarea, button');
+    const performScroll = () => {
+      const rect = dom.formCard.getBoundingClientRect();
+      const absoluteTop = rect.top + (window.scrollY || window.pageYOffset || 0);
+      const targetTop = Math.max(absoluteTop - 20, 0);
+      window.scrollTo({ top: targetTop, behavior: 'smooth' });
+      if (focusTarget && typeof focusTarget.focus === 'function') {
+        try {
+          focusTarget.focus({ preventScroll: true });
+        } catch (_error) {
+          focusTarget.focus();
+        }
+      }
+    };
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(performScroll);
+      return;
+    }
+    performScroll();
+  }
+
+  function shouldCollapseFiltersByDefault() {
+    return typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+  }
+
+  function shouldUseFilterToggle(mod) {
+    if (!mod || mod.hideFilters) return false;
+    return Array.isArray(mod.filters) && mod.filters.length >= 2;
+  }
+
+  function renderTabButton(mod) {
+    return `<button type="button" class="tab-button" data-module="${mod.key}" role="tab">${escapeHtml(mod.label)}</button>`;
+  }
+
+  function updateActiveTabButtons() {
+    dom.tabs.querySelectorAll('.tab-button').forEach((tab) => {
+      const isActive = tab.dataset.module === state.moduleKey;
+      tab.classList.toggle('active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+  }
+
+  function syncSecondaryTabsVisibility() {
+    if (!dom.tabs) return;
+    const secondary = dom.tabs.querySelector('.entity-tabs__secondary');
+    const toggle = dom.tabs.querySelector('[data-secondary-toggle]');
+    if (!secondary || !toggle) return;
+    const expanded = state.secondaryTabsExpanded;
+    secondary.classList.toggle('is-expanded', expanded);
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    toggle.textContent = expanded ? 'Ocultar más módulos' : 'Más módulos';
+  }
+
+  function isMobileViewport() {
+    return typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
+  }
+
+  function isSecondaryModuleKey(key) {
+    return navigation.secondaryGroups.some((group) => group.modules.some((mod) => mod.key === key));
+  }
+
+  function getPageSizeOptions(mod, currentPageSize) {
+    const baseOptions = Array.isArray(mod.pageSizeOptions) && mod.pageSizeOptions.length
+      ? mod.pageSizeOptions
+      : [10, 20, 50];
+    return [...new Set([...baseOptions, currentPageSize].filter((value) => Number.isFinite(Number(value)) && Number(value) > 0))]
+      .map(Number)
+      .sort((left, right) => left - right);
+  }
+
+  function buildPageButtonModel(currentPage, totalPages) {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, index) => index + 1);
+    }
+
+    const visible = new Set([1, totalPages, currentPage, currentPage - 1, currentPage + 1]);
+    if (currentPage <= 3) {
+      visible.add(2);
+      visible.add(3);
+      visible.add(4);
+    }
+    if (currentPage >= totalPages - 2) {
+      visible.add(totalPages - 1);
+      visible.add(totalPages - 2);
+      visible.add(totalPages - 3);
+    }
+
+    const sorted = [...visible]
+      .filter((page) => page >= 1 && page <= totalPages)
+      .sort((left, right) => left - right);
+
+    const model = [];
+    sorted.forEach((page, index) => {
+      if (index > 0 && page - sorted[index - 1] > 1) {
+        model.push('ellipsis');
+      }
+      model.push(page);
+    });
+    return model;
+  }
+
+  function buildModuleNavigation(moduleList) {
+    const primaryKeys = ['productos', 'clientes', 'ventas', 'pos'];
+    const groupConfig = [
+      { label: 'Comercial', keys: ['presupuestos', 'notasPedido', 'proveedores'] },
+      { label: 'Administración', keys: ['usuarios', 'sucursales'] },
+      { label: 'Operaciones', keys: ['caja'] }
+    ];
+
+    const primary = primaryKeys
+      .map((key) => moduleList.find((mod) => mod.key === key))
+      .filter(Boolean);
+
+    const groupedKeys = new Set(primaryKeys);
+    const secondaryGroups = groupConfig
+      .map((group) => {
+        const groupedModules = group.keys
+          .map((key) => moduleList.find((mod) => mod.key === key))
+          .filter(Boolean);
+        groupedModules.forEach((mod) => groupedKeys.add(mod.key));
+        return groupedModules.length ? { label: group.label, modules: groupedModules } : null;
+      })
+      .filter(Boolean);
+
+    const remaining = moduleList.filter((mod) => !groupedKeys.has(mod.key));
+    if (remaining.length) {
+      secondaryGroups.push({ label: 'Otros', modules: remaining });
+    }
+
+    return { primary, secondaryGroups };
   }
 
   function toggleFormCard(mod) {
@@ -955,13 +1309,25 @@ export function initDashboard(modules) {
   }
 
   function highlightRow(id) {
-    dom.tableBody.querySelectorAll('tr').forEach((row) => row.classList.remove('editing'));
-    const targetRow = dom.tableBody.querySelector(`tr[data-id="${id}"]`);
+    if (dom.tableBody) {
+      dom.tableBody.querySelectorAll('tr').forEach((row) => row.classList.remove('editing'));
+    }
+    if (dom.tableWrapper) {
+      dom.tableWrapper.querySelectorAll('.module-mobile-card').forEach((card) => card.classList.remove('editing'));
+    }
+    const targetRow = dom.tableBody ? dom.tableBody.querySelector(`tr[data-id="${id}"]`) : null;
     if (targetRow) targetRow.classList.add('editing');
+    const targetCard = dom.tableWrapper ? dom.tableWrapper.querySelector(`.module-mobile-card[data-id="${id}"]`) : null;
+    if (targetCard) targetCard.classList.add('editing');
   }
 
   function clearRowHighlight() {
-    dom.tableBody.querySelectorAll('tr').forEach((row) => row.classList.remove('editing'));
+    if (dom.tableBody) {
+      dom.tableBody.querySelectorAll('tr').forEach((row) => row.classList.remove('editing'));
+    }
+    if (dom.tableWrapper) {
+      dom.tableWrapper.querySelectorAll('.module-mobile-card').forEach((card) => card.classList.remove('editing'));
+    }
   }
 
   function setSubmitting(isSubmitting) {
@@ -1003,10 +1369,11 @@ export function initDashboard(modules) {
       tabs: document.querySelector('.entity-tabs'),
       feedback: document.getElementById('feedback'),
       listActions: document.querySelector('.list-actions'),
-  listCard: document.querySelector('.list-card'),
+      listCard: document.querySelector('.list-card'),
       panelBody: document.querySelector('.panel-body'),
       formCard: document.querySelector('.form-card'),
       toggleFormCardButton: document.getElementById('toggle-form-card'),
+      toggleFiltersButton: document.getElementById('toggle-filters'),
       form: document.getElementById('record-form'),
       formFields: document.getElementById('form-fields'),
       formTitle: document.getElementById('form-title'),

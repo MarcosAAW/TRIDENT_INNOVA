@@ -1,4 +1,5 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
+import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js';
 import { createNotaPedido, buildNotaPedidoPayload } from './nuevo.js';
 import { updateNotaPedido } from './editar.js';
 import { deleteNotaPedido } from './eliminar.js';
@@ -147,10 +148,10 @@ function attachPdfHandler() {
     if (!id) return;
 
     const url = urlWithSession(`/notas-pedido/${encodeURIComponent(id)}/pdf`);
-    const win = window.open(url, '_blank');
-    if (!win || win.closed || typeof win.closed === 'undefined') {
-      alert('Permití las ventanas emergentes para ver el PDF de la nota de pedido.');
-    }
+    openUrlInNewTab(url, {
+      blockedTitle: 'No se pudo abrir el PDF',
+      blockedDescription: 'Permití las ventanas emergentes para ver el PDF de la nota de pedido.'
+    });
   });
   pdfHandlerAttached = true;
 }
@@ -189,21 +190,26 @@ function attachEstadoHandler() {
       : estado === 'EMITIDA'
         ? 'marcar como emitida'
         : 'marcar como borrador';
-    const confirmed = window.confirm(`¿Deseas ${label}?`);
+    const confirmed = await confirmDialog({
+      title: 'Cambiar estado de la nota',
+      description: `¿Deseas ${label}?`,
+      confirmLabel: 'Confirmar',
+      cancelLabel: 'Cancelar'
+    });
     if (!confirmed) return;
 
     btn.disabled = true;
     try {
       await updateEstadoNotaPedido(id, estado);
-      const refreshBtn = document.querySelector('[data-refresh-list]') || document.getElementById('refresh-list');
-      if (refreshBtn) {
-        refreshBtn.click();
-      } else {
-        window.location.reload();
-      }
+      document.dispatchEvent(new CustomEvent('dashboard:reload-list', {
+        detail: { preserveScroll: true }
+      }));
     } catch (error) {
       console.error('[NotasPedido] No se pudo actualizar el estado', error);
-      alert('No se pudo actualizar el estado de la nota de pedido.');
+      infoDialog({
+        title: 'No se pudo actualizar el estado',
+        description: 'No se pudo actualizar el estado de la nota de pedido.'
+      });
     } finally {
       btn.disabled = false;
     }
@@ -217,6 +223,7 @@ export const notasPedidoModule = {
   labelSingular: 'Nota de pedido',
   singular: 'Nota de pedido',
   singularLower: 'nota de pedido',
+  focusFormLayout: true,
   endpoint: '/notas-pedido',
   pageSize: 10,
   searchPlaceholder: 'Buscar por número, proveedor, código DJI, SKU o artículo',
@@ -301,14 +308,24 @@ export const notasPedidoModule = {
   },
   rowActionHandlers: {
     async 'convertir-compra'({ id, item, reload, showMessage }) {
-      const confirmed = window.confirm(`¿Generar una compra a partir de la nota ${item?.numero || ''}?`);
+      const confirmed = await confirmDialog({
+        title: 'Generar compra',
+        description: `¿Generar una compra a partir de la nota ${item?.numero || ''}?`,
+        confirmLabel: 'Generar compra',
+        cancelLabel: 'Cancelar'
+      });
       if (!confirmed) return;
       const compra = await convertirNotaPedidoACompra(id);
       showMessage(`Compra generada correctamente. ID: ${compra?.id || '-'}`, 'success');
       await reload({ preserveScroll: true });
     },
     async 'agregar-stock'({ id, item, reload, showMessage }) {
-      const confirmed = window.confirm(`¿Agregar al stock los ítems de la compra generada desde la nota ${item?.numero || ''}?`);
+      const confirmed = await confirmDialog({
+        title: 'Agregar al stock',
+        description: `¿Agregar al stock los ítems de la compra generada desde la nota ${item?.numero || ''}?`,
+        confirmLabel: 'Agregar stock',
+        cancelLabel: 'Cancelar'
+      });
       if (!confirmed) return;
       await agregarNotaPedidoAStock(id);
       showMessage('Stock ingresado correctamente.', 'success');
@@ -632,9 +649,20 @@ export const notasPedidoModule = {
         const listContainer = document.createElement('div');
         listContainer.className = 'items-list notas-pedido-builder__list';
 
+        const builderFeedback = document.createElement('p');
+        builderFeedback.className = 'form-helper-text';
+        builderFeedback.style.color = 'var(--color-danger, #fca5a5)';
+        builderFeedback.style.display = 'none';
+
+        const showBuilderFeedback = (message) => {
+          builderFeedback.textContent = message;
+          builderFeedback.style.display = message ? 'block' : 'none';
+        };
+
         builder.appendChild(modeHint);
         builder.appendChild(topRow);
         builder.appendChild(secondRow);
+        builder.appendChild(builderFeedback);
         builder.appendChild(listContainer);
         detallesWrapper.appendChild(builder);
 
@@ -728,25 +756,26 @@ export const notasPedidoModule = {
           const observacion = String(observacionInput.value || '').trim();
 
           if (!codigoArticulo) {
-            alert('Indicá el código del artículo.');
+            showBuilderFeedback('Indicá el código del artículo.');
             return;
           }
 
           if (!descripcion) {
-            alert('Indicá la descripción del artículo.');
+            showBuilderFeedback('Indicá la descripción del artículo.');
             return;
           }
 
           if (!Number.isInteger(cantidad) || cantidad <= 0) {
-            alert('Ingresá una cantidad válida.');
+            showBuilderFeedback('Ingresá una cantidad válida.');
             return;
           }
 
           if (isRepuestos && !equipoDestino && !String(equipoGeneralField?.value || '').trim()) {
-            alert('En pedidos de repuestos indicá el equipo destino general o por línea.');
+            showBuilderFeedback('En pedidos de repuestos indicá el equipo destino general o por línea.');
             return;
           }
 
+          showBuilderFeedback('');
           itemsState.push({
             productoId,
             codigo_articulo: codigoArticulo,
@@ -766,6 +795,7 @@ export const notasPedidoModule = {
           if (!button) return;
           const index = Number(button.dataset.removeIndex);
           if (!Number.isInteger(index)) return;
+          showBuilderFeedback('');
           itemsState.splice(index, 1);
           syncDetallesField();
           renderItemsList(listContainer);

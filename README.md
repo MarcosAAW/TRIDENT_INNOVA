@@ -108,6 +108,30 @@ npm test
 
 Si aun así prefieres tocar tu base local, puedes usar los seeds y reset para volver al estado inicial después de correr la suite.
 
+### Base separada para Jest
+
+El repo ya soporta una base de pruebas separada en `.env.test`.
+
+1. Preparar la base de test:
+
+```powershell
+npm run db:test:prepare
+```
+
+2. Correr toda la suite sobre la base de test:
+
+```powershell
+npm run test:safe
+```
+
+3. Correr solo las suites sensibles de ventas/cobros:
+
+```powershell
+npm run test:targeted
+```
+
+La configuración por defecto usa `trident_db_test` en `localhost:5440`, separada de la base principal de la app.
+
 ## Recursos adicionales
 
 - `DEV_SETUP.md`: guía corta para montar el entorno.
