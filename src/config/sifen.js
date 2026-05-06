@@ -24,7 +24,7 @@ const DEFAULT_ESTABLECIMIENTO = {
   ciudad: Number(process.env.SIFEN_ESTABLECIMIENTO_CIUDAD) || 3432,
   ciudadDescripcion: process.env.SIFEN_ESTABLECIMIENTO_CIUDAD_DESC || 'SAN IGNACIO',
   telefono: process.env.SIFEN_ESTABLECIMIENTO_TELEFONO || '+595983784444',
-  email: process.env.SIFEN_ESTABLECIMIENTO_EMAIL || 'info@tridentinnova.com',
+  email: process.env.SIFEN_ESTABLECIMIENTO_EMAIL || 'facturacion@tridentinnova.com',
   denominacion: process.env.SIFEN_ESTABLECIMIENTO_NOMBRE || 'Casa Central'
 };
 

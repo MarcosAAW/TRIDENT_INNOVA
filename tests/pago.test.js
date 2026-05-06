@@ -210,4 +210,32 @@ describe('Pagos API', () => {
 
     expect(response.body.error).toMatch(/nota de crédito total|regularizada/i);
   });
+
+  test('rechaza pagos sobre ventas que no son a crédito', async () => {
+    const ventaContado = await prisma.venta.create({
+      data: {
+        usuarioId: adminUser.id,
+        sucursalId: sucursal.id,
+        subtotal: 100000,
+        impuesto_total: 9090.91,
+        total: 100000,
+        estado: 'TICKET',
+        moneda: 'PYG',
+        iva_porcentaje: 10,
+        condicion_venta: 'CONTADO',
+        es_credito: false,
+        saldo_pendiente: 0
+      }
+    });
+
+    const response = await auth(request(app).post('/pagos'))
+      .send({
+        ventaId: ventaContado.id,
+        monto: 10000,
+        metodo: 'EFECTIVO'
+      })
+      .expect(409);
+
+    expect(response.body.error).toMatch(/ventas? a crédito/i);
+  });
 });

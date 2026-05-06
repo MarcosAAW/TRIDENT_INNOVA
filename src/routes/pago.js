@@ -88,6 +88,11 @@ router.post('/', async (req, res) => {
         throw new Error('VENTA_REGULARIZADA_CON_NC');
       }
 
+      const esCredito = venta?.es_credito === true || String(venta?.condicion_venta || '').toUpperCase() === 'CREDITO';
+      if (!esCredito) {
+        throw new Error('VENTA_NO_CREDITO');
+      }
+
       const pago = await tx.pago.create({
         data: {
           ventaId: venta.id,
@@ -121,6 +126,9 @@ router.post('/', async (req, res) => {
     }
     if (err?.message === 'VENTA_REGULARIZADA_CON_NC') {
       return res.status(409).json({ error: 'La venta ya fue regularizada con una nota de crédito total.' });
+    }
+    if (err?.message === 'VENTA_NO_CREDITO') {
+      return res.status(409).json({ error: 'Solo se pueden registrar pagos sobre ventas a crédito.' });
     }
     console.error('[Pagos] No se pudo registrar el pago.', err);
     return res.status(500).json({ error: 'No se pudo registrar el pago.' });

@@ -94,6 +94,10 @@ describe('Ventas API (integración)', () => {
   let usuario;
   let producto;
 
+  function parseNumeroSecuencia(numero) {
+    return Number(String(numero || '').split('-').pop() || 0);
+  }
+
   beforeAll(async () => {
     await prisma.$connect();
   });
@@ -504,6 +508,37 @@ describe('Ventas API (integración)', () => {
     expect(res.headers['content-disposition']).toMatch(/ticket-venta/i);
   });
 
+  test('crea ticket contado desde la venta y lo expone con saldo pendiente cero', async () => {
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        estado: 'TICKET',
+        iva_porcentaje: 10,
+        condicion_venta: 'CREDITO',
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    expect(createRes.body.estado).toBe('TICKET');
+    expect(createRes.body.condicion_venta).toBe('CONTADO');
+    expect(createRes.body.es_credito).toBe(false);
+    expect(createRes.body.saldo_pendiente ?? null).toBeNull();
+
+    const listRes = await request(app).get('/ventas').expect(200);
+    const ticket = listRes.body.data.find((item) => item.id === createRes.body.id);
+    expect(ticket).toBeDefined();
+    expect(ticket.estado).toBe('TICKET');
+    expect(Number(ticket.saldo_pendiente)).toBeCloseTo(0, 2);
+
+    const ticketPdfRes = await request(app)
+      .get(`/ventas/${createRes.body.id}/ticket/pdf`)
+      .expect(200);
+
+    expect(ticketPdfRes.headers['content-type']).toMatch(/application\/pdf/);
+    expect(ticketPdfRes.headers['content-disposition']).toMatch(/ticket-venta/i);
+  });
+
   test('Buscar ventas por número de factura devuelve coincidencias', async () => {
     const createRes = await request(app)
       .post('/ventas')
@@ -608,6 +643,54 @@ describe('Ventas API (integración)', () => {
     expect(Number(segundoIntento.body.factura.intentos)).toBeGreaterThan(1);
     expect(segundoIntento.body.factura.pdf_path).toBe(facturaRes.body.factura.pdf_path);
     expect(segundoIntento.body.factura.xml_path).toBe(facturaRes.body.factura.xml_path);
+  });
+
+  test('continua la secuencia de factura por prefijo aunque exista una factura previa con otro timbrado', async () => {
+    const ventaAnterior = await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        subtotal: 1000,
+        impuesto_total: 90.91,
+        total: 1000,
+        estado: 'FACTURADO',
+        moneda: 'PYG',
+        iva_porcentaje: 10,
+        condicion_venta: 'CONTADO',
+        detalles: {
+          create: [{ productoId: producto.id, cantidad: 1, precio_unitario: '1000.00', subtotal: '1000.00' }]
+        }
+      }
+    });
+
+    await prisma.facturaElectronica.create({
+      data: {
+        ventaId: ventaAnterior.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000020',
+        timbrado: 'TIMBRADO-ANTERIOR',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 20,
+        estado: 'ENVIADO'
+      }
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(parseNumeroSecuencia(facturaRes.body.factura?.nro_factura)).toBeGreaterThan(20);
+    expect(facturaRes.body.factura?.nro_factura).not.toBe('001-001-0000020');
   });
 
   test('factura venta en USD con descuento usando la base monetaria guardada por linea', async () => {
@@ -727,6 +810,78 @@ describe('Ventas API (integración)', () => {
     expect(payloadFactpy?.credito?.cuotas).toEqual([
       expect.objectContaining({ numero: 1, monto: 750, fechaVencimiento: '2026-05-10' }),
       expect.objectContaining({ numero: 2, monto: 750, fechaVencimiento: '2026-06-10' })
+    ]);
+  });
+
+  test('factura una venta USD con descuento y entrega inicial enviando total neto, anticipo y saldo financiado correctos', async () => {
+    const productoUsd = await prisma.producto.create({ data: {
+      sku: 'TEST-USD-CRED-DESC',
+      nombre: 'Producto USD Credito Descuento',
+      tipo: 'SERVICIO',
+      precio_venta: '7000000.00',
+      precio_venta_original: '1000.00',
+      moneda_precio_venta: 'USD',
+      tipo_cambio_precio_venta: '7000.00',
+      stock_actual: 5,
+      sucursalId: '00000000-0000-0000-0000-000000000001'
+    }});
+
+    const cuotas = [
+      { numero: 1, monto: 700, fecha_vencimiento: '2026-06-10' },
+      { numero: 2, monto: 700, fecha_vencimiento: '2026-07-10' }
+    ];
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        moneda: 'USD',
+        tipo_cambio: 7000,
+        descuento_total: 100,
+        credito: { tipo: 'CUOTAS', entrega_inicial: 500, metodo_entrega: 'EFECTIVO', cuotas },
+        detalles: [{ productoId: productoUsd.id, cantidad: 2 }]
+      })
+      .expect(201);
+
+    expect(Number(createRes.body.total)).toBeCloseTo(13300000, 2);
+    expect(Number(createRes.body.total_moneda)).toBeCloseTo(1900, 2);
+    expect(Number(createRes.body.saldo_pendiente)).toBeCloseTo(9800000, 2);
+    expect(createRes.body.credito_config).toMatchObject({
+      tipo: 'CUOTAS',
+      entrega_inicial: 500,
+      saldo_financiado: 1400,
+      entrega_inicial_gs: 3500000,
+      saldo_financiado_gs: 9800000
+    });
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .send({
+        condicion_pago: 'CREDITO',
+        credito: { tipo: 'CUOTAS', entrega_inicial: 500, metodo_entrega: 'EFECTIVO', cuotas }
+      })
+      .expect(200);
+
+    const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
+    expect(payloadFactpy?.moneda).toBe('USD');
+    expect(Number(payloadFactpy?.cambio)).toBeCloseTo(7000, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(1000, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(50, 8);
+    expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(1900, 4);
+    expect(Number(payloadFactpy?.totalPago)).toBeCloseTo(1900, 4);
+    expect(Number(payloadFactpy?.totalPagoMoneda)).toBeCloseTo(1900, 4);
+    expect(Number(payloadFactpy?.totalGs)).toBeCloseTo(13300000, 2);
+    expect(payloadFactpy?.pagos).toEqual([
+      expect.objectContaining({ tipoPago: '1', monto: 500 })
+    ]);
+    expect(payloadFactpy?.credito).toMatchObject({
+      condicionCredito: 2,
+      cantidadCuota: 2
+    });
+    expect(payloadFactpy?.credito?.cuotas).toEqual([
+      expect.objectContaining({ numero: 1, monto: 700, fechaVencimiento: '2026-06-10' }),
+      expect.objectContaining({ numero: 2, monto: 700, fechaVencimiento: '2026-07-10' })
     ]);
   });
 
@@ -970,6 +1125,79 @@ describe('Ventas API (integración)', () => {
       .expect(400);
 
     expect(anularRes.body.error).toMatch(/nota de crédito|regularizada/i);
+  });
+
+  test('continua la secuencia de nota de crédito por prefijo aunque exista una nota previa con otro timbrado', async () => {
+    const ventaAnterior = await prisma.venta.create({
+      data: {
+        usuarioId: usuario.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        subtotal: 1000,
+        impuesto_total: 90.91,
+        total: 1000,
+        estado: 'FACTURADO',
+        moneda: 'PYG',
+        iva_porcentaje: 10,
+        condicion_venta: 'CONTADO',
+        detalles: {
+          create: [{ productoId: producto.id, cantidad: 1, precio_unitario: '1000.00', subtotal: '1000.00' }]
+        }
+      }
+    });
+
+    const facturaAnterior = await prisma.facturaElectronica.create({
+      data: {
+        ventaId: ventaAnterior.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000010',
+        timbrado: 'TIMBRADO-ANTERIOR',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 10,
+        estado: 'ENVIADO',
+        cdc: '018001001000001022026032712345678'
+      }
+    });
+
+    await prisma.notaCreditoElectronica.create({
+      data: {
+        ventaId: ventaAnterior.id,
+        facturaElectronicaId: facturaAnterior.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_nota: '001-001-0000020',
+        timbrado: 'TIMBRADO-ANTERIOR',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 20,
+        motivo: 'Histórico',
+        tipo_ajuste: 'TOTAL',
+        moneda: 'PYG',
+        total: '-1000.00',
+        cdc: '058001001000002022026032712345678',
+        estado: 'ENVIADO'
+      }
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    const notaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/nota-credito`)
+      .send({ motivo: 'Nueva NC con prefijo existente' })
+      .expect(201);
+
+    expect(parseNumeroSecuencia(notaRes.body.nota_credito?.nro_nota)).toBeGreaterThan(20);
+    expect(notaRes.body.nota_credito?.nro_nota).not.toBe('001-001-0000020');
   });
 
   test('emite nota de crédito total en USD con descuento usando el neto facturado', async () => {

@@ -8,7 +8,7 @@ module.exports = {
   ruc: '80132959-0',
   direccion: 'Casa Central: Curupayty 8444, Obligado - Itapúa',
   telefono: '+595 983 784444',
-  email: 'info@tridentinnova.com',
+  email: 'facturacion@tridentinnova.com',
   firmante: process.env.NOTA_PEDIDO_FIRMANTE || 'Leo Takayoshi Takeuchi Takeuchi',
   cargo_firmante: process.env.NOTA_PEDIDO_CARGO || 'Presidente',
   firma_path: process.env.NOTA_PEDIDO_FIRMA_PATH || defaultSignaturePath,

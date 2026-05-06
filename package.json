@@ -11,6 +11,7 @@
     "test": "cross-env NODE_ENV=test jest --runInBand",
     "test:safe": "cross-env NODE_ENV=test DOTENV_CONFIG_PATH=.env.test node -r dotenv/config ./node_modules/jest/bin/jest.js --runInBand",
     "test:targeted": "cross-env NODE_ENV=test DOTENV_CONFIG_PATH=.env.test node -r dotenv/config ./node_modules/jest/bin/jest.js tests/venta.test.js tests/recibo.test.js tests/pago.test.js --runInBand",
+    "test:comercial": "cross-env NODE_ENV=test DOTENV_CONFIG_PATH=.env.test node -r dotenv/config ./node_modules/jest/bin/jest.js tests/venta.test.js tests/recibo.test.js tests/pago.test.js tests/caja.test.js tests/facturaDigital.test.js tests/ventaCorreo.test.js --runInBand",
     "db:test:prepare": "node scripts/prepare-test-db.js",
     "db:check": "node scripts/db-check.js",
     "db:seed": "node scripts/seed.js",

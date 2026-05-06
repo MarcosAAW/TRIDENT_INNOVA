@@ -647,6 +647,21 @@ function formatDate(value) {
   return new Intl.DateTimeFormat('es-PY', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
+function formatShortId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '—';
+  return raw.length > 8 ? raw.slice(0, 8) : raw;
+}
+
+function formatSaldoDisplay(amountGs, moneda, tipoCambio) {
+  const numericGs = Number(amountGs || 0);
+  if (String(moneda || 'PYG').toUpperCase() === 'USD' && Number(tipoCambio) > 0) {
+    const amountUsd = numericGs / Number(tipoCambio);
+    return `${formatAmount(amountUsd, 'USD')}\nEq.: ${formatAmount(numericGs, 'PYG')}`;
+  }
+  return formatAmount(numericGs, 'PYG');
+}
+
 function renderReciboPdf(doc, recibo) {
   const logoPath = path.join(__dirname, '..', 'public', 'img', 'logotridentgrande.png');
   const hasLogo = fs.existsSync(logoPath);
@@ -686,34 +701,37 @@ function renderReciboPdf(doc, recibo) {
   doc.text(`Registrado por: ${recibo.usuario?.nombre || recibo.usuarioId || '-'}`);
 
   const rightBoxX = startX + usableWidth - 200;
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(12)
-    .fillColor('#0f172a')
-    .text('Nro.', rightBoxX, cursorY + 12, { width: 200, align: 'right' });
+    const rightBoxWidth = 200;
+    const totalBlockY = cursorY + 48;
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(12)
+      .fillColor('#0f172a')
+      .text('Nro.', rightBoxX, cursorY + 12, { width: rightBoxWidth, align: 'right' });
   doc
     .font('Helvetica')
     .fontSize(16)
     .fillColor('#111827')
-    .text(recibo.numero || '-', rightBoxX, doc.y + 2, { width: 200, align: 'right' });
+      .text(recibo.numero || '-', rightBoxX, cursorY + 28, { width: rightBoxWidth, align: 'right' });
   doc
     .font('Helvetica-Bold')
     .fontSize(12)
     .fillColor('#0f172a')
-    .text('TOTAL', rightBoxX, doc.y + 6, { width: 200, align: 'right' });
+      .text('TOTAL', rightBoxX, totalBlockY, { width: rightBoxWidth, align: 'right' });
   const totalLabel = formatAmount(totalPrincipal, moneda);
   const totalEquivalente = moneda === 'USD' ? `Equivalente: ${formatAmount(totalGs, 'PYG')}` : null;
   doc
     .font('Helvetica')
     .fontSize(16)
     .fillColor('#16a34a')
-    .text(totalLabel, rightBoxX, doc.y + 2, { width: 200, align: 'right' });
+      .text(totalLabel, rightBoxX, totalBlockY + 18, { width: rightBoxWidth, align: 'right' });
   if (totalEquivalente) {
+    const currentY = doc.y;
     doc
       .font('Helvetica')
       .fontSize(10)
       .fillColor('#334155')
-      .text(totalEquivalente, rightBoxX, doc.y + 2, { width: 200, align: 'right' });
+        .text(totalEquivalente, rightBoxX, totalBlockY + 42, { width: rightBoxWidth, align: 'right' });
   }
 
   cursorY += headerHeight + 12;
@@ -754,27 +772,15 @@ function renderReciboPdf(doc, recibo) {
 
   cursorY += blockHeight + 14;
 
-  // Monto en letras ubicado antes del detalle
-  doc
-    .font('Helvetica')
-    .fontSize(9)
-    .fillColor('#475569')
-    .text(`Monto en letras: ${capitalize(totalEnLetras)}`, startX, cursorY, {
-      width: usableWidth,
-      align: 'left'
-    });
-
-  cursorY = doc.y + 10;
-
   // Tabla de aplicaciones / facturas
   doc.font('Helvetica-Bold').fontSize(12).fillColor('#0f172a').text('Detalle de facturas', startX, cursorY);
   cursorY = doc.y + 6;
 
   const columns = [
-    { key: 'factura', label: 'Factura', width: usableWidth * 0.32 },
-    { key: 'venta', label: 'Venta', width: usableWidth * 0.18 },
-    { key: 'pago', label: 'Monto pagado', width: usableWidth * 0.22, align: 'right' },
-    { key: 'saldo', label: 'Saldo pendiente', width: usableWidth * 0.22, align: 'right' }
+    { key: 'factura', label: 'Factura', width: usableWidth * 0.26 },
+    { key: 'pago', label: 'Pago aplicado', width: usableWidth * 0.22, align: 'right' },
+    { key: 'saldoPrevio', label: 'Saldo anterior', width: usableWidth * 0.24, align: 'right' },
+    { key: 'saldoActual', label: 'Saldo actual', width: usableWidth * 0.24, align: 'right' }
   ];
 
   drawTable(doc, startX, cursorY, columns, recibo.aplicaciones.map((ap) => {
@@ -790,17 +796,13 @@ function renderReciboPdf(doc, recibo) {
 
     const ventaMoneda = (venta.moneda || 'PYG').toUpperCase();
     const ventaTc = Number(venta.tipo_cambio) || Number(recibo.tipo_cambio) || 0;
-    const saldoNuevoUsd = ventaMoneda === 'USD' && ventaTc > 0 ? saldoNuevo / ventaTc : null;
-    const saldoPrevioUsd = ventaMoneda === 'USD' && ventaTc > 0 ? saldoPrevio / ventaTc : null;
-    const saldoLabel = ventaMoneda === 'USD'
-      ? `USD ${formatCurrency(saldoNuevoUsd, 'USD')} (previo: USD ${formatCurrency(saldoPrevioUsd, 'USD')}) · Gs. ${formatCurrency(saldoNuevo, 'PYG')} (previo: Gs. ${formatCurrency(saldoPrevio, 'PYG')})`
-      : `Gs. ${formatCurrency(saldoNuevo, 'PYG')} (previo: Gs. ${formatCurrency(saldoPrevio, 'PYG')})`;
+    const documentoLabel = factura?.nro_factura || `Venta ${formatShortId(venta.id || ap.ventaId)}`;
 
     return {
-      factura: factura?.nro_factura || '—',
-      venta: venta.id || ap.ventaId || '—',
+      factura: documentoLabel,
       pago: pagoLabel,
-      saldo: saldoLabel
+      saldoPrevio: formatSaldoDisplay(saldoPrevio, ventaMoneda, ventaTc),
+      saldoActual: formatSaldoDisplay(saldoNuevo, ventaMoneda, ventaTc)
     };
   }));
 
@@ -826,7 +828,7 @@ function renderReciboPdf(doc, recibo) {
 
 function drawTable(doc, startX, startY, columns, rows) {
   const headerHeight = 20;
-  const rowHeight = 18;
+  const rowHeight = 32;
   const usableWidth = columns.reduce((sum, col) => sum + col.width, 0);
 
   // Header
@@ -849,7 +851,11 @@ function drawTable(doc, startX, startY, columns, rows) {
     doc.save().rect(startX, y, usableWidth, rowHeight).fill(fill).restore();
     columns.forEach((col) => {
       const value = row[col.key] ?? '—';
-      doc.text(String(value), rowX + 6, y + 5, { width: col.width - 12, align: col.align || 'left' });
+      doc.text(String(value), rowX + 6, y + 5, {
+        width: col.width - 12,
+        height: rowHeight - 8,
+        align: col.align || 'left'
+      });
       rowX += col.width;
     });
     y += rowHeight;

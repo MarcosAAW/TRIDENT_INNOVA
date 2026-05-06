@@ -116,6 +116,7 @@ class FakePrisma {
       create: async ({ data }) => this._notaCreditoCreate(data),
       update: async ({ where, data }) => this._notaCreditoUpdate(where, data),
       findFirst: async (args = {}) => this._notaCreditoFindFirst(args),
+      findMany: async (args = {}) => this._notaCreditoFindMany(args),
       deleteMany: async () => this._notaCreditoDeleteMany()
     };
 
@@ -1335,6 +1336,51 @@ class FakePrisma {
     }
 
     return results.length ? this._clone(results[0]) : null;
+  }
+
+  _notaCreditoFindMany({ where = {}, orderBy, take, select } = {}) {
+    let results = this.state.notaCreditoElectronica;
+
+    if (where.timbrado) {
+      results = results.filter((item) => item.timbrado === where.timbrado);
+    }
+    if (where.establecimiento) {
+      results = results.filter((item) => item.establecimiento === where.establecimiento);
+    }
+    if (where.punto_expedicion) {
+      results = results.filter((item) => item.punto_expedicion === where.punto_expedicion);
+    }
+    if (where.deleted_at === null) {
+      results = results.filter((item) => !item.deleted_at);
+    }
+    if (where.nro_nota?.startsWith) {
+      results = results.filter((item) => String(item.nro_nota || '').startsWith(where.nro_nota.startsWith));
+    }
+
+    if (orderBy?.secuencia === 'desc') {
+      results = [...results].sort((a, b) => Number(b.secuencia) - Number(a.secuencia));
+    } else if (orderBy?.created_at === 'desc') {
+      results = [...results].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    }
+
+    if (typeof take === 'number') {
+      results = results.slice(0, take);
+    }
+
+    const mapped = results.map((item) => this._clone(item));
+    if (!select) {
+      return mapped;
+    }
+
+    return mapped.map((item) => {
+      const selected = {};
+      Object.entries(select).forEach(([key, enabled]) => {
+        if (enabled) {
+          selected[key] = item[key];
+        }
+      });
+      return selected;
+    });
   }
 
   _notaCreditoDeleteMany() {

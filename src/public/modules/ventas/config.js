@@ -12,6 +12,9 @@ const MONEDA_OPTIONS = [
   { value: 'USD', label: 'Dólares (USD)' }
 ];
 
+const FACTURA_PDF_POLL_ATTEMPTS = 6;
+const FACTURA_PDF_POLL_DELAY_MS = 1200;
+
 const ventasState = {
   lastList: [],
   lastFilters: {},
@@ -53,6 +56,71 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function getFacturaPdfUrl(facturaElectronica) {
+  const pdfPath = facturaElectronica?.pdf_path;
+  if (!pdfPath) return null;
+  return /^https?:\/\//i.test(pdfPath)
+    ? pdfPath
+    : urlWithSession(pdfPath);
+}
+
+function isCanonicalFacturaPdfUrl(url) {
+  if (!url || typeof window === 'undefined') return false;
+  try {
+    const resolved = new URL(String(url), window.location.origin);
+    return /^https?:$/i.test(resolved.protocol) && resolved.origin !== window.location.origin;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function fetchVentaById(id) {
+  if (!id) return null;
+  const query = buildQuery({ search: id });
+  const response = await request(`/ventas?${query}`);
+  const ventas = Array.isArray(response?.data)
+    ? response.data
+    : Array.isArray(response?.ventas)
+      ? response.ventas
+      : Array.isArray(response)
+        ? response
+        : [];
+  return ventas.find((venta) => venta?.id === id) || null;
+}
+
+async function waitForCanonicalFacturaPdf(ventaId, {
+  attempts = FACTURA_PDF_POLL_ATTEMPTS,
+  delayMs = FACTURA_PDF_POLL_DELAY_MS
+} = {}) {
+  let latestVenta = null;
+
+  for (let index = 0; index < attempts; index += 1) {
+    latestVenta = await fetchVentaById(ventaId);
+    const pdfUrl = getFacturaPdfUrl(latestVenta?.factura_electronica);
+    if (isCanonicalFacturaPdfUrl(pdfUrl)) {
+      return {
+        venta: latestVenta,
+        pdfUrl
+      };
+    }
+
+    if (index < attempts - 1) {
+      await delay(delayMs);
+    }
+  }
+
+  return {
+    venta: latestVenta,
+    pdfUrl: null
+  };
 }
 
 function normalizeRecibos(recibos) {
@@ -161,6 +229,22 @@ function renderTotalAmount(venta) {
   return base;
 }
 
+function formatCreditBreakdown(amount, amountGs, monedaVenta, tipoCambio) {
+  const numericAmount = Number(amount || 0);
+  const numericAmountGs = Number(amountGs || 0);
+  if (monedaVenta === 'USD') {
+    const usdValue = numericAmount || (tipoCambio > 0 ? round(numericAmountGs / tipoCambio, 2) : 0);
+    const gsValue = numericAmountGs || (tipoCambio > 0 ? round(usdValue * tipoCambio, 2) : 0);
+    return `${formatCurrency(usdValue, 'USD')} · ${formatCurrency(gsValue, 'PYG')}`;
+  }
+  return formatCurrency(numericAmountGs || numericAmount, 'PYG');
+}
+
+function appendTooltipLine(tooltip, label, value) {
+  if (!value) return tooltip;
+  return tooltip ? `${tooltip}\n${label}: ${value}` : `${label}: ${value}`;
+}
+
 function getPrimaryNotaCredito(venta) {
   const notas = Array.isArray(venta?.notas_credito) ? venta.notas_credito : [];
   return notas.length ? notas[0] : null;
@@ -186,7 +270,24 @@ function getOperationalSaldoPendiente(venta) {
   if (hasEffectiveTotalCreditNote(venta)) {
     return 0;
   }
+  const esCredito = venta?.es_credito === true || String(venta?.condicion_venta || '').toUpperCase() === 'CREDITO';
+  if (!esCredito) {
+    return 0;
+  }
   return Number(venta?.saldo_pendiente ?? 0);
+}
+
+function canProcessFacturaElectronica(venta) {
+  if (!venta || venta.deleted_at) return false;
+  const estadoVenta = String(venta.estado || '').toUpperCase();
+  if (estadoVenta === 'ANULADA' || estadoVenta === 'TICKET') return false;
+
+  const factura = venta.factura_electronica;
+  if (!factura?.id) return true;
+
+  const estadoFactura = String(factura.estado || '').toUpperCase();
+  if (factura.pdf_path) return false;
+  return estadoFactura === 'PENDIENTE' || estadoFactura === 'RECHAZADO' || !estadoFactura;
 }
 
 function renderNotaCreditoBadge(venta) {
@@ -1044,23 +1145,8 @@ export const ventasModule = {
       action: 'facturar',
       label: 'Facturar',
       className: 'btn secondary small',
-      shouldRender: ({ item }) => {
-        if (!item || item.deleted_at) return false;
-        const estado = String(item.estado || '').toUpperCase();
-        const yaFacturada = Boolean(item.factura_electronica?.id);
-        // Ocultar si es contado (no crédito) y no tiene factura electrónica (es ticket)
-        const rawCond = String(item.condicion_venta || item.condicion || '');
-        const isCredito = rawCond.toUpperCase().includes('CREDITO') || item.es_credito;
-        if (!isCredito && !yaFacturada) return false;
-        return estado !== 'ANULADA' && estado !== 'FACTURADO' && !yaFacturada;
-      },
-      isDisabled: ({ item }) => {
-        if (!item) return true;
-        const estado = String(item.estado || '').toUpperCase();
-        if (estado === 'ANULADA') return true;
-        if (item.factura_electronica?.id) return true;
-        return false;
-      }
+      shouldRender: ({ item }) => canProcessFacturaElectronica(item),
+      isDisabled: ({ item }) => !canProcessFacturaElectronica(item)
     },
     {
       action: 'anular',
@@ -1114,11 +1200,39 @@ export const ventasModule = {
         cancelLabel: 'Cancelar'
       });
       if (!confirmed) return;
+
+      const pendingFacturaWindow = createDeferredDocumentWindow({
+        pendingTitle: 'Generando factura...',
+        pendingDescription: 'La factura electrónica se está procesando. Esta pestaña mostrará el PDF apenas esté listo.',
+        blockedTitle: 'No se pudo abrir la factura',
+        blockedDescription: 'Desbloquea las ventanas emergentes para ver el PDF de la factura.'
+      });
+
       try {
-        await request(`/ventas/${id}/facturar`, { method: 'POST' });
+        const response = await request(`/ventas/${id}/facturar`, { method: 'POST' });
+        let pdfUrl = isCanonicalFacturaPdfUrl(getFacturaPdfUrl(response?.factura))
+          ? getFacturaPdfUrl(response?.factura)
+          : null;
+
+        if (!pdfUrl) {
+          const refreshed = await waitForCanonicalFacturaPdf(id);
+          pdfUrl = refreshed?.pdfUrl || null;
+        }
+
+        if (pdfUrl) {
+          const opened = pendingFacturaWindow.navigate(pdfUrl);
+          if (!opened) {
+            showMessage('La factura fue generada. Desbloquea ventanas emergentes para ver el PDF.', 'warn');
+          }
+        } else {
+          pendingFacturaWindow.close();
+          showMessage('La factura fue generada, pero FactPy todavía no devolvió el PDF. Podés abrirla luego desde "Ver factura".', 'warn');
+        }
+
         showMessage('Factura generada correctamente.', 'success');
         await reload({ preserveScroll: true });
       } catch (error) {
+        pendingFacturaWindow.close();
         console.error(error);
         showMessage(error.message || 'No se pudo generar la factura.', 'error');
       }
@@ -1340,6 +1454,7 @@ export const ventasModule = {
         let resumen = '';
         let tooltip = '';
         const monedaVenta = String(item.moneda || 'PYG').toUpperCase() === 'USD' ? 'USD' : 'PYG';
+        const tipoCambio = Number(item.tipo_cambio || 0);
         if (credito.tipo === 'CUOTAS') {
           const n = credito.cantidad_cuotas || (Array.isArray(credito.cuotas) ? credito.cuotas.length : null);
           let pagadas = 0;
@@ -1354,18 +1469,30 @@ export const ventasModule = {
           if (vencidas > 0) {
             resumen += ` <span class='badge error' title='Cuotas vencidas'>${vencidas} vencida${vencidas > 1 ? 's' : ''}</span>`;
           }
+          if (Number(credito.entrega_inicial || credito.entrega_inicial_gs || 0) > 0) {
+            const entrega = formatCreditBreakdown(credito.entrega_inicial, credito.entrega_inicial_gs, monedaVenta, tipoCambio);
+            const entregaCompacta = monedaVenta === 'USD'
+              ? formatCurrency(credito.entrega_inicial, 'USD')
+              : formatCurrency(credito.entrega_inicial_gs || credito.entrega_inicial, 'PYG');
+            resumen += ` · Entrega: ${entregaCompacta}`;
+            tooltip = appendTooltipLine(tooltip, 'Entrega inicial', entrega);
+          }
+          if (Number(credito.saldo_financiado || credito.saldo_financiado_gs || 0) > 0) {
+            const saldoFinanciado = formatCreditBreakdown(credito.saldo_financiado, credito.saldo_financiado_gs, monedaVenta, tipoCambio);
+            tooltip = appendTooltipLine(tooltip, 'Saldo financiado', saldoFinanciado);
+          }
         } else if (credito.tipo === 'PLAZO' || item.fecha_vencimiento) {
           resumen = `Plazo: ${formatDate(credito.fecha_vencimiento || item.fecha_vencimiento)}`;
         }
         const saldo = getOperationalSaldoPendiente(item);
         if (saldo > 0) {
           if (monedaVenta === 'USD') {
-            const tipoCambio = Number(item.tipo_cambio || 0);
             const saldoUsd = tipoCambio > 0 ? round(saldo / tipoCambio, 2) : 0;
             resumen += ` · Saldo: ${formatCurrency(saldoUsd, 'USD')}`;
-            resumen += ` · ${formatCurrency(saldo, 'PYG')}`;
+            tooltip = appendTooltipLine(tooltip, 'Saldo pendiente', `${formatCurrency(saldoUsd, 'USD')} · ${formatCurrency(saldo, 'PYG')}`);
           } else {
             resumen += ` · Saldo: ${formatCurrency(saldo, 'PYG')}`;
+            tooltip = appendTooltipLine(tooltip, 'Saldo pendiente', formatCurrency(saldo, 'PYG'));
           }
         }
 
@@ -1430,6 +1557,9 @@ export const ventasModule = {
         }
         if (notaCredito?.pdf_path) {
           return `<button type="button" class="btn ghost small" data-docs-id="${item.id}" data-docs-type="nota_credito">Ver NC</button>`;
+        }
+        if (canProcessFacturaElectronica(item)) {
+          return '<span class="badge muted">Pendiente de facturar</span>';
         }
         return '<span class="badge muted">Pendiente</span>';
       }

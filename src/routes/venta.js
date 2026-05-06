@@ -342,6 +342,7 @@ const IVA_DIVISOR = {
 };
 
 const MAX_FACTURA_REINTENTOS = 5;
+const MAX_NOTA_CREDITO_REINTENTOS = 5;
 
 function numberToWordsEs(num) {
   const units = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
@@ -408,6 +409,14 @@ function isUniqueNroFacturaError(error) {
     error?.code === 'P2002' &&
     Array.isArray(error?.meta?.target) &&
     error.meta.target.some((target) => typeof target === 'string' && target.includes('nro_factura'))
+  );
+}
+
+function isUniqueNroNotaError(error) {
+  return (
+    error?.code === 'P2002' &&
+    Array.isArray(error?.meta?.target) &&
+    error.meta.target.some((target) => typeof target === 'string' && target.includes('nro_nota'))
   );
 }
 
@@ -561,7 +570,11 @@ function getOperationalSaldoPendiente(venta) {
   if (hasEffectiveTotalCreditNote(venta)) {
     return 0;
   }
-  return Number(venta?.saldo_pendiente ?? venta?.total ?? 0);
+  const esCredito = venta?.es_credito === true || String(venta?.condicion_venta || '').toUpperCase() === 'CREDITO';
+  if (!esCredito) {
+    return 0;
+  }
+  return Number(venta?.saldo_pendiente ?? 0);
 }
 
 function normalizeCondicionVenta(value, creditoConfig) {
@@ -896,54 +909,72 @@ router.post('/:id/nota-credito', authorizeRoles('ADMIN'), async (req, res) => {
       detallesSolicitados
     });
 
-    const timbradoSeleccionado = selectTimbradoParaVenta(venta, empresaConfig);
-    const secuencia = await resolveSecuenciaNotaCredito(prisma, timbradoSeleccionado, req.sucursalId);
-    const nroNota = buildNumeroFactura(timbradoSeleccionado, secuencia);
     const now = new Date();
+    const timbradoSeleccionado = selectTimbradoParaVenta(venta, empresaConfig);
+    let notaBase = null;
+    let lastCreateError = null;
 
-    const notaBase = await prisma.notaCreditoElectronica.create({
-      data: {
-        ventaId: venta.id,
-        facturaElectronicaId: venta.factura_electronica.id,
-        sucursalId: req.sucursalId,
-        nro_nota: nroNota,
-        timbrado: timbradoSeleccionado.numero || 'NO_TIMBRADO',
-        establecimiento: timbradoSeleccionado.establecimiento || '001',
-        punto_expedicion: timbradoSeleccionado.punto_expedicion || timbradoSeleccionado.punto || '001',
-        secuencia,
-        motivo,
-        tipo_ajuste: notaCreditoCalculada.tipoAjuste,
-        fecha_emision: now,
-        moneda: normalizeCurrency(venta.moneda),
-        tipo_cambio: venta.tipo_cambio || null,
-        total: -Math.abs(notaCreditoCalculada.totalGs),
-        total_moneda: notaCreditoCalculada.totalMoneda != null ? -Math.abs(notaCreditoCalculada.totalMoneda) : null,
-        cdc: cdcAsociado,
-        qr_data: cdcAsociado,
-        estado: 'PENDIENTE',
-        intentos: 1,
-        ambiente: venta.factura_electronica.ambiente || 'PRUEBA',
-        detalles: {
-          create: notaCreditoCalculada.detalles.map((detalle) => ({
-            detalleVentaId: detalle.detalleVentaId,
-            productoId: detalle.productoId,
-            descripcion: detalle.descripcion,
-            codigo_producto: detalle.codigoProducto,
-            cantidad: detalle.cantidad,
-            precio_unitario: detalle.precioUnitarioGs,
-            subtotal: detalle.subtotalGs,
-            iva_porcentaje: detalle.ivaPorcentaje
-          }))
-        },
-        respuesta_set: {
-          motivo,
-          tipo_ajuste: notaCreditoCalculada.tipoAjuste,
-          factura_asociada: venta.factura_electronica.nro_factura,
-          cdc_asociado: cdcAsociado,
-          timestamp: now.toISOString()
+    for (let attempt = 0; attempt < MAX_NOTA_CREDITO_REINTENTOS && !notaBase; attempt += 1) {
+      try {
+        const secuencia = await resolveSecuenciaNotaCredito(prisma, timbradoSeleccionado, req.sucursalId);
+        const nroNota = buildNumeroFactura(timbradoSeleccionado, secuencia);
+
+        notaBase = await prisma.notaCreditoElectronica.create({
+          data: {
+            ventaId: venta.id,
+            facturaElectronicaId: venta.factura_electronica.id,
+            sucursalId: req.sucursalId,
+            nro_nota: nroNota,
+            timbrado: timbradoSeleccionado.numero || 'NO_TIMBRADO',
+            establecimiento: timbradoSeleccionado.establecimiento || '001',
+            punto_expedicion: timbradoSeleccionado.punto_expedicion || timbradoSeleccionado.punto || '001',
+            secuencia,
+            motivo,
+            tipo_ajuste: notaCreditoCalculada.tipoAjuste,
+            fecha_emision: now,
+            moneda: normalizeCurrency(venta.moneda),
+            tipo_cambio: venta.tipo_cambio || null,
+            total: -Math.abs(notaCreditoCalculada.totalGs),
+            total_moneda: notaCreditoCalculada.totalMoneda != null ? -Math.abs(notaCreditoCalculada.totalMoneda) : null,
+            cdc: cdcAsociado,
+            qr_data: cdcAsociado,
+            estado: 'PENDIENTE',
+            intentos: 1,
+            ambiente: venta.factura_electronica.ambiente || 'PRUEBA',
+            detalles: {
+              create: notaCreditoCalculada.detalles.map((detalle) => ({
+                detalleVentaId: detalle.detalleVentaId,
+                productoId: detalle.productoId,
+                descripcion: detalle.descripcion,
+                codigo_producto: detalle.codigoProducto,
+                cantidad: detalle.cantidad,
+                precio_unitario: detalle.precioUnitarioGs,
+                subtotal: detalle.subtotalGs,
+                iva_porcentaje: detalle.ivaPorcentaje
+              }))
+            },
+            respuesta_set: {
+              motivo,
+              tipo_ajuste: notaCreditoCalculada.tipoAjuste,
+              factura_asociada: venta.factura_electronica.nro_factura,
+              cdc_asociado: cdcAsociado,
+              timestamp: now.toISOString()
+            }
+          }
+        });
+        lastCreateError = null;
+      } catch (createError) {
+        lastCreateError = createError;
+        if (isUniqueNroNotaError(createError) && attempt < MAX_NOTA_CREDITO_REINTENTOS - 1) {
+          continue;
         }
+        throw createError;
       }
-    });
+    }
+
+    if (!notaBase) {
+      throw lastCreateError || new Error('No se pudo generar la nota de crédito.');
+    }
 
     let notaActualizada = notaBase;
     if (factpyConfig?.recordId) {
@@ -1174,11 +1205,14 @@ router.post('/', validate(createVentaSchema), async (req, res) => {
         ensureWithinLimit(totalEnMonedaSeleccionada, 'Total en moneda seleccionada');
       }
 
-      const condicionVenta = normalizeCondicionVenta(payload.condicion_venta, payload.credito);
+      const esTicket = String(payload.estado || '').toUpperCase() === 'TICKET';
+      const condicionVenta = esTicket
+        ? 'CONTADO'
+        : normalizeCondicionVenta(payload.condicion_venta, payload.credito);
       const creditoState = buildVentaCreditoState({
         condicionVenta,
-        creditoInput: payload.credito,
-        fechaVencimiento: payload.fecha_vencimiento || payload.credito?.fecha_vencimiento || null,
+        creditoInput: esTicket ? null : payload.credito,
+        fechaVencimiento: esTicket ? null : (payload.fecha_vencimiento || payload.credito?.fecha_vencimiento || null),
         moneda: monedaSeleccionada,
         tipoCambio: tipoCambioSeleccionado,
         totalGs: total,
@@ -2733,14 +2767,23 @@ function getMinSecuenciaOverride(timbrado) {
 }
 
 async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
+  const establecimiento = (timbrado.establecimiento || '001').padStart(3, '0');
+  const puntoExpedicion = (timbrado.punto_expedicion || timbrado.punto || '001').padStart(3, '0');
+  const nroFacturaPrefix = `${establecimiento}-${puntoExpedicion}-`;
+
   const whereDigital = {
     timbrado: timbrado.numero,
-    establecimiento: timbrado.establecimiento || '001',
-    punto_expedicion: timbrado.punto_expedicion || timbrado.punto || '001'
+    establecimiento,
+    punto_expedicion: puntoExpedicion
   };
 
-  // Importante: nro_factura es único global, por eso no filtramos por sucursal al buscar el máximo electrónico.
-  const whereElectronica = { timbrado: timbrado.numero };
+  // nro_factura es único global y no incluye el timbrado, solo establecimiento, punto y secuencia.
+  // Si cambia el timbrado pero se conserva el mismo prefijo, debemos continuar la secuencia existente.
+  const whereElectronica = {
+    nro_factura: {
+      startsWith: nroFacturaPrefix
+    }
+  };
 
   const fetchMaxes = async (whereDigitalFilter, whereElectronicaFilter) => {
     const [ultimoDigital, ultimasElectronicas] = await Promise.all([
@@ -2753,7 +2796,7 @@ async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
         where: whereElectronicaFilter,
         select: { nro_factura: true },
         orderBy: { created_at: 'desc' },
-        take: 10
+        take: 25
       })
     ]);
 
@@ -2766,7 +2809,6 @@ async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
     return maxSecuencia + 1;
   };
 
-  // Primero intentamos scoped a la sucursal; si no hay registros, ampliamos a todo el timbrado.
   const overrideMin = getMinSecuenciaOverride(timbrado);
 
   const scoped = await fetchMaxes(whereDigital, whereElectronica);
@@ -2774,18 +2816,41 @@ async function resolveSecuenciaFactura(tx, timbrado, sucursalId) {
 }
 
 async function resolveSecuenciaNotaCredito(tx, timbrado, _sucursalId) {
-  const ultimaNota = await tx.notaCreditoElectronica.findFirst({
-    where: {
-      timbrado: timbrado.numero,
-      establecimiento: timbrado.establecimiento || '001',
-      punto_expedicion: timbrado.punto_expedicion || timbrado.punto || '001',
-      deleted_at: null
-    },
-    orderBy: { secuencia: 'desc' },
-    select: { secuencia: true }
-  });
+  const establecimiento = (timbrado.establecimiento || '001').padStart(3, '0');
+  const puntoExpedicion = (timbrado.punto_expedicion || timbrado.punto || '001').padStart(3, '0');
+  const nroNotaPrefix = `${establecimiento}-${puntoExpedicion}-`;
 
-  return Math.max((ultimaNota?.secuencia || 0) + 1, getMinSecuenciaOverride(timbrado));
+  const [ultimaNotaDigital, ultimasNotasElectronicas] = await Promise.all([
+    tx.notaCreditoElectronica.findFirst({
+      where: {
+        timbrado: timbrado.numero,
+        establecimiento,
+        punto_expedicion: puntoExpedicion,
+        deleted_at: null
+      },
+      orderBy: { secuencia: 'desc' },
+      select: { secuencia: true }
+    }),
+    tx.notaCreditoElectronica.findMany({
+      where: {
+        nro_nota: {
+          startsWith: nroNotaPrefix
+        },
+        deleted_at: null
+      },
+      select: { nro_nota: true },
+      orderBy: { created_at: 'desc' },
+      take: 25
+    })
+  ]);
+
+  const maxSecuenciaElectronica = (ultimasNotasElectronicas || []).reduce((max, item) => {
+    const parsed = parseSecuenciaFromNumero(item.nro_nota);
+    return Math.max(max, parsed || 0);
+  }, 0);
+
+  const nextSecuencia = Math.max(ultimaNotaDigital?.secuencia || 0, maxSecuenciaElectronica) + 1;
+  return Math.max(nextSecuencia, getMinSecuenciaOverride(timbrado));
 }
 
 function toDateOnlyString(value) {
