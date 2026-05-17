@@ -135,6 +135,7 @@ La configuración por defecto usa `trident_db_test` en `localhost:5440`, separad
 ## Recursos adicionales
 
 - `DEV_SETUP.md`: guía corta para montar el entorno.
+- `INFRASTRUCTURE.md`: configuración de DNS y Cloudflare.
 - `scripts/`: helpers (`db-check`, `seed`, `reset`).
 - `scripts/factpy-check.js`: smoke FactPy. Usa `FACTPY_RECORD_ID`, `FACTPY_ESTABLECIMIENTO`, `FACTPY_PUNTO`, `FACTPY_TIPO_CAMBIO/FACTPY_TC`. Para crédito:
 	- Plazo (default): `FACTPY_CREDITO_MODE=plazo`
