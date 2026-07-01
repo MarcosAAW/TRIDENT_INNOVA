@@ -171,7 +171,7 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
 
   const multipart = createMultipartFormData({
     recordID: rid,
-    dataJson: payloadString
+    datajson: payloadString
   });
 
   const response = await httpFetch(url, {

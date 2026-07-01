@@ -91,7 +91,7 @@ describe('FactPy client', () => {
     );
     expect(fields).toEqual([
       ['recordID', 'RID-1'],
-      ['dataJson', '{"total":1000,"receiptid":"RID-100"}']
+      ['datajson', '{"total":1000,"receiptid":"RID-100"}']
     ]);
   });
 
