@@ -84,6 +84,7 @@ const request = require('supertest');
 const prisma = require('../src/prismaClient');
 const { app } = require('../src/app');
 const { emitirFactura } = require('../src/services/factpy/client');
+const { procesarFacturaElectronica } = require('../src/services/sifen/facturaProcessor');
 const {
   enviarFacturaDigitalPorCorreo,
   EmailNotConfiguredError,
@@ -952,6 +953,36 @@ describe('Ventas API (integración)', () => {
     expect(facturaRes.body.factura?.respuesta_set?.factpy).toBeUndefined();
 
     consoleErrorSpy.mockRestore();
+  });
+
+  test('marca la factura como aceptada cuando FactPy responde cdc en la emision', async () => {
+    procesarFacturaElectronica.mockResolvedValueOnce(null);
+    emitirFactura.mockResolvedValueOnce({
+      status: true,
+      code: 'NA',
+      cdc: '01800000000000000000000000000000000000000001',
+      xmlLink: 'https://factpy.test/doc.xml',
+      kude: 'https://factpy.test/doc.pdf'
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(facturaRes.body.factura?.estado).toBe('ACEPTADO');
+    expect(facturaRes.body.factura?.qr_data).toBe('01800000000000000000000000000000000000000001');
+    expect(facturaRes.body.factura?.xml_path).toBe('https://factpy.test/doc.xml');
+    expect(facturaRes.body.factura?.pdf_path).toBe('https://factpy.test/doc.pdf');
+    expect(facturaRes.body.factura?.respuesta_set?.factpy?.status).toBe(true);
   });
 
   test('factura una venta con cliente con correo sin romper el flujo principal', async () => {

@@ -1575,7 +1575,9 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
           timeoutMs: factpyConfig.timeoutMs
         });
 
-        const estadoFactpy = respuestaFactpy?.status === false ? 'RECHAZADO' : 'ENVIADO';
+        const estadoFactpy = respuestaFactpy?.status === false
+          ? 'RECHAZADO'
+          : (respuestaFactpy?.cdc ? 'ACEPTADO' : 'ENVIADO');
         const mergedRespuesta = {
           receiptid: payload?.receiptid,
           factpy: respuestaFactpy,
