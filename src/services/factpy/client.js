@@ -1,4 +1,3 @@
-const FormData = require('form-data');
 const { baseUrl: DEFAULT_BASE_URL, recordId: DEFAULT_RECORD_ID, timeoutMs: DEFAULT_TIMEOUT_MS } = require('../../config/factpy');
 
 const FACTPY_DEBUG = ['1', 'true', 'yes'].includes(String(process.env.FACTPY_DEBUG || '').toLowerCase());
@@ -54,6 +53,23 @@ function parseJsonSafe(text) {
   }
 }
 
+function createMultipartFormData(fields = {}) {
+  if (typeof globalThis.FormData === 'function') {
+    const form = new globalThis.FormData();
+    Object.entries(fields).forEach(([key, value]) => {
+      form.append(key, value);
+    });
+    return { body: form, headers: {} };
+  }
+
+  const LegacyFormData = require('form-data');
+  const form = new LegacyFormData();
+  Object.entries(fields).forEach(([key, value]) => {
+    form.append(key, value);
+  });
+  return { body: form, headers: form.getHeaders() };
+}
+
 function isHtmlResponse(text = '', contentType = '') {
   const normalizedType = String(contentType || '').toLowerCase();
   const normalizedText = String(text || '').trim().toLowerCase();
@@ -104,16 +120,17 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
     return parseFactPySuccessResponse(response, text, 'emisión');
   }
 
-  const form = new FormData();
-  form.append('recordID', rid);
-  form.append('recordid', rid);
-  form.append('dataJson', payloadString);
-  form.append('datajson', payloadString);
+  const multipart = createMultipartFormData({
+    recordID: rid,
+    recordid: rid,
+    dataJson: payloadString,
+    datajson: payloadString
+  });
 
   const response = await httpFetch(url, {
     method: 'POST',
-    headers: form.getHeaders(),
-    body: form,
+    headers: multipart.headers,
+    body: multipart.body,
     timeout: timeoutMs || DEFAULT_TIMEOUT_MS
   });
 
