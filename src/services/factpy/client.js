@@ -182,14 +182,15 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
   });
 
   const text = await response.text();
-  if (!response.ok) {
+  const parsed = parseFactPySuccessResponse(response, text, 'emisión');
+  if (!response.ok && !(parsed && typeof parsed === 'object' && parsed.status === true)) {
     const error = new Error('FactPy emisión falló');
     error.status = response.status;
-    error.body = parseJsonSafe(text) || text;
+    error.body = parsed;
     throw error;
   }
 
-  return parseFactPySuccessResponse(response, text, 'emisión');
+  return parsed;
 }
 
 async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {}) {

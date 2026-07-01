@@ -60,6 +60,23 @@ describe('FactPy client', () => {
     ).resolves.toMatchObject({ status: true, receiptid: 'RID-1' });
   });
 
+  test('acepta respuestas 302 de FactPy cuando el body JSON indica exito', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 302,
+      headers: {
+        get: jest.fn().mockReturnValue('application/json; charset=utf-8')
+      },
+      text: jest.fn().mockResolvedValue('{"status":true,"recordID":"RID-1","code":"NA"}')
+    });
+
+    const { emitirFactura } = require('../src/services/factpy/client');
+
+    await expect(
+      emitirFactura({ dataJson: { total: 1 }, recordID: 'RID-1', baseUrl: 'https://factpy.test' })
+    ).resolves.toMatchObject({ status: true, recordID: 'RID-1', code: 'NA' });
+  });
+
   test('envia la emision como multipart con dataJson serializado', async () => {
     const fields = mockLegacyFormData();
     global.fetch = jest.fn().mockResolvedValue({
