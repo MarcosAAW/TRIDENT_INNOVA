@@ -104,16 +104,16 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
     return parseFactPySuccessResponse(response, text, 'emisión');
   }
 
-  const params = new URLSearchParams();
-  params.append('recordID', rid);
-  params.append('recordid', rid);
-  params.append('dataJson', payloadString);
-  params.append('datajson', payloadString);
+  const form = new FormData();
+  form.append('recordID', rid);
+  form.append('recordid', rid);
+  form.append('dataJson', payloadString);
+  form.append('datajson', payloadString);
 
   const response = await httpFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params,
+    headers: form.getHeaders(),
+    body: form,
     timeout: timeoutMs || DEFAULT_TIMEOUT_MS
   });
 
