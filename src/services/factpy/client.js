@@ -54,6 +54,27 @@ function parseJsonSafe(text) {
   }
 }
 
+function isHtmlResponse(text = '', contentType = '') {
+  const normalizedType = String(contentType || '').toLowerCase();
+  const normalizedText = String(text || '').trim().toLowerCase();
+  if (normalizedType.includes('text/html')) return true;
+  return normalizedText.startsWith('<!doctype html') || normalizedText.startsWith('<html');
+}
+
+function parseFactPySuccessResponse(response, text, operation) {
+  const parsed = parseJsonSafe(text);
+  const contentType = response?.headers?.get?.('content-type') || '';
+
+  if (isHtmlResponse(text, contentType)) {
+    const error = new Error(`FactPy ${operation} devolvió HTML en lugar de JSON.`);
+    error.status = response?.status || 502;
+    error.body = text;
+    throw error;
+  }
+
+  return parsed ?? text;
+}
+
 async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
   const rid = resolveRecordId(recordID);
   const payloadString = toJsonString(dataJson);
@@ -73,16 +94,14 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
     });
 
     const text = await response.text();
-    const parsed = parseJsonSafe(text);
-
     if (!response.ok) {
       const error = new Error('FactPy emisión falló');
       error.status = response.status;
-      error.body = parsed || text;
+      error.body = parseJsonSafe(text) || text;
       throw error;
     }
 
-    return parsed ?? text;
+    return parseFactPySuccessResponse(response, text, 'emisión');
   }
 
   const params = new URLSearchParams();
@@ -99,16 +118,14 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
   });
 
   const text = await response.text();
-  const parsed = parseJsonSafe(text);
-
   if (!response.ok) {
     const error = new Error('FactPy emisión falló');
     error.status = response.status;
-    error.body = parsed || text;
+    error.body = parseJsonSafe(text) || text;
     throw error;
   }
 
-  return parsed ?? text;
+  return parseFactPySuccessResponse(response, text, 'emisión');
 }
 
 async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {}) {
@@ -132,16 +149,14 @@ async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {
   });
 
   const text = await response.text();
-  const parsed = parseJsonSafe(text);
-
   if (!response.ok) {
     const error = new Error('FactPy consulta de estados falló');
     error.status = response.status;
-    error.body = parsed || text;
+    error.body = parseJsonSafe(text) || text;
     throw error;
   }
 
-  return parsed ?? text;
+  return parseFactPySuccessResponse(response, text, 'consulta de estados');
 }
 
 module.exports = {
