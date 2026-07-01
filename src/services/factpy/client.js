@@ -53,14 +53,6 @@ function parseJsonSafe(text) {
 }
 
 function createMultipartFormData(fields = {}) {
-  if (typeof globalThis.FormData === 'function') {
-    const form = new globalThis.FormData();
-    Object.entries(fields).forEach(([key, value]) => {
-      form.append(key, value);
-    });
-    return { body: form, headers: {} };
-  }
-
   const LegacyFormData = require('form-data');
   const form = new LegacyFormData();
   Object.entries(fields).forEach(([key, value]) => {

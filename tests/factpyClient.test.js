@@ -1,21 +1,25 @@
 describe('FactPy client', () => {
   const originalFetch = global.fetch;
-  const originalFormData = global.FormData;
 
   afterEach(() => {
     global.fetch = originalFetch;
-    global.FormData = originalFormData;
     jest.resetModules();
   });
 
-  function createFormDataSpy() {
+  function mockLegacyFormData() {
     const fields = [];
-    class FakeFormData {
-      append(key, value) {
-        fields.push([key, value]);
-      }
-    }
-    return { FakeFormData, fields };
+    jest.doMock('form-data', () => {
+      return class FakeLegacyFormData {
+        append(key, value) {
+          fields.push([key, value]);
+        }
+
+        getHeaders() {
+          return { 'content-type': 'multipart/form-data; boundary=----copilot-test' };
+        }
+      };
+    });
+    return fields;
   }
 
   test('rechaza respuestas HTML durante la emision', async () => {
@@ -53,8 +57,7 @@ describe('FactPy client', () => {
   });
 
   test('envia la emision como multipart con dataJson serializado', async () => {
-    const { FakeFormData, fields } = createFormDataSpy();
-    global.FormData = FakeFormData;
+    const fields = mockLegacyFormData();
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -72,6 +75,15 @@ describe('FactPy client', () => {
       baseUrl: 'https://factpy.test'
     });
 
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://factpy.test/data.php',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'content-type': expect.stringContaining('multipart/form-data; boundary=')
+        })
+      })
+    );
     expect(fields).toEqual([
       ['recordID', 'RID-1'],
       ['dataJson', '{"total":1000,"receiptid":"RID-100"}']
@@ -79,8 +91,7 @@ describe('FactPy client', () => {
   });
 
   test('consulta estados como multipart con receiptid serializado', async () => {
-    const { FakeFormData, fields } = createFormDataSpy();
-    global.FormData = FakeFormData;
+    const fields = mockLegacyFormData();
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -96,6 +107,15 @@ describe('FactPy client', () => {
       consultarEstados({ receiptIds: ['RID-1'], recordID: 'RID-FACTPY', baseUrl: 'https://factpy.test' })
     ).resolves.toEqual([{ receiptid: 'RID-1', estado: 'Aprobado' }]);
 
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://factpy.test/estadoDE.php',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'content-type': expect.stringContaining('multipart/form-data; boundary=')
+        })
+      })
+    );
     expect(fields).toEqual([
       ['receiptid', '{"receiptid":["RID-1"]}'],
       ['recordID', 'RID-FACTPY']
