@@ -17,6 +17,10 @@ describe('FactPy client', () => {
         getHeaders() {
           return { 'content-type': 'multipart/form-data; boundary=----copilot-test' };
         }
+
+        getLengthSync() {
+          return 123;
+        }
       };
     });
     return fields;
@@ -80,7 +84,8 @@ describe('FactPy client', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          'content-type': expect.stringContaining('multipart/form-data; boundary=')
+          'content-type': expect.stringContaining('multipart/form-data; boundary='),
+          'Content-Length': '123'
         })
       })
     );
@@ -112,7 +117,8 @@ describe('FactPy client', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          'content-type': expect.stringContaining('multipart/form-data; boundary=')
+          'content-type': expect.stringContaining('multipart/form-data; boundary='),
+          'Content-Length': '123'
         })
       })
     );

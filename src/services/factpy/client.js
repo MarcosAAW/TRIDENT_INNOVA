@@ -70,7 +70,21 @@ function createMultipartFormData(fields = {}) {
   Object.entries(fields).forEach(([key, value]) => {
     form.append(key, value);
   });
-  return { body: form, headers: form.getHeaders() };
+
+  const headers = form.getHeaders();
+  if (typeof form.getLengthSync === 'function') {
+    try {
+      const contentLength = form.getLengthSync();
+      if (Number.isFinite(contentLength) && contentLength > 0) {
+        headers['Content-Length'] = String(contentLength);
+      }
+    } catch (_err) {
+      // Algunos cuerpos multipart no pueden calcularse de forma síncrona; en ese caso
+      // dejamos que el cliente HTTP haga streaming con los headers disponibles.
+    }
+  }
+
+  return { body: form, headers };
 }
 
 function isHtmlResponse(text = '', contentType = '') {
