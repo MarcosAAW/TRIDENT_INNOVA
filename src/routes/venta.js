@@ -1453,6 +1453,14 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
 
           const now = new Date();
           let facturaActual = ventaActual.factura_electronica;
+          const usaFactPy = Boolean(factpyConfig?.recordId);
+          const estadoInicialFactura = usaFactPy ? 'PENDIENTE' : 'PAGADA';
+          const mensajeInicialFactura = usaFactPy
+            ? 'Factura generada y pendiente de envío a FactPy.'
+            : 'Factura generada y marcada como pagada en entorno local de prueba.';
+          const mensajeReintentoFactura = usaFactPy
+            ? 'Factura reintentada y pendiente de envío a FactPy.'
+            : 'Factura reintentada (estado pagada) en entorno local de prueba.';
 
           if (!facturaActual) {
             const timbradoSeleccionado = selectTimbradoParaVenta(ventaActual, empresaConfig);
@@ -1467,9 +1475,9 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
                 nro_factura: numeroFactura,
                 timbrado: timbradoSeleccionado.numero || 'NO_TIMBRADO',
                 fecha_emision: now,
-                estado: 'PAGADA',
+                estado: estadoInicialFactura,
                 respuesta_set: {
-                  mensaje: 'Factura generada y marcada como pagada en entorno local de prueba.',
+                  mensaje: mensajeInicialFactura,
                   timestamp: now.toISOString()
                 },
                 intentos: 1,
@@ -1492,11 +1500,11 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
               data: {
                 intentos: { set: intentosPrevios + 1 },
                 respuesta_set: {
-                  mensaje: 'Factura reintentada (estado pagada) en entorno local de prueba.',
+                  mensaje: mensajeReintentoFactura,
                   intento: intentosPrevios + 1,
                   timestamp: now.toISOString()
                 },
-                estado: 'PAGADA',
+                estado: estadoInicialFactura,
                 updated_at: now
               }
             });
