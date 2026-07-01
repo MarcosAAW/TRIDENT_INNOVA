@@ -1671,7 +1671,6 @@ if (typeof window !== 'undefined') {
     if (tipo === 'factura' && venta.factura_electronica?.id) {
       const factura = venta.factura_electronica;
       const recibosEnMemoria = normalizeRecibos(venta.recibos);
-      const pdfPath = factura?.pdf_path;
       const pendingFacturaWindow = createDeferredDocumentWindow({
         pendingTitle: 'Abriendo factura...',
         pendingDescription: 'Estamos preparando la factura electrónica.',
@@ -1686,23 +1685,34 @@ if (typeof window !== 'undefined') {
         blockedTitle: 'No se pudieron abrir los recibos relacionados',
         blockedDescription: 'Desbloquea las ventanas emergentes para ver los recibos relacionados.'
       });
-      if (pdfPath && /^https?:\/\//i.test(pdfPath)) {
-        pendingFacturaWindow.navigate(pdfPath);
-      } else {
-        const facturaUrl = pdfPath
-          ? urlWithSession(pdfPath)
-          : null;
-        if (!facturaUrl) {
-          pendingFacturaWindow.close();
-          pendingReceiptWindow.close();
-          infoDialog({
-            title: 'Factura sin PDF',
-            description: 'No se encontró un PDF de factura disponible.'
-          });
-          return;
+      let facturaPdfUrl = isCanonicalFacturaPdfUrl(getFacturaPdfUrl(factura))
+        ? getFacturaPdfUrl(factura)
+        : null;
+
+      if (!facturaPdfUrl) {
+        const refreshed = await waitForCanonicalFacturaPdf(venta.id);
+        if (refreshed?.venta?.factura_electronica) {
+          venta.factura_electronica = refreshed.venta.factura_electronica;
+          ventasState.lastList = ventasState.lastList.map((item) => (
+            item?.id === venta.id
+              ? { ...item, factura_electronica: refreshed.venta.factura_electronica }
+              : item
+          ));
         }
-        pendingFacturaWindow.navigate(facturaUrl);
+        facturaPdfUrl = refreshed?.pdfUrl || null;
       }
+
+      if (!facturaPdfUrl) {
+        pendingFacturaWindow.close();
+        pendingReceiptWindow.close();
+        infoDialog({
+          title: 'Factura de FactPy no disponible',
+          description: 'Esta venta ya no abrirá la factura legacy. El PDF canónico de FactPy todavía no está disponible.'
+        });
+        return;
+      }
+
+      pendingFacturaWindow.navigate(facturaPdfUrl);
 
       if (recibosEnMemoria.length) {
         if (recibosEnMemoria.length === 1) {
