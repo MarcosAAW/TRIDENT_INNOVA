@@ -129,11 +129,62 @@ describe('FactPy API', () => {
     expect(payload.items).toHaveLength(1);
     expect(payload.items[0]).toMatchObject({
       cantidad: 12,
-      descuento: 48000,
-      precioUnitario: 94000,
+      descuento: 0,
+      precioUnitario: 90000,
       precioTotal: 1080000,
       baseGravItem: 981818.18181818,
       liqIvaItem: 98181.81818182
+    });
+  });
+
+  test('divide una linea con descuento no divisible para evitar descuentos ambiguos en FactPy', () => {
+    const payload = buildFactPyPayload(
+      {
+        id: 'venta-descuento-split',
+        created_at: '2026-07-01T14:06:25Z',
+        moneda: 'PYG',
+        total: 299999,
+        descuento_total: 1,
+        iva_porcentaje: 10,
+        cliente: {
+          ruc: '80093150-5',
+          nombre_razon_social: 'AGRICULTURAL BUSINESS SRL',
+          direccion: 'Asunción',
+          email: 'agrisa@agrisa.com.py'
+        },
+        detalles: [
+          {
+            cantidad: 3,
+            precio_unitario: 100000,
+            subtotal: 300000,
+            iva_porcentaje: 10,
+            producto: {
+              nombre: 'Item split',
+              sku: 'REP-SPLIT',
+              precio_venta: 100000,
+              iva_porcentaje: 10
+            }
+          }
+        ]
+      },
+      {
+        id: 'factura-descuento-split',
+        nro_factura: '001-001-0000004'
+      }
+    );
+
+    expect(payload.items).toHaveLength(2);
+    expect(payload.items[0]).toMatchObject({
+      cantidad: 2,
+      descuento: 0,
+      precioUnitario: 99999.66,
+      precioTotal: 199999.32
+    });
+    expect(payload.items[1]).toMatchObject({
+      cantidad: 1,
+      descuento: 0,
+      precioUnitario: 99999.68,
+      precioTotal: 99999.68
     });
   });
 

@@ -3051,7 +3051,61 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
   const lastIndex = rawItems.length - 1;
   let descuentoAsignado = 0;
 
-  const items = rawItems.map((item, idx) => {
+  const buildFactPyItemPayload = (item, cantidad, precioUnitario, precioTotal, descuento = 0) => {
+    const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
+    const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
+    const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
+
+    return {
+      descripcion: item.descripcion,
+      codigo: item.codigo,
+      unidadMedida: item.unidadMedida,
+      ivaTasa: item.ivaTasa,
+      ivaAfecta: item.ivaAfecta,
+      cantidad,
+      descuento,
+      precioUnitario,
+      precioTotal,
+      baseGravItem,
+      liqIvaItem
+    };
+  };
+
+  const floorToDecimals = (value, digits) => {
+    const factor = 10 ** digits;
+    return Math.floor(Number(value || 0) * factor) / factor;
+  };
+
+  const normalizeDiscountedItemForFactPy = (item, precioTotal) => {
+    const cantidad = Number(item.cantidad) || 0;
+    if (cantidad <= 0) return [];
+    if (cantidad === 1) {
+      return [buildFactPyItemPayload(item, 1, precioTotal, precioTotal, 0)];
+    }
+
+    const baseUnit = floorToDecimals(precioTotal / cantidad, decimals);
+    if (baseUnit <= 0) {
+      return [buildFactPyItemPayload(item, cantidad, item.precioUnitario, precioTotal, 0)];
+    }
+
+    const uniformTotal = round(baseUnit * cantidad, decimals);
+    if (Math.abs(uniformTotal - precioTotal) <= (moneda === 'USD' ? 0.0001 : 0.01)) {
+      return [buildFactPyItemPayload(item, cantidad, baseUnit, precioTotal, 0)];
+    }
+
+    const remainingQty = cantidad - 1;
+    const firstTotal = round(baseUnit * remainingQty, decimals);
+    const lastUnit = round(precioTotal - firstTotal, decimals);
+
+    const lines = [];
+    if (remainingQty > 0) {
+      lines.push(buildFactPyItemPayload(item, remainingQty, baseUnit, firstTotal, 0));
+    }
+    lines.push(buildFactPyItemPayload(item, 1, lastUnit, lastUnit, 0));
+    return lines;
+  };
+
+  const items = rawItems.flatMap((item, idx) => {
     const bruto = Number(item.precioTotalBruto) || 0;
     const descuentoLinea = (() => {
       if (descuentoAplicable <= 0 || totalPagoBruto <= 0) return 0;
@@ -3063,23 +3117,11 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       return proporcional;
     })();
     const precioTotal = round(Math.max(bruto - descuentoLinea, 0), decimals);
-    const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
-    const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
-    const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
+    if (descuentoLinea > 0) {
+      return normalizeDiscountedItemForFactPy(item, precioTotal);
+    }
 
-    return {
-      descripcion: item.descripcion,
-      codigo: item.codigo,
-      unidadMedida: item.unidadMedida,
-      ivaTasa: item.ivaTasa,
-      ivaAfecta: item.ivaAfecta,
-      cantidad: item.cantidad,
-      descuento: Number(descuentoLinea.toFixed(8)),
-      precioUnitario: item.precioUnitario,
-      precioTotal,
-      baseGravItem,
-      liqIvaItem
-    };
+    return [buildFactPyItemPayload(item, item.cantidad, item.precioUnitario, precioTotal, 0)];
   });
 
   const totalPago = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
