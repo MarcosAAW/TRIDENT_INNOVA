@@ -641,7 +641,7 @@ describe('Ventas API (integración)', () => {
     expect(facturaRes.body.factura.xml_path.endsWith('.xml')).toBe(true);
 
     const segundoIntento = await request(app).post(`/ventas/${ventaId}/facturar`).expect(200);
-    expect(Number(segundoIntento.body.factura.intentos)).toBeGreaterThan(1);
+    expect(Number(segundoIntento.body.factura.intentos)).toBe(1);
     expect(segundoIntento.body.factura.pdf_path).toBe(facturaRes.body.factura.pdf_path);
     expect(segundoIntento.body.factura.xml_path).toBe(facturaRes.body.factura.xml_path);
   });
@@ -983,6 +983,40 @@ describe('Ventas API (integración)', () => {
     expect(facturaRes.body.factura?.xml_path).toBe('https://factpy.test/doc.xml');
     expect(facturaRes.body.factura?.pdf_path).toBe('https://factpy.test/doc.pdf');
     expect(facturaRes.body.factura?.respuesta_set?.factpy?.status).toBe(true);
+  });
+
+  test('no reemite a FactPy cuando la factura ya fue aceptada previamente', async () => {
+    procesarFacturaElectronica.mockResolvedValue(null);
+    emitirFactura.mockResolvedValueOnce({
+      status: true,
+      code: 'NA',
+      cdc: '01800000000000000000000000000000000000000009',
+      xmlLink: 'https://factpy.test/accepted.xml',
+      kude: 'https://factpy.test/accepted.pdf'
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(emitirFactura).toHaveBeenCalledTimes(1);
+
+    const facturaRes = await request(app)
+      .post(`/ventas/${createRes.body.id}/facturar`)
+      .expect(200);
+
+    expect(emitirFactura).toHaveBeenCalledTimes(1);
+    expect(facturaRes.body.factura?.estado).toBe('ACEPTADO');
+    expect(facturaRes.body.factura?.respuesta_set?.factpy?.cdc).toBe('01800000000000000000000000000000000000000009');
   });
 
   test('factura una venta con cliente con correo sin romper el flujo principal', async () => {

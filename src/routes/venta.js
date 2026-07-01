@@ -577,6 +577,13 @@ function getOperationalSaldoPendiente(venta) {
   return Number(venta?.saldo_pendiente ?? 0);
 }
 
+function hasSuccessfulFactpyEmission(factura) {
+  return Boolean(
+    factura?.respuesta_set?.factpy?.status === true &&
+    (factura?.respuesta_set?.factpy?.cdc || factura?.qr_data)
+  );
+}
+
 function normalizeCondicionVenta(value, creditoConfig) {
   const normalized = (value || '').toString().toUpperCase();
   if (normalized.includes('CREDITO') || normalized.includes('CRÉDITO')) return 'CREDITO';
@@ -1493,7 +1500,7 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
                 estado: ventaActual.estado === 'PENDIENTE' ? 'FACTURADO' : ventaActual.estado
               }
             });
-          } else {
+          } else if (!hasSuccessfulFactpyEmission(facturaActual)) {
             const intentosPrevios = Number(facturaActual.intentos) || 0;
             facturaActual = await tx.facturaElectronica.update({
               where: { id: facturaActual.id },
@@ -1558,7 +1565,7 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
       console.error('[Factura] No se pudo generar el PDF.', assetError);
     }
 
-    if (factpyConfig?.recordId) {
+    if (factpyConfig?.recordId && !hasSuccessfulFactpyEmission(facturaActualizada)) {
       try {
         const factpyOptions = {
           condicion_pago: facturarInput.condicion_pago || venta?.condicion_venta,
@@ -1750,9 +1757,9 @@ router.get('/reporte/diario', authorizeRoles('ADMIN'), async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="reporte-ventas-diario-${range.fileLabel}.pdf"`);
 
-    const doc = new PDFDocument({ size: 'LEGAL', margin: 32, bufferPages: true, layout: 'landscape' });
+    const doc = new PDFDocument({ size: 'A3', margin: 24, bufferPages: true, layout: 'landscape' });
     doc.pipe(res);
-    renderDailySalesReport(doc, data, { range, filterChips });
+    renderDailySalesReport(doc, data, { range, filterChips, compactTable: true });
     doc.end();
   } catch (error) {
     if (error instanceof VentaValidationError) {
@@ -1852,9 +1859,9 @@ router.get('/reporte/margen', authorizeRoles('ADMIN'), async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="reporte-ventas-margen-${range.fileLabel}.pdf"`);
 
-    const doc = new PDFDocument({ size: 'LEGAL', margin: 32, bufferPages: true, layout: 'landscape' });
+    const doc = new PDFDocument({ size: 'A3', margin: 24, bufferPages: true, layout: 'landscape' });
     doc.pipe(res);
-    renderMarginSalesReport(doc, data, { range, filterChips });
+    renderMarginSalesReport(doc, data, { range, filterChips, compactTable: true });
     doc.end();
   } catch (error) {
     if (error instanceof VentaValidationError) {
@@ -1923,9 +1930,11 @@ function describeReportFilters(filters = {}) {
   return chips;
 }
 
-function renderDailySalesReport(doc, ventas, { range, filterChips }) {
+function renderDailySalesReport(doc, ventas, { range, filterChips, compactTable = false }) {
   const startX = doc.page.margins.left;
   const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const tableWidth = usableWidth - 36;
+  const tableStartX = startX + ((usableWidth - tableWidth) / 2);
   const totals = calculateDailyTotals(ventas);
   const rows = buildDailyReportRows(ventas, totals);
   renderReportHeader(doc, 'Reporte diario de ventas', range, startX, usableWidth, filterChips);
@@ -1934,58 +1943,25 @@ function renderDailySalesReport(doc, ventas, { range, filterChips }) {
     doc,
     [
       { label: 'Ventas registradas', value: formatIntegerValue(ventas.length) },
-      { label: 'Subtotal', value: formatCurrencyPyG(totals.subtotal) },
-      { label: 'IVA calculado', value: formatCurrencyPyG(totals.impuesto) },
-      { label: 'Total periodo', value: formatCurrencyPyG(totals.total) }
+      { label: 'Ventas PYG', value: formatCurrencyPyG(totals.total) },
+      { label: 'Ventas USD', value: formatCurrencyUsd(totals.totalUsd) },
+      { label: 'IVA PYG', value: formatCurrencyPyG(totals.impuesto) },
+      { label: 'IVA USD', value: formatCurrencyUsd(totals.impuestoUsd) },
+      { label: 'Costo PYG', value: formatCurrencyPyG(totals.costo) },
+      { label: 'Costo USD', value: formatCurrencyUsd(totals.costoUsd) }
     ],
     startX,
     usableWidth
   );
-  const extraLines = [];
-  if (totals.totalUsd > 0 || totals.impuestoUsd > 0) {
-    const parts = [];
-    if (totals.totalUsd > 0) parts.push(`Equivalente en USD: ${formatCurrencyUsd(totals.totalUsd)}`);
-    if (totals.impuestoUsd > 0) parts.push(`IVA en USD: ${formatCurrencyUsd(totals.impuestoUsd)}`);
-    extraLines.push(parts.join('   ·   '));
-  }
-  if (totals.iva5 > 0 || totals.iva10 > 0) {
-    const ivaParts = [];
-    ivaParts.push(`IVA 5%: ${formatCurrencyPyG(totals.iva5)}`);
-    ivaParts.push(`IVA 10%: ${formatCurrencyPyG(totals.iva10)}`);
-    if (totals.iva5Usd > 0 || totals.iva10Usd > 0) {
-      const ivaUsdParts = [];
-      if (totals.iva5Usd > 0) ivaUsdParts.push(`5% USD ${formatCurrencyUsd(totals.iva5Usd)}`);
-      if (totals.iva10Usd > 0) ivaUsdParts.push(`10% USD ${formatCurrencyUsd(totals.iva10Usd)}`);
-      ivaParts.push(`(${ivaUsdParts.join(' · ')})`);
-    }
-    extraLines.push(ivaParts.join('   ·   '));
-  }
-  if (totals.costo > 0 || totals.margen !== 0) {
-    const margenParts = [];
-    if (totals.costo > 0) margenParts.push(`Costo estimado: ${formatCurrencyPyG(totals.costo)}`);
-    const margenTexto = `Margen: ${formatCurrencyPyG(totals.margen)} (${formatPercentValue(totals.margenPercent)})`;
-    margenParts.push(margenTexto);
-    extraLines.push(margenParts.join('   ·   '));
-  }
-  if (extraLines.length) {
-    extraLines.forEach((line) => {
-      doc
-        .font('Helvetica')
-        .fontSize(9)
-        .fillColor('#475569')
-        .text(line, startX, doc.y + 4);
-      doc.moveDown(0.2);
-    });
-    doc.moveDown(0.2);
-  }
   ensureMinimumSpacing(doc, 10);
   drawReportTable(
     doc,
     rows,
-    buildDailyReportColumns(usableWidth),
-    startX,
-    usableWidth,
+    buildDailyReportColumns(tableWidth),
+    tableStartX,
+    tableWidth,
     {
+      compact: compactTable,
       resolveRowFill: (row, index) => {
         if (row.isSummary) return '#0f172a';
         if (row.isCancelled) return '#fee2e2';
@@ -2006,9 +1982,11 @@ function renderDailySalesReport(doc, ventas, { range, filterChips }) {
     });
 }
 
-function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
+function renderMarginSalesReport(doc, ventas, { range, filterChips, compactTable = false }) {
   const startX = doc.page.margins.left;
   const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const tableWidth = usableWidth - 36;
+  const tableStartX = startX + ((usableWidth - tableWidth) / 2);
   const totals = calculateMarginTotals(ventas);
   const rows = buildMarginReportRows(ventas, totals);
   renderReportHeader(doc, 'Reporte de margen de ventas', range, startX, usableWidth, filterChips);
@@ -2017,8 +1995,12 @@ function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
     doc,
     [
       { label: 'Ventas analizadas', value: formatIntegerValue(ventas.length) },
-      { label: 'Total ventas', value: formatCurrencyPyG(totals.totalVenta) },
+      { label: 'Ventas PYG', value: formatCurrencyPyG(totals.totalVenta) },
+      { label: 'Ventas USD', value: formatCurrencyUsd(totals.totalVentaUsd) },
       { label: 'Costo estimado', value: formatCurrencyPyG(totals.costo) },
+      { label: 'Costo USD', value: formatCurrencyUsd(totals.costoUsd) },
+      { label: 'Margen PYG', value: formatCurrencyPyG(totals.margen) },
+      { label: 'Margen USD', value: formatCurrencyUsd(totals.margenUsd) },
       { label: 'Margen promedio', value: formatPercentValue(totals.margenPercent) }
     ],
     startX,
@@ -2028,10 +2010,11 @@ function renderMarginSalesReport(doc, ventas, { range, filterChips }) {
   drawReportTable(
     doc,
     rows,
-    buildMarginReportColumns(usableWidth),
-    startX,
-    usableWidth,
+    buildMarginReportColumns(tableWidth),
+    tableStartX,
+    tableWidth,
     {
+      compact: compactTable,
       resolveRowFill: (row, index) => (row.isSummary ? '#0f172a' : index % 2 === 0 ? '#ffffff' : '#f8fafc'),
       resolveFontColor: (row) => (row.isSummary ? '#ffffff' : '#0f172a')
     }
@@ -2141,43 +2124,36 @@ function drawReportSummaryChips(doc, items, startX, usableWidth) {
     .fillColor('#0f172a')
     .text('Resumen del periodo', startX, doc.y, { width: usableWidth });
   doc.moveDown(0.3);
-
-  const visibleItems = items.slice(0, 4);
   const gap = 12;
-  const chipWidth = (usableWidth - gap * (visibleItems.length - 1)) / visibleItems.length;
   const chipHeight = 56;
-  const baseY = doc.y;
+  const maxPerRow = items.length > 4 ? 3 : 4;
+  let cursorY = doc.y;
 
-  visibleItems.forEach((item, index) => {
-    const x = startX + index * (chipWidth + gap);
-    doc.save();
-    doc.roundedRect(x, baseY, chipWidth, chipHeight, 8).fill('#f8fafc');
-    doc.restore();
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor('#475569')
-      .text(item.label, x + 10, baseY + 10, { width: chipWidth - 20 });
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(14)
-      .fillColor('#0f172a')
-      .text(String(item.value ?? '—'), x + 10, baseY + 26, { width: chipWidth - 20 });
-  });
+  for (let index = 0; index < items.length; index += maxPerRow) {
+    const rowItems = items.slice(index, index + maxPerRow);
+    const chipWidth = (usableWidth - gap * (rowItems.length - 1)) / rowItems.length;
 
-  doc.y = baseY + chipHeight + 8;
-
-  if (items.length > visibleItems.length) {
-    const remaining = items.slice(visibleItems.length);
-    remaining.forEach((item) => {
+    rowItems.forEach((item, rowIndex) => {
+      const x = startX + rowIndex * (chipWidth + gap);
+      doc.save();
+      doc.roundedRect(x, cursorY, chipWidth, chipHeight, 8).fill('#f8fafc');
+      doc.restore();
       doc
         .font('Helvetica')
         .fontSize(9)
         .fillColor('#475569')
-        .text(`${item.label}: ${item.value}`, startX, doc.y, { width: usableWidth });
+        .text(item.label, x + 10, cursorY + 10, { width: chipWidth - 20 });
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(14)
+        .fillColor('#0f172a')
+        .text(String(item.value ?? '—'), x + 10, cursorY + 26, { width: chipWidth - 20 });
     });
-    doc.moveDown(0.4);
+
+    cursorY += chipHeight + 8;
   }
+
+  doc.y = cursorY;
 }
 
 function ensureMinimumSpacing(doc, amount) {
@@ -2199,6 +2175,11 @@ function drawReportTable(doc, rows, columns, startX, usableWidth, options = {}) 
   }
 
   const headerHeight = 24;
+  const compact = options.compact === true;
+  const cellPaddingX = compact ? 4 : 6;
+  const cellPaddingY = compact ? 4 : 6;
+  const bodyFontSize = compact ? 8 : 9;
+  const headerFontSize = compact ? 8 : 9;
   const maxY = () => doc.page.height - doc.page.margins.bottom;
 
   const drawHeader = () => {
@@ -2210,9 +2191,9 @@ function drawReportTable(doc, rows, columns, startX, usableWidth, options = {}) 
     columns.forEach((col, columnIndex) => {
       doc
         .font('Helvetica-Bold')
-        .fontSize(9)
+        .fontSize(headerFontSize)
         .fillColor('#ffffff')
-        .text(col.label, cursorX + 6, headerY + 6, { width: col.width - 12, align: col.align || 'left' });
+        .text(col.label, cursorX + cellPaddingX, headerY + cellPaddingY, { width: col.width - cellPaddingX * 2, align: col.align || 'left' });
       cursorX += col.width;
       if (columnIndex < columns.length - 1) {
         doc
@@ -2248,9 +2229,9 @@ function drawReportTable(doc, rows, columns, startX, usableWidth, options = {}) 
       const value = row[col.key] ?? '—';
       doc
         .font(fontName)
-        .fontSize(col.key === 'estado' ? 8 : 9)
+        .fontSize(col.key === 'estado' ? Math.min(bodyFontSize, 8) : bodyFontSize)
         .fillColor(fontColor)
-        .text(value, cursorX + 6, rowY + 6, { width: col.width - 12, align: col.align || 'left' });
+        .text(value, cursorX + cellPaddingX, rowY + cellPaddingY, { width: col.width - cellPaddingX * 2, align: col.align || 'left' });
       cursorX += col.width;
       if (columnIndex < columns.length - 1) {
         doc
@@ -2280,17 +2261,17 @@ function measureReportRowHeight(doc, row, columns) {
 
 function buildDailyReportColumns(usableWidth) {
   const definitions = [
-    { key: 'fecha', label: 'Fecha', ratio: 0.075 },
+    { key: 'fecha', label: 'Fecha', ratio: 0.07 },
     { key: 'factura', label: 'N° factura', ratio: 0.11 },
     { key: 'cliente', label: 'Cliente', ratio: 0.19 },
-    { key: 'usuario', label: 'Usuario', ratio: 0.09 },
-    { key: 'estado', label: 'Estado', ratio: 0.065 },
-    { key: 'condicion', label: 'Condición', ratio: 0.05 },
-    { key: 'subtotal', label: 'Subtotal', ratio: 0.13, align: 'right' },
-    { key: 'descuento', label: 'Descuento', ratio: 0.08, align: 'right' },
-    { key: 'iva', label: 'IVA', ratio: 0.09, align: 'right' },
-    { key: 'total', label: 'Total', ratio: 0.1, align: 'right' },
-    { key: 'items', label: 'Items', ratio: 0.02, align: 'center' }
+    { key: 'moneda', label: 'Mon.', ratio: 0.05, align: 'center' },
+    { key: 'estado', label: 'Estado', ratio: 0.07 },
+    { key: 'subtotalOrigen', label: 'Subtotal orig.', ratio: 0.1, align: 'right' },
+    { key: 'descuentoOrigen', label: 'Desc. orig.', ratio: 0.08, align: 'right' },
+    { key: 'ivaPyg', label: 'IVA PYG', ratio: 0.09, align: 'right' },
+    { key: 'totalOrigen', label: 'Total orig.', ratio: 0.09, align: 'right' },
+    { key: 'totalPyg', label: 'Total PYG', ratio: 0.09, align: 'right' },
+    { key: 'items', label: 'Items', ratio: 0.03, align: 'center' }
   ];
 
   return definitions.map((column) => ({
@@ -2303,19 +2284,17 @@ function buildDailyReportRows(ventas, totals) {
   const rows = ventas.map((venta) => {
     const estadoBase = (venta.estado || '').toUpperCase();
     const anulada = estadoBase === 'ANULADA' || Boolean(venta.deleted_at);
-    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
-    const condicion = condicionRaw.includes('CREDITO') ? 'Crédito' : 'Contado';
     return {
       fecha: formatDateForDisplay(venta.fecha || venta.created_at),
       factura: resolveInvoiceNumberForReport(venta),
       cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
-      usuario: venta.usuario?.nombre || venta.usuario?.usuario || '—',
+      moneda: formatVentaMonedaReporte(venta),
       estado: anulada ? 'Anulada' : venta.estado || '—',
-      condicion,
-      subtotal: formatCurrencyPyG(venta.subtotal),
-      descuento: formatCurrencyPyG(venta.descuento_total),
-      iva: formatCurrencyPyG(venta.impuesto_total),
-      total: formatCurrencyPyG(venta.total ?? venta.subtotal),
+      subtotalOrigen: formatVentaMontoOrigen(venta, venta.subtotal),
+      descuentoOrigen: formatVentaMontoOrigen(venta, venta.descuento_total),
+      ivaPyg: formatCurrencyPyG(venta.impuesto_total),
+      totalOrigen: formatVentaMontoOrigen(venta, venta.total ?? venta.subtotal, { explicitCurrencyAmount: venta.total_moneda }),
+      totalPyg: formatCurrencyPyG(venta.total ?? venta.subtotal),
       items: formatIntegerValue(countVentaItems(venta)),
       isCancelled: anulada
     };
@@ -2325,13 +2304,13 @@ function buildDailyReportRows(ventas, totals) {
     fecha: 'Totales',
     factura: `(${ventas.length} ventas)`,
     cliente: '',
-    usuario: '',
+    moneda: '',
     estado: '',
-    condicion: '',
-    subtotal: formatCurrencyPyG(totals.subtotal),
-    descuento: formatCurrencyPyG(totals.descuento),
-    iva: formatCurrencyPyG(totals.impuesto),
-    total: formatCurrencyPyG(totals.total),
+    subtotalOrigen: formatOriginTotals(totals.subtotalUsd, totals.subtotalOrigenPyg),
+    descuentoOrigen: formatOriginTotals(totals.descuentoUsd, totals.descuentoOrigenPyg),
+    ivaPyg: formatCurrencyPyG(totals.impuesto),
+    totalOrigen: formatOriginTotals(totals.totalUsd, totals.totalOrigenPyg),
+    totalPyg: formatCurrencyPyG(totals.total),
     items: formatIntegerValue(totals.items),
     isSummary: true
   });
@@ -2356,7 +2335,19 @@ function calculateDailyTotals(ventas) {
       const ivaRate = Number.isFinite(Number(venta.iva_porcentaje)) ? Number(venta.iva_porcentaje) : 10;
       if (ivaRate === 5) acc.iva5 += ivaTotal; else if (ivaRate === 10) acc.iva10 += ivaTotal;
       if (currency === 'USD') {
+        const subtotalUsd = resolveVentaMontoUsd(venta, venta.subtotal);
+        const descuentoUsd = resolveVentaMontoUsd(venta, venta.descuento_total);
+        const costoUsd = resolveVentaMontoUsd(venta, costo);
         const usdAmount = Number(venta.total_moneda) || 0;
+        if (subtotalUsd !== null) {
+          acc.subtotalUsd += subtotalUsd;
+        }
+        if (descuentoUsd !== null) {
+          acc.descuentoUsd += descuentoUsd;
+        }
+        if (costoUsd !== null) {
+          acc.costoUsd += costoUsd;
+        }
         if (usdAmount > 0) {
           acc.totalUsd += usdAmount;
         }
@@ -2366,6 +2357,10 @@ function calculateDailyTotals(ventas) {
           acc.impuestoUsd += ivaUsd;
           if (ivaRate === 5) acc.iva5Usd += ivaUsd; else if (ivaRate === 10) acc.iva10Usd += ivaUsd;
         }
+      } else {
+        acc.subtotalOrigenPyg += Number(venta.subtotal) || 0;
+        acc.descuentoOrigenPyg += Number(venta.descuento_total) || 0;
+        acc.totalOrigenPyg += totalVenta;
       }
       return acc;
     },
@@ -2376,12 +2371,18 @@ function calculateDailyTotals(ventas) {
       total: 0,
       items: 0,
       totalUsd: 0,
+      subtotalUsd: 0,
+      descuentoUsd: 0,
+      subtotalOrigenPyg: 0,
+      descuentoOrigenPyg: 0,
+      totalOrigenPyg: 0,
       impuestoUsd: 0,
       iva5: 0,
       iva10: 0,
       iva5Usd: 0,
       iva10Usd: 0,
       costo: 0,
+      costoUsd: 0,
       margen: 0
     }
   );
@@ -2399,8 +2400,11 @@ function buildDailyCsv(ventas) {
     'Condición',
     'Moneda',
     'Subtotal_PYG',
+    'Subtotal_Moneda',
     'Descuento_PYG',
+    'Descuento_Moneda',
     'IVA_PYG',
+    'IVA_Moneda',
     'Total_PYG',
     'Total_Moneda',
     'Tipo_cambio',
@@ -2425,8 +2429,11 @@ function buildDailyCsv(ventas) {
       condicionRaw,
       (venta.moneda || 'PYG').toUpperCase(),
       plainNumber(venta.subtotal),
+      plainNumber(resolveVentaMontoUsd(venta, venta.subtotal)),
       plainNumber(venta.descuento_total),
+      plainNumber(resolveVentaMontoUsd(venta, venta.descuento_total)),
       plainNumber(venta.impuesto_total),
+      plainNumber(resolveVentaMontoUsd(venta, venta.impuesto_total)),
       plainNumber(totalVenta),
       plainNumber(venta.total_moneda),
       plainNumber(venta.tipo_cambio),
@@ -2445,8 +2452,11 @@ function buildDailyCsv(ventas) {
     '',
     '',
     plainNumber(totals.subtotal),
+    plainNumber(totals.subtotalUsd),
     plainNumber(totals.descuento),
+    plainNumber(totals.descuentoUsd),
     plainNumber(totals.impuesto),
+    plainNumber(totals.impuestoUsd),
     plainNumber(totals.total),
     plainNumber(totals.totalUsd),
     '',
@@ -2468,11 +2478,14 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
     'Estado',
     'Condición',
     'Moneda',
-    'Subtotal PYG',
-    'Descuento PYG',
+    'Subtotal orig. USD',
+    'Subtotal orig. Gs.',
+    'Desc. orig. USD',
+    'Desc. orig. Gs.',
     'IVA PYG',
+    'Total orig. USD',
+    'Total orig. Gs.',
     'Total PYG',
-    'Total Moneda',
     'Tipo cambio',
     'Costo estimado PYG',
     'Margen PYG',
@@ -2487,6 +2500,10 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
     const margen = totalVenta - costo;
     const margenPercent = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
     const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
+    const subtotalOrigen = splitVentaAmountByCurrency(venta, venta.subtotal);
+    const descuentoOrigen = splitVentaAmountByCurrency(venta, venta.descuento_total);
+    const totalOrigen = splitVentaAmountByCurrency(venta, totalVenta, { explicitCurrencyAmount: venta.total_moneda });
+
     return [
       formatIsoDateOnly(venta.fecha || venta.created_at),
       resolveInvoiceNumberForReport(venta),
@@ -2494,11 +2511,14 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
       venta.estado || '',
       condicionRaw,
       (venta.moneda || 'PYG').toUpperCase(),
-      asNumberOrNull(venta.subtotal),
-      asNumberOrNull(venta.descuento_total),
+      subtotalOrigen.usd,
+      subtotalOrigen.pyg,
+      descuentoOrigen.usd,
+      descuentoOrigen.pyg,
       asNumberOrNull(venta.impuesto_total),
+      totalOrigen.usd,
+      totalOrigen.pyg,
       asNumberOrNull(totalVenta),
-      asNumberOrNull(venta.total_moneda),
       asNumberOrNull(venta.tipo_cambio),
       asNumberOrNull(costo),
       asNumberOrNull(margen),
@@ -2514,11 +2534,14 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
     '',
     '',
     '',
-    asNumberOrNull(totals.subtotal),
-    asNumberOrNull(totals.descuento),
+    asNumberOrNull(totals.subtotalUsd),
+    asNumberOrNull(totals.subtotalOrigenPyg),
+    asNumberOrNull(totals.descuentoUsd),
+    asNumberOrNull(totals.descuentoOrigenPyg),
     asNumberOrNull(totals.impuesto),
-    asNumberOrNull(totals.total),
     asNumberOrNull(totals.totalUsd),
+    asNumberOrNull(totals.totalOrigenPyg),
+    asNumberOrNull(totals.total),
     '',
     asNumberOrNull(totals.costo),
     asNumberOrNull(totals.margen),
@@ -2536,7 +2559,27 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
 
   const aoa = [...metaRows, header, ...rows];
   const sheet = XLSX.utils.aoa_to_sheet(aoa);
-  sheet['!cols'] = header.map(() => ({ wch: 18 }));
+  sheet['!cols'] = [
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 30 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 10 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 10 }
+  ];
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, sheet, 'Diario');
@@ -2545,14 +2588,17 @@ function buildDailyXlsx(ventas, range, filterChips = []) {
 
 function buildMarginReportColumns(usableWidth) {
   const definitions = [
-    { key: 'fecha', label: 'Fecha', ratio: 0.1 },
-    { key: 'factura', label: 'N° factura', ratio: 0.16 },
-    { key: 'cliente', label: 'Cliente', ratio: 0.22 },
-    { key: 'condicion', label: 'Condición', ratio: 0.08 },
-    { key: 'total', label: 'Total venta', ratio: 0.14, align: 'right' },
-    { key: 'costo', label: 'Costo estimado', ratio: 0.13, align: 'right' },
-    { key: 'margen', label: 'Margen', ratio: 0.11, align: 'right' },
-    { key: 'margenPorcentaje', label: 'Margen %', ratio: 0.06, align: 'right' }
+    { key: 'fecha', label: 'Fecha', ratio: 0.07 },
+    { key: 'factura', label: 'N° factura', ratio: 0.11 },
+    { key: 'cliente', label: 'Cliente', ratio: 0.17 },
+    { key: 'moneda', label: 'Mon.', ratio: 0.05, align: 'center' },
+    { key: 'totalOrigen', label: 'Venta orig.', ratio: 0.09, align: 'right' },
+    { key: 'totalPyg', label: 'Venta PYG', ratio: 0.09, align: 'right' },
+    { key: 'costoOrigen', label: 'Costo orig.', ratio: 0.09, align: 'right' },
+    { key: 'costo', label: 'Costo PYG', ratio: 0.09, align: 'right' },
+    { key: 'margenOrigen', label: 'Margen orig.', ratio: 0.09, align: 'right' },
+    { key: 'margen', label: 'Margen PYG', ratio: 0.08, align: 'right' },
+    { key: 'margenPorcentaje', label: 'Margen %', ratio: 0.03, align: 'right' }
   ];
 
   return definitions.map((column) => ({
@@ -2567,15 +2613,18 @@ function buildMarginReportRows(ventas, totals) {
     const costo = computeCostoVenta(venta);
     const margen = totalVenta - costo;
     const porcentaje = totalVenta > 0 ? (margen / totalVenta) * 100 : 0;
-    const condicionRaw = String(venta.condicion_venta || venta.condicion || '').toUpperCase();
-    const condicion = condicionRaw.includes('CREDITO') ? 'Crédito' : 'Contado';
+    const costoOrigen = formatVentaMontoOrigen(venta, costo);
+    const margenOrigen = formatVentaMontoOrigen(venta, margen);
     return {
       fecha: formatDateForDisplay(venta.fecha || venta.created_at),
       factura: resolveInvoiceNumberForReport(venta),
       cliente: venta.cliente?.nombre_razon_social || 'Cliente eventual',
-      condicion,
-      total: formatCurrencyPyG(totalVenta),
+      moneda: formatVentaMonedaReporte(venta),
+      totalOrigen: formatVentaMontoOrigen(venta, totalVenta, { explicitCurrencyAmount: venta.total_moneda }),
+      totalPyg: formatCurrencyPyG(totalVenta),
+      costoOrigen,
       costo: formatCurrencyPyG(costo),
+      margenOrigen,
       margen: formatCurrencyPyG(margen),
       margenPorcentaje: formatPercentValue(porcentaje)
     };
@@ -2585,9 +2634,12 @@ function buildMarginReportRows(ventas, totals) {
     fecha: 'Totales',
     factura: `(${ventas.length} ventas)`,
     cliente: '',
-    condicion: '',
-    total: formatCurrencyPyG(totals.totalVenta),
+    moneda: '',
+    totalOrigen: formatOriginTotals(totals.totalVentaUsd, totals.totalVentaOrigenPyg),
+    totalPyg: formatCurrencyPyG(totals.totalVenta),
+    costoOrigen: formatOriginTotals(totals.costoUsd, totals.costoOrigenPyg),
     costo: formatCurrencyPyG(totals.costo),
+    margenOrigen: formatOriginTotals(totals.margenUsd, totals.margenOrigenPyg),
     margen: formatCurrencyPyG(totals.margen),
     margenPorcentaje: formatPercentValue(totals.margenPercent),
     isSummary: true
@@ -2605,9 +2657,31 @@ function calculateMarginTotals(ventas) {
       acc.totalVenta += totalVenta;
       acc.costo += costo;
       acc.margen += margen;
+
+      const currency = (venta.moneda || 'PYG').toUpperCase();
+      if (currency === 'USD') {
+        const totalVentaUsd = resolveVentaMontoUsd(venta, totalVenta, venta.total_moneda);
+        const costoUsd = resolveVentaMontoUsd(venta, costo);
+        const margenUsd = resolveVentaMontoUsd(venta, margen);
+
+        if (totalVentaUsd !== null) {
+          acc.totalVentaUsd += totalVentaUsd;
+        }
+        if (costoUsd !== null) {
+          acc.costoUsd += costoUsd;
+        }
+        if (margenUsd !== null) {
+          acc.margenUsd += margenUsd;
+        }
+      } else {
+        acc.totalVentaOrigenPyg += totalVenta;
+        acc.costoOrigenPyg += costo;
+        acc.margenOrigenPyg += margen;
+      }
+
       return acc;
     },
-    { totalVenta: 0, costo: 0, margen: 0 }
+    { totalVenta: 0, totalVentaUsd: 0, totalVentaOrigenPyg: 0, costo: 0, costoUsd: 0, costoOrigenPyg: 0, margen: 0, margenUsd: 0, margenOrigenPyg: 0 }
   );
 
   result.margenPercent = result.totalVenta > 0 ? (result.margen / result.totalVenta) * 100 : 0;
@@ -2616,24 +2690,23 @@ function calculateMarginTotals(ventas) {
 
 function computeCostoVenta(venta) {
   if (!Array.isArray(venta?.detalles)) return 0;
-  return venta.detalles.reduce((acc, detalle) => acc + computeCostoDetalle(detalle), 0);
-}
 
-function computeCostoDetalle(detalle) {
-  const cantidad = Number(detalle?.cantidad) || 0;
-  if (!cantidad) return 0;
-  const producto = detalle?.producto || {};
-  let costoUnitario = Number(producto.precio_compra) || 0;
-  if (!costoUnitario && producto.precio_compra_original && producto.tipo_cambio_precio_compra) {
-    const original = Number(producto.precio_compra_original) || 0;
-    const tipoCambio = Number(producto.tipo_cambio_precio_compra) || 0;
-    if (original && tipoCambio) {
-      costoUnitario = original * tipoCambio;
+  return venta.detalles.reduce((acc, detalle) => {
+    const cantidad = Number(detalle?.cantidad) || 0;
+    const producto = detalle?.producto || {};
+    let costoUnitario = Number(producto.precio_compra) || 0;
+
+    if (!costoUnitario && producto.precio_compra_original && producto.tipo_cambio_precio_compra) {
+      const original = Number(producto.precio_compra_original) || 0;
+      const tipoCambio = Number(producto.tipo_cambio_precio_compra) || 0;
+      if (original && tipoCambio) {
+        costoUnitario = original * tipoCambio;
+      }
     }
-  }
-  return cantidad * costoUnitario;
-}
 
+    return acc + (cantidad * costoUnitario);
+  }, 0);
+}
 function resolveInvoiceNumberForReport(venta) {
   if (venta?.factura_electronica?.nro_factura) return venta.factura_electronica.nro_factura;
   if (venta?.numero_factura) return venta.numero_factura;
@@ -2645,12 +2718,20 @@ function countVentaItems(venta) {
   return venta.detalles.length;
 }
 
-function formatCurrencyPyG(value) {
+function hasFractionalPart(value, precision = 2) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return false;
+  const factor = 10 ** precision;
+  const rounded = Math.round(numeric * factor) / factor;
+  return Math.abs(rounded - Math.trunc(rounded)) > Number.EPSILON;
+}
+
+function formatCurrencyPyG(value, { showDecimals = hasFractionalPart(value) } = {}) {
   return new Intl.NumberFormat('es-PY', {
     style: 'currency',
     currency: 'PYG',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0
+    minimumFractionDigits: showDecimals ? 2 : 0,
+    maximumFractionDigits: showDecimals ? 2 : 0
   }).format(Number(value) || 0);
 }
 
@@ -2661,6 +2742,74 @@ function formatCurrencyUsd(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(Number(value) || 0);
+}
+
+function resolveVentaMontoUsd(venta, amountGs, explicitAmount = null) {
+  const explicitNumeric = Number(explicitAmount);
+  if (Number.isFinite(explicitNumeric) && explicitNumeric > 0) {
+    return explicitNumeric;
+  }
+  const tipoCambio = Number(venta?.tipo_cambio) || 0;
+  if (!(tipoCambio > 0)) return null;
+  return Number((Number(amountGs || 0) / tipoCambio).toFixed(2));
+}
+
+function formatVentaMontoParaReporte(venta, amountGs, { explicitCurrencyAmount = null } = {}) {
+  const currency = String(venta?.moneda || 'PYG').toUpperCase();
+  const amountGsNumeric = Number(amountGs || 0);
+  if (currency === 'USD') {
+    const usdAmount = resolveVentaMontoUsd(venta, amountGsNumeric, explicitCurrencyAmount);
+    if (usdAmount !== null) {
+      return `${formatCurrencyUsd(usdAmount)}\n${formatCurrencyPyG(amountGsNumeric)}`;
+    }
+  }
+  return formatCurrencyPyG(amountGsNumeric);
+}
+
+function formatDualTotalsForReport(amountPyg, amountUsd) {
+  if (Number(amountUsd || 0) > 0) {
+    return `${formatCurrencyUsd(amountUsd)}\n${formatCurrencyPyG(amountPyg)}`;
+  }
+  return formatCurrencyPyG(amountPyg);
+}
+
+function formatVentaMontoOrigen(venta, amountGs, { explicitCurrencyAmount = null } = {}) {
+  const currency = String(venta?.moneda || 'PYG').toUpperCase();
+  if (currency === 'USD') {
+    const usdAmount = resolveVentaMontoUsd(venta, amountGs, explicitCurrencyAmount);
+    return usdAmount !== null ? formatCurrencyUsd(usdAmount) : '—';
+  }
+  return formatCurrencyPyG(amountGs);
+}
+
+function splitVentaAmountByCurrency(venta, amountGs, { explicitCurrencyAmount = null } = {}) {
+  const currency = String(venta?.moneda || 'PYG').toUpperCase();
+  if (currency === 'USD') {
+    return {
+      usd: asNumberOrNull(resolveVentaMontoUsd(venta, amountGs, explicitCurrencyAmount)),
+      pyg: null
+    };
+  }
+
+  return {
+    usd: null,
+    pyg: asNumberOrNull(amountGs)
+  };
+}
+
+function formatVentaMonedaReporte(venta) {
+  return String(venta?.moneda || 'PYG').toUpperCase();
+}
+
+function formatOriginTotals(usdValue, pygValue) {
+  const parts = [];
+  if (Number(usdValue || 0) > 0) {
+    parts.push(formatCurrencyUsd(usdValue));
+  }
+  if (Number(pygValue || 0) > 0) {
+    parts.push(formatCurrencyPyG(pygValue));
+  }
+  return parts.length ? parts.join('\n') : '—';
 }
 
 function formatPercentValue(value) {

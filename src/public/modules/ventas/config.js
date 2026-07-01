@@ -35,6 +35,19 @@ function round(value, decimals = 2) {
   return Math.round((Number(value) || 0) * factor) / factor;
 }
 
+function hasFraction(value, precision = 2) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return false;
+  return Math.abs(round(numeric, precision) - Math.trunc(round(numeric, precision))) > Number.EPSILON;
+}
+
+function formatPygAmount(value, { showDecimals = hasFraction(value) } = {}) {
+  return formatCurrency(value, 'PYG', {
+    minimumFractionDigits: showDecimals ? 2 : 0,
+    maximumFractionDigits: showDecimals ? 2 : 0
+  });
+}
+
 function ceilAmount(value, decimals = 2) {
   const factor = 10 ** decimals;
   return Math.ceil(((Number(value) || 0) * factor) - Number.EPSILON) / factor;
@@ -220,13 +233,46 @@ function formatMonedaLabel(value) {
 }
 
 function renderTotalAmount(venta) {
-  const base = formatCurrency(venta?.total, 'PYG');
   const currency = (venta?.moneda || 'PYG').toUpperCase();
+  const base = formatPygAmount(venta?.total);
   const usdAmount = Number(venta?.total_moneda || 0);
   if (currency === 'USD' && Number.isFinite(usdAmount) && usdAmount > 0) {
-    return `<div class="table-amount"><span>${base}</span><div class="table-sub">${formatCurrency(usdAmount, 'USD')}</div></div>`;
+    return `<div class="table-amount"><span>${formatCurrency(usdAmount, 'USD')}</span><div class="table-sub">${base}</div></div>`;
   }
   return base;
+}
+
+function resolveConvertedUsdAmount(amountGs, venta, explicitAmount = null) {
+  const explicitNumeric = Number(explicitAmount);
+  if (Number.isFinite(explicitNumeric) && explicitNumeric > 0) {
+    return explicitNumeric;
+  }
+  const tipoCambio = Number(venta?.tipo_cambio || 0);
+  if (!(tipoCambio > 0)) return null;
+  return round(Number(amountGs || 0) / tipoCambio, 2);
+}
+
+function renderSaleAmount(venta, amountGs, { explicitCurrencyAmount = null } = {}) {
+  const currency = (venta?.moneda || 'PYG').toUpperCase();
+  const amountGsNumeric = Number(amountGs || 0);
+  if (currency === 'USD') {
+    const usdAmount = resolveConvertedUsdAmount(amountGsNumeric, venta, explicitCurrencyAmount);
+    if (usdAmount !== null) {
+      return `<div class="table-amount"><span>${formatCurrency(usdAmount, 'USD')}</span><div class="table-sub">${formatPygAmount(amountGsNumeric)}</div></div>`;
+    }
+  }
+  return formatPygAmount(amountGsNumeric);
+}
+
+function renderSaldoAmount(venta, saldoGs) {
+  const currency = (venta?.moneda || 'PYG').toUpperCase();
+  if (currency === 'USD') {
+    const usdAmount = resolveConvertedUsdAmount(saldoGs, venta);
+    if (usdAmount !== null) {
+      return `<div class="table-amount"><span class="badge warn">${formatCurrency(usdAmount, 'USD')}</span><div class="table-sub">${formatPygAmount(saldoGs)}</div></div>`;
+    }
+  }
+  return `<span class="badge warn">${formatPygAmount(saldoGs)}</span>`;
 }
 
 function formatCreditBreakdown(amount, amountGs, monedaVenta, tipoCambio) {
@@ -1505,15 +1551,15 @@ export const ventasModule = {
     },
     {
       header: 'Subtotal',
-      render: (item) => formatCurrency(item.subtotal, 'PYG')
+      render: (item) => renderSaleAmount(item, item.subtotal)
     },
     {
       header: 'Descuento',
-      render: (item) => (item.descuento_total ? formatCurrency(item.descuento_total, 'PYG') : '-')
+      render: (item) => (item.descuento_total ? renderSaleAmount(item, item.descuento_total) : '-')
     },
     {
       header: 'IVA calculado',
-      render: (item) => formatCurrency(item.impuesto_total || 0, 'PYG')
+      render: (item) => renderSaleAmount(item, item.impuesto_total || 0)
     },
     {
       header: 'Total',
@@ -1524,7 +1570,7 @@ export const ventasModule = {
       render: (item) => {
         const saldo = getOperationalSaldoPendiente(item);
         if (saldo > 0) {
-          return `<span class="badge warn">${formatCurrency(saldo, 'PYG')}</span>`;
+          return renderSaldoAmount(item, saldo);
         }
         return '<span class="badge ok">0</span>';
       }
