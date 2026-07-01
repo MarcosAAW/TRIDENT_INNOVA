@@ -6,6 +6,7 @@ jest.mock('../src/services/factpy/client', () => ({
 const request = require('supertest');
 const { app, prisma } = require('../src/app');
 const { emitirFactura, consultarEstados } = require('../src/services/factpy/client');
+const { buildFactPyPayload } = require('../src/routes/venta');
 
 let adminUser;
 let sucursal;
@@ -87,6 +88,53 @@ describe('FactPy API', () => {
 
     expect(res.body).toEqual({ ok: true, receiptid: 'RID-100' });
     expect(emitirFactura).toHaveBeenCalledWith(payload);
+  });
+
+  test('construye descuento de item como monto total de linea para FactPy', () => {
+    const payload = buildFactPyPayload(
+      {
+        id: 'venta-descuento-linea',
+        created_at: '2026-07-01T14:06:25Z',
+        moneda: 'PYG',
+        total: 1080000,
+        descuento_total: 48000,
+        iva_porcentaje: 10,
+        cliente: {
+          ruc: '80093150-5',
+          nombre_razon_social: 'AGRICULTURAL BUSINESS SRL',
+          direccion: 'Asunción',
+          email: 'agrisa@agrisa.com.py'
+        },
+        detalles: [
+          {
+            cantidad: 12,
+            precio_unitario: 94000,
+            subtotal: 1128000,
+            iva_porcentaje: 10,
+            producto: {
+              nombre: 'Ruleman koyo JTEKT 68062RS',
+              sku: 'REP-003',
+              precio_venta: 94000,
+              iva_porcentaje: 10
+            }
+          }
+        ]
+      },
+      {
+        id: 'factura-descuento-linea',
+        nro_factura: '001-001-0000003'
+      }
+    );
+
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0]).toMatchObject({
+      cantidad: 12,
+      descuento: 48000,
+      precioUnitario: 94000,
+      precioTotal: 1080000,
+      baseGravItem: 981818.18181818,
+      liqIvaItem: 98181.81818182
+    });
   });
 
   test('valida body requerido para emitir', async () => {

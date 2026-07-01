@@ -1856,6 +1856,7 @@ router.get('/reporte/margen', authorizeRoles('ADMIN'), async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildFactPyPayload = buildFactPyPayload;
 
 function prepareReportFilters(filtersInput = {}) {
   const filters = { ...filtersInput };
@@ -3061,9 +3062,6 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       descuentoAsignado += proporcional;
       return proporcional;
     })();
-    const descuentoUnitario = item.cantidad > 0
-      ? Number((descuentoLinea / item.cantidad).toFixed(8))
-      : 0;
     const precioTotal = round(Math.max(bruto - descuentoLinea, 0), decimals);
     const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
     const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
@@ -3076,7 +3074,7 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       ivaTasa: item.ivaTasa,
       ivaAfecta: item.ivaAfecta,
       cantidad: item.cantidad,
-      descuento: descuentoUnitario,
+      descuento: Number(descuentoLinea.toFixed(8)),
       precioUnitario: item.precioUnitario,
       precioTotal,
       baseGravItem,
