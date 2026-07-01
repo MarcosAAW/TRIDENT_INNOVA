@@ -3076,7 +3076,7 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     return Math.floor(Number(value || 0) * factor) / factor;
   };
 
-  const normalizeDiscountedItemForFactPy = (item, precioTotal) => {
+  const expandItemForFactPy = (item, precioTotal) => {
     const cantidad = Number(item.cantidad) || 0;
     if (cantidad <= 0) return [];
     if (cantidad === 1) {
@@ -3088,20 +3088,16 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       return [buildFactPyItemPayload(item, cantidad, item.precioUnitario, precioTotal, 0)];
     }
 
-    const uniformTotal = round(baseUnit * cantidad, decimals);
-    if (Math.abs(uniformTotal - precioTotal) <= (moneda === 'USD' ? 0.0001 : 0.01)) {
-      return [buildFactPyItemPayload(item, cantidad, baseUnit, precioTotal, 0)];
-    }
-
-    const remainingQty = cantidad - 1;
-    const firstTotal = round(baseUnit * remainingQty, decimals);
-    const lastUnit = round(precioTotal - firstTotal, decimals);
-
     const lines = [];
-    if (remainingQty > 0) {
-      lines.push(buildFactPyItemPayload(item, remainingQty, baseUnit, firstTotal, 0));
+    let restante = round(precioTotal, decimals);
+
+    for (let index = 0; index < cantidad; index += 1) {
+      const isLast = index === cantidad - 1;
+      const precioUnitario = isLast ? round(restante, decimals) : baseUnit;
+      lines.push(buildFactPyItemPayload(item, 1, precioUnitario, precioUnitario, 0));
+      restante = round(restante - precioUnitario, decimals);
     }
-    lines.push(buildFactPyItemPayload(item, 1, lastUnit, lastUnit, 0));
+
     return lines;
   };
 
@@ -3117,8 +3113,8 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       return proporcional;
     })();
     const precioTotal = round(Math.max(bruto - descuentoLinea, 0), decimals);
-    if (descuentoLinea > 0) {
-      return normalizeDiscountedItemForFactPy(item, precioTotal);
+    if (descuentoLinea > 0 || (Number(item.cantidad) > 1 && Number(item.ivaTasa) > 0)) {
+      return expandItemForFactPy(item, precioTotal);
     }
 
     return [buildFactPyItemPayload(item, item.cantidad, item.precioUnitario, precioTotal, 0)];

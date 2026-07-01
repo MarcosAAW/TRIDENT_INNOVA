@@ -123,7 +123,7 @@ describe('FactPy client', () => {
       })
     );
     expect(fields).toEqual([
-      ['receiptid', '{"receiptid":["RID-1"]}'],
+      ['datajson', '{"receiptid":["RID-1"]}'],
       ['recordID', 'RID-FACTPY']
     ]);
   });

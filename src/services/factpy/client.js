@@ -198,9 +198,8 @@ async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {
   }
 
   const rid = resolveRecordId(recordID);
-  const payload = { receiptid: receiptIds };
   const multipart = createMultipartFormData({
-    receiptid: JSON.stringify(payload),
+    datajson: JSON.stringify({ receiptid: receiptIds }),
     recordID: rid
   });
 

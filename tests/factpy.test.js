@@ -126,15 +126,16 @@ describe('FactPy API', () => {
       }
     );
 
-    expect(payload.items).toHaveLength(1);
+    expect(payload.items).toHaveLength(12);
     expect(payload.items[0]).toMatchObject({
-      cantidad: 12,
+      cantidad: 1,
       descuento: 0,
       precioUnitario: 90000,
-      precioTotal: 1080000,
-      baseGravItem: 981818.18181818,
-      liqIvaItem: 98181.81818182
+      precioTotal: 90000,
+      baseGravItem: 81818.18181818,
+      liqIvaItem: 8181.81818182
     });
+    expect(payload.items.every((item) => item.cantidad === 1)).toBe(true);
   });
 
   test('divide una linea con descuento no divisible para evitar descuentos ambiguos en FactPy', () => {
@@ -173,14 +174,20 @@ describe('FactPy API', () => {
       }
     );
 
-    expect(payload.items).toHaveLength(2);
+    expect(payload.items).toHaveLength(3);
     expect(payload.items[0]).toMatchObject({
-      cantidad: 2,
+      cantidad: 1,
       descuento: 0,
       precioUnitario: 99999.66,
-      precioTotal: 199999.32
+      precioTotal: 99999.66
     });
     expect(payload.items[1]).toMatchObject({
+      cantidad: 1,
+      descuento: 0,
+      precioUnitario: 99999.66,
+      precioTotal: 99999.66
+    });
+    expect(payload.items[2]).toMatchObject({
       cantidad: 1,
       descuento: 0,
       precioUnitario: 99999.68,
