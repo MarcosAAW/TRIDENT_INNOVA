@@ -4,10 +4,22 @@ const FACTPY_DEBUG = ['1', 'true', 'yes'].includes(String(process.env.FACTPY_DEB
 
 let fetchImpl = globalThis.fetch;
 
+async function loadNodeFetch() {
+  const mod = await import('node-fetch');
+  return mod.default;
+}
+
 async function httpFetch(url, options = {}) {
-  if (typeof fetchImpl !== 'function') {
-    const mod = await import('node-fetch');
-    fetchImpl = mod.default;
+  const requiresLegacyFetch = typeof options?.body?.getHeaders === 'function';
+  const mockedFetch = typeof globalThis.fetch === 'function' && globalThis.fetch._isMockFunction
+    ? globalThis.fetch
+    : null;
+  const activeFetch = requiresLegacyFetch
+    ? (mockedFetch || await loadNodeFetch())
+    : (typeof fetchImpl === 'function' ? fetchImpl : await loadNodeFetch());
+
+  if (!requiresLegacyFetch && typeof fetchImpl !== 'function') {
+    fetchImpl = activeFetch;
   }
 
   const { timeout, ...rest } = options;
@@ -15,13 +27,13 @@ async function httpFetch(url, options = {}) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
-      return await fetchImpl(url, { ...rest, signal: controller.signal });
+      return await activeFetch(url, { ...rest, signal: controller.signal });
     } finally {
       clearTimeout(id);
     }
   }
 
-  return fetchImpl(url, rest);
+  return activeFetch(url, rest);
 }
 
 function resolveRecordId(recordID) {
