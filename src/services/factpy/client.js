@@ -1,12 +1,62 @@
 const { baseUrl: DEFAULT_BASE_URL, recordId: DEFAULT_RECORD_ID, timeoutMs: DEFAULT_TIMEOUT_MS } = require('../../config/factpy');
+const http = require('http');
+const https = require('https');
 
 const FACTPY_DEBUG = ['1', 'true', 'yes'].includes(String(process.env.FACTPY_DEBUG || '').toLowerCase());
 
 let fetchImpl = globalThis.fetch;
 
-async function loadNodeFetch() {
-  const mod = await import('node-fetch');
-  return mod.default;
+function buildFetchLikeResponse(response, text) {
+  return {
+    ok: response.statusCode >= 200 && response.statusCode < 300,
+    status: response.statusCode,
+    headers: {
+      get(name) {
+        if (!name) return undefined;
+        const key = String(name).toLowerCase();
+        const value = response.headers?.[key];
+        return Array.isArray(value) ? value.join(', ') : value;
+      }
+    },
+    async text() {
+      return text;
+    }
+  };
+}
+
+async function submitLegacyMultipart(url, options = {}) {
+  const { body, headers = {}, timeout } = options;
+  const target = new URL(url);
+  const transport = target.protocol === 'https:' ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || undefined,
+      path: `${target.pathname}${target.search}`,
+      method: options.method || 'POST',
+      headers
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve(buildFetchLikeResponse(response, text));
+      });
+    });
+
+    request.on('error', reject);
+
+    if (timeout && Number.isFinite(timeout) && timeout > 0) {
+      request.setTimeout(timeout, () => {
+        request.destroy(new Error(`Request timeout after ${timeout}ms`));
+      });
+    }
+
+    body.on('error', reject);
+    body.pipe(request);
+  });
 }
 
 async function httpFetch(url, options = {}) {
@@ -14,26 +64,28 @@ async function httpFetch(url, options = {}) {
   const mockedFetch = typeof globalThis.fetch === 'function' && globalThis.fetch._isMockFunction
     ? globalThis.fetch
     : null;
-  const activeFetch = requiresLegacyFetch
-    ? (mockedFetch || await loadNodeFetch())
-    : (typeof fetchImpl === 'function' ? fetchImpl : await loadNodeFetch());
-
-  if (!requiresLegacyFetch && typeof fetchImpl !== 'function') {
-    fetchImpl = activeFetch;
-  }
 
   const { timeout, ...rest } = options;
+  if (requiresLegacyFetch && !mockedFetch) {
+    return submitLegacyMultipart(url, { ...rest, timeout });
+  }
+
+  if (typeof fetchImpl !== 'function') {
+    const mod = await import('node-fetch');
+    fetchImpl = mod.default;
+  }
+
   if (timeout && typeof AbortController === 'function') {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
     try {
-      return await activeFetch(url, { ...rest, signal: controller.signal });
+      return await (mockedFetch || fetchImpl)(url, { ...rest, signal: controller.signal });
     } finally {
       clearTimeout(id);
     }
   }
 
-  return activeFetch(url, rest);
+  return (mockedFetch || fetchImpl)(url, rest);
 }
 
 function resolveRecordId(recordID) {
