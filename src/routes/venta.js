@@ -3145,6 +3145,9 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     : totalMoneda;
 
   const credito = buildCreditoSection(venta, opciones, totalPago, fecha);
+  const receiptBase = factura?.id || venta?.id;
+  const receiptAttempt = Math.max(1, Number(factura?.intentos) || 1);
+  const receiptid = receiptBase ? `${receiptBase}-${receiptAttempt}` : String(venta?.id || 'factpy');
 
   return {
     fecha: fecha.toISOString().replace('T', ' ').slice(0, 19),
@@ -3155,7 +3158,7 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     tipoDocumento: 1,
     tipoEmision: 1,
     tipoTransaccion: 1,
-    receiptid: venta.id,
+    receiptid,
     condicionPago: credito.condicionPago,
     moneda,
     cambio,

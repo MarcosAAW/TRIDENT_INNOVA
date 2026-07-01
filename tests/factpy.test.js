@@ -122,10 +122,12 @@ describe('FactPy API', () => {
       },
       {
         id: 'factura-descuento-linea',
-        nro_factura: '001-001-0000003'
+        nro_factura: '001-001-0000003',
+        intentos: 3
       }
     );
 
+    expect(payload.receiptid).toBe('factura-descuento-linea-3');
     expect(payload.items).toHaveLength(12);
     expect(payload.items[0]).toMatchObject({
       cantidad: 1,
