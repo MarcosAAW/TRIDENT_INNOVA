@@ -101,7 +101,7 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
   const url = `${resolveBaseUrl(baseUrl)}/data.php`;
 
   if (FACTPY_USE_JSON) {
-    const body = JSON.stringify({ recordID: rid, recordid: rid, dataJson, datajson: dataJson });
+    const body = JSON.stringify({ recordID: rid, dataJson });
     const response = await httpFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -122,9 +122,7 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
 
   const multipart = createMultipartFormData({
     recordID: rid,
-    recordid: rid,
-    dataJson: payloadString,
-    datajson: payloadString
+    dataJson: payloadString
   });
 
   const response = await httpFetch(url, {
@@ -152,10 +150,9 @@ async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {
 
   const payload = { receiptid: receiptIds };
   const params = new URLSearchParams();
-  params.append('receiptid', JSON.stringify(payload));
+  params.append('dataJson', JSON.stringify(payload));
   const rid = resolveRecordId(recordID);
   params.append('recordID', rid);
-  params.append('recordid', rid);
 
   const url = `${resolveBaseUrl(baseUrl)}/estadoDE.php`;
   const response = await httpFetch(url, {
