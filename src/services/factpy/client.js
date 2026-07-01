@@ -1,7 +1,6 @@
 const { baseUrl: DEFAULT_BASE_URL, recordId: DEFAULT_RECORD_ID, timeoutMs: DEFAULT_TIMEOUT_MS } = require('../../config/factpy');
 
 const FACTPY_DEBUG = ['1', 'true', 'yes'].includes(String(process.env.FACTPY_DEBUG || '').toLowerCase());
-const FACTPY_USE_JSON = ['1', 'true', 'yes'].includes(String(process.env.FACTPY_USE_JSON || '').toLowerCase());
 
 let fetchImpl = globalThis.fetch;
 
@@ -100,26 +99,6 @@ async function emitirFactura({ dataJson, recordID, baseUrl, timeoutMs } = {}) {
 
   const url = `${resolveBaseUrl(baseUrl)}/data.php`;
 
-  if (FACTPY_USE_JSON) {
-    const body = JSON.stringify({ recordID: rid, dataJson });
-    const response = await httpFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      timeout: timeoutMs || DEFAULT_TIMEOUT_MS
-    });
-
-    const text = await response.text();
-    if (!response.ok) {
-      const error = new Error('FactPy emisión falló');
-      error.status = response.status;
-      error.body = parseJsonSafe(text) || text;
-      throw error;
-    }
-
-    return parseFactPySuccessResponse(response, text, 'emisión');
-  }
-
   const multipart = createMultipartFormData({
     recordID: rid,
     dataJson: payloadString
@@ -148,17 +127,18 @@ async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {
     throw new Error('receiptIds es requerido y debe ser un array con al menos un elemento.');
   }
 
-  const payload = { receiptid: receiptIds };
-  const params = new URLSearchParams();
-  params.append('dataJson', JSON.stringify(payload));
   const rid = resolveRecordId(recordID);
-  params.append('recordID', rid);
+  const payload = { receiptid: receiptIds };
+  const multipart = createMultipartFormData({
+    receiptid: JSON.stringify(payload),
+    recordID: rid
+  });
 
   const url = `${resolveBaseUrl(baseUrl)}/estadoDE.php`;
   const response = await httpFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params,
+    headers: multipart.headers,
+    body: multipart.body,
     timeout: timeoutMs || DEFAULT_TIMEOUT_MS
   });
 
