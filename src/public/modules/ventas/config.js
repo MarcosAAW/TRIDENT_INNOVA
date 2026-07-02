@@ -85,6 +85,43 @@ function getFacturaPdfUrl(facturaElectronica) {
     : urlWithSession(pdfPath);
 }
 
+function extractFacturaCdc(facturaElectronica) {
+  const candidates = [
+    facturaElectronica?.respuesta_set?.factpy?.cdc,
+    facturaElectronica?.respuesta_set?.last_estado?.cdc,
+    facturaElectronica?.respuesta_set?.cdc,
+    facturaElectronica?.qr_data
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate || '').replace(/\s+/g, '').trim();
+    if (normalized && normalized.length >= 20) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function resolveCanonicalFacturaPdfUrl(facturaElectronica) {
+  const persistedPdfUrl = getFacturaPdfUrl(facturaElectronica);
+  if (isCanonicalFacturaPdfUrl(persistedPdfUrl)) {
+    return persistedPdfUrl;
+  }
+
+  const factpyKude = facturaElectronica?.respuesta_set?.factpy?.kude || facturaElectronica?.respuesta_set?.last_estado?.kude;
+  if (factpyKude && /^https?:\/\//i.test(String(factpyKude))) {
+    return String(factpyKude);
+  }
+
+  const cdc = extractFacturaCdc(facturaElectronica);
+  if (!cdc) {
+    return null;
+  }
+
+  return `https://api.factpy.com/facturacion-api/kude/fe/${encodeURIComponent(cdc)}/`;
+}
+
 function isCanonicalFacturaPdfUrl(url) {
   if (!url || typeof window === 'undefined') return false;
   try {
@@ -117,8 +154,8 @@ async function waitForCanonicalFacturaPdf(ventaId, {
 
   for (let index = 0; index < attempts; index += 1) {
     latestVenta = await fetchVentaById(ventaId);
-    const pdfUrl = getFacturaPdfUrl(latestVenta?.factura_electronica);
-    if (isCanonicalFacturaPdfUrl(pdfUrl)) {
+    const pdfUrl = resolveCanonicalFacturaPdfUrl(latestVenta?.factura_electronica);
+    if (pdfUrl) {
       return {
         venta: latestVenta,
         pdfUrl
@@ -1685,9 +1722,7 @@ if (typeof window !== 'undefined') {
         blockedTitle: 'No se pudieron abrir los recibos relacionados',
         blockedDescription: 'Desbloquea las ventanas emergentes para ver los recibos relacionados.'
       });
-      let facturaPdfUrl = isCanonicalFacturaPdfUrl(getFacturaPdfUrl(factura))
-        ? getFacturaPdfUrl(factura)
-        : null;
+      let facturaPdfUrl = resolveCanonicalFacturaPdfUrl(factura);
 
       if (!facturaPdfUrl) {
         const refreshed = await waitForCanonicalFacturaPdf(venta.id);

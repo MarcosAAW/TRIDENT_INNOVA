@@ -90,7 +90,7 @@ describe('FactPy API', () => {
     expect(emitirFactura).toHaveBeenCalledWith(payload);
   });
 
-  test('construye descuento de item como monto total de linea para FactPy', () => {
+  test('mantiene una sola linea cuando el descuento global permite un neto exacto por cantidad', () => {
     const payload = buildFactPyPayload(
       {
         id: 'venta-descuento-linea',
@@ -128,16 +128,17 @@ describe('FactPy API', () => {
     );
 
     expect(payload.receiptid).toBe('factura-descuento-linea-3');
-    expect(payload.items).toHaveLength(12);
+    expect(payload.items).toHaveLength(1);
     expect(payload.items[0]).toMatchObject({
-      cantidad: 1,
+      cantidad: 12,
       descuento: 0,
-      precioUnitario: 90000,
-      precioTotal: 90000,
-      baseGravItem: 81818.18181818,
-      liqIvaItem: 8181.81818182
+      precioUnitario: 94000,
+      dDescGloItem: 4000,
+      precioTotal: 1080000,
+      baseGravItem: 981818.18181818,
+      liqIvaItem: 98181.81818182
     });
-    expect(payload.items.every((item) => item.cantidad === 1)).toBe(true);
+    expect(payload.items.every((item) => item.cantidad === 12)).toBe(true);
   });
 
   test('divide una linea con descuento no divisible para evitar descuentos ambiguos en FactPy', () => {

@@ -3210,12 +3210,19 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
   const lastIndex = rawItems.length - 1;
   let descuentoAsignado = 0;
 
-  const buildFactPyItemPayload = (item, cantidad, precioUnitario, precioTotal, descuento = 0) => {
+  const buildFactPyItemPayload = (
+    item,
+    cantidad,
+    precioUnitario,
+    precioTotal,
+    descuento = 0,
+    descuentoGlobalItem = 0
+  ) => {
     const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
     const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
     const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
 
-    return {
+    const payload = {
       descripcion: item.descripcion,
       codigo: item.codigo,
       unidadMedida: item.unidadMedida,
@@ -3228,6 +3235,12 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       baseGravItem,
       liqIvaItem
     };
+
+    if (descuentoGlobalItem > 0) {
+      payload.dDescGloItem = descuentoGlobalItem;
+    }
+
+    return payload;
   };
 
   const floorToDecimals = (value, digits) => {
@@ -3260,6 +3273,23 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     return lines;
   };
 
+  const shouldExpandItemForFactPy = (item, precioTotal, descuentoLinea) => {
+    const cantidad = Number(item.cantidad) || 0;
+    if (!(cantidad > 1)) {
+      return false;
+    }
+
+    const descuentoUnitarioExacto = descuentoLinea > 0 ? round(descuentoLinea / cantidad, decimals) : 0;
+    const descuentoReconstruido = round(descuentoUnitarioExacto * cantidad, decimals);
+    if (descuentoReconstruido !== round(descuentoLinea, decimals)) {
+      return true;
+    }
+
+    const precioUnitarioBruto = round(Number(item.precioUnitario) || 0, decimals);
+    const totalReconstruido = round((precioUnitarioBruto - descuentoUnitarioExacto) * cantidad, decimals);
+    return totalReconstruido !== round(precioTotal, decimals);
+  };
+
   const items = rawItems.flatMap((item, idx) => {
     const bruto = Number(item.precioTotalBruto) || 0;
     const descuentoLinea = (() => {
@@ -3272,11 +3302,14 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       return proporcional;
     })();
     const precioTotal = round(Math.max(bruto - descuentoLinea, 0), decimals);
-    if (descuentoLinea > 0 || (Number(item.cantidad) > 1 && Number(item.ivaTasa) > 0)) {
+    if (shouldExpandItemForFactPy(item, precioTotal, descuentoLinea)) {
       return expandItemForFactPy(item, precioTotal);
     }
 
-    return [buildFactPyItemPayload(item, item.cantidad, item.precioUnitario, precioTotal, 0)];
+    const cantidad = Number(item.cantidad) || 0;
+    const descuentoGlobalItem = cantidad > 0 ? round(descuentoLinea / cantidad, decimals) : 0;
+    const precioUnitario = round(Number(item.precioUnitario) || 0, decimals);
+    return [buildFactPyItemPayload(item, item.cantidad, precioUnitario, precioTotal, 0, descuentoGlobalItem)];
   });
 
   const totalPago = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
