@@ -278,7 +278,9 @@ describe('FactPy API', () => {
         receiptid: 'RID-LOCAL',
         estado: 'Aprobado',
         cdc: 'CDC-123',
-        documento: '001-001-0000456'
+        documento: '001-001-0000456',
+        kude: 'https://api.factpy.com/facturacion-api/kude/fe/CDC-123/',
+        xmlLink: 'https://api.factpy.com/facturacion-api/xml/fe/CDC-123/'
       }
     ]);
 
@@ -299,6 +301,8 @@ describe('FactPy API', () => {
     expect(updatedLocal.estado).toBe('ACEPTADO');
     expect(updatedLocal.qr_data).toBe('CDC-123');
     expect(updatedLocal.nro_factura).toBe('001-001-0000456');
+    expect(updatedLocal.pdf_path).toBe('https://api.factpy.com/facturacion-api/kude/fe/CDC-123/');
+    expect(updatedLocal.xml_path).toBe('https://api.factpy.com/facturacion-api/xml/fe/CDC-123/');
     expect(updatedLocal.intentos).toBe(1);
     expect(updatedLocal.respuesta_set.last_estado).toMatchObject({ receiptid: 'RID-LOCAL', estado: 'Aprobado' });
     expect(untouched.estado).toBe('PENDIENTE');

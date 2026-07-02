@@ -579,8 +579,15 @@ function getOperationalSaldoPendiente(venta) {
 
 function hasSuccessfulFactpyEmission(factura) {
   return Boolean(
-    factura?.respuesta_set?.factpy?.status === true &&
-    (factura?.respuesta_set?.factpy?.cdc || factura?.qr_data)
+    (
+      factura?.respuesta_set?.factpy?.status === true ||
+      String(factura?.estado || '').toUpperCase() === 'ACEPTADO'
+    ) &&
+    (
+      factura?.respuesta_set?.factpy?.cdc ||
+      factura?.respuesta_set?.last_estado?.cdc ||
+      factura?.qr_data
+    )
   );
 }
 
@@ -3646,7 +3653,12 @@ function scaleCreditNoteCuotas(cuotas = [], totalObjetivo) {
 }
 
 function extractFacturaCdc(factura) {
-  const candidates = [factura?.respuesta_set?.factpy?.cdc, factura?.respuesta_set?.cdc, factura?.qr_data];
+  const candidates = [
+    factura?.respuesta_set?.factpy?.cdc,
+    factura?.respuesta_set?.last_estado?.cdc,
+    factura?.respuesta_set?.cdc,
+    factura?.qr_data
+  ];
   for (const candidate of candidates) {
     const normalized = String(candidate || '').replace(/\s+/g, '').trim();
     if (normalized && normalized.length >= 20) return normalized;

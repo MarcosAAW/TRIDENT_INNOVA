@@ -28,6 +28,14 @@ const pollSchema = z.object({
   baseUrl: z.string().trim().url().optional()
 });
 
+function normalizeFactpyExternalUrl(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/iu.test(raw)) return `https://${raw}`;
+  return raw;
+}
+
 router.post('/emitir', async (req, res) => {
   const parsed = emitSchema.safeParse(req.body || {});
   if (!parsed.success) {
@@ -143,6 +151,14 @@ router.post('/poll', async (req, res) => {
       }
       if (doc?.documento && typeof doc.documento === 'string' && doc.documento.trim() !== 'N/A') {
         data.nro_factura = doc.documento.trim();
+      }
+      const factpyPdfUrl = normalizeFactpyExternalUrl(doc?.kude);
+      const factpyXmlUrl = normalizeFactpyExternalUrl(doc?.xmlLink);
+      if (factpyPdfUrl) {
+        data.pdf_path = factpyPdfUrl;
+      }
+      if (factpyXmlUrl) {
+        data.xml_path = factpyXmlUrl;
       }
 
       updates.push(
