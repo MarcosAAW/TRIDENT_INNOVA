@@ -199,8 +199,10 @@ async function consultarEstados({ receiptIds, recordID, baseUrl, timeoutMs } = {
   }
 
   const rid = resolveRecordId(recordID);
+  // estadoDE.php exige el campo `receiptid` (no `datajson`) con valor
+  // JSON.stringify({ receiptid: [...] }). Ver docs.factpy.com/api-interna.
   const multipart = createMultipartFormData({
-    datajson: JSON.stringify({ receiptid: receiptIds }),
+    receiptid: JSON.stringify({ receiptid: receiptIds }),
     recordID: rid
   });
 
