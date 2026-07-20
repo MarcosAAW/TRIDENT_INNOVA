@@ -255,7 +255,7 @@ export function initDashboard(modules) {
     renderPagination(mod);
 
     if (typeof mod.hooks?.afterModuleChange === 'function') {
-      mod.hooks.afterModuleChange({ form: dom.form, module: mod });
+      mod.hooks.afterModuleChange({ form: dom.form, module: mod, reload: loadList });
     }
 
     loadList({ preserveScroll });

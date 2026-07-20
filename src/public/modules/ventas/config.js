@@ -22,6 +22,31 @@ const ventasState = {
   currentPage: 1
 };
 
+// Sincronización de estados SIFEN (Aprobada/Rechazada) al entrar a Ventas.
+// Es best-effort y con throttle para no golpear FactPy en cada navegación.
+let facturaPollInFlight = false;
+let lastFacturaPollAt = 0;
+const FACTURA_POLL_MIN_INTERVAL_MS = 30000;
+
+async function pollFacturaEstados({ reload, force = false } = {}) {
+  if (facturaPollInFlight) return;
+  const now = Date.now();
+  if (!force && now - lastFacturaPollAt < FACTURA_POLL_MIN_INTERVAL_MS) return;
+  facturaPollInFlight = true;
+  try {
+    const result = await request('/factpy/poll', { method: 'POST', body: {} });
+    lastFacturaPollAt = Date.now();
+    if (result && Number(result.actualizados) > 0 && typeof reload === 'function') {
+      await reload({ preserveScroll: true });
+    }
+  } catch (error) {
+    // Si FactPy/SIFEN no responde no interrumpimos la vista de Ventas.
+    console.warn('[Ventas] No se pudo sincronizar estados SIFEN:', error?.message || error);
+  } finally {
+    facturaPollInFlight = false;
+  }
+}
+
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 function toNumber(value) {
@@ -1516,7 +1541,10 @@ export const ventasModule = {
     'download-daily-xlsx': async ({ filters, showMessage }) => downloadDailyXlsx(filters, showMessage)
   },
   hooks: {
-    afterModuleChange: () => renderVentasResumenCard(ventasState.lastResumen, ventasState.lastList.length),
+    afterModuleChange: ({ reload } = {}) => {
+      renderVentasResumenCard(ventasState.lastResumen, ventasState.lastList.length);
+      pollFacturaEstados({ reload });
+    },
     beforeModuleChange: () => clearVentasResumenNode()
   },
   columns: [
