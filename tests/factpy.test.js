@@ -131,8 +131,8 @@ describe('FactPy API', () => {
     expect(payload.items).toHaveLength(1);
     expect(payload.items[0]).toMatchObject({
       cantidad: 12,
-      descuento: 4000,
-      precioUnitario: 94000,
+      descuento: 0,
+      precioUnitario: 90000,
       precioTotal: 1080000,
       baseGravItem: 981818.18181818,
       liqIvaItem: 98181.81818182

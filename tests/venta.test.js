@@ -767,8 +767,8 @@ describe('Ventas API (integración)', () => {
     const payloadFactpy = emitirFactura.mock.calls.at(-1)?.[0]?.dataJson;
     expect(payloadFactpy?.moneda).toBe('USD');
     expect(Number(payloadFactpy?.cambio)).toBeCloseTo(6500, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(10, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(1, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(9, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(0, 4);
     expect(payloadFactpy?.items?.[0]).not.toHaveProperty('dDescGloItem');
     expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(9, 4);
     expect(Number(payloadFactpy?.items?.[0]?.baseGravItem)).toBeCloseTo(8.18181818, 8);
@@ -909,8 +909,8 @@ describe('Ventas API (integración)', () => {
     expect(payloadFactpy?.moneda).toBe('USD');
     expect(Number(payloadFactpy?.cambio)).toBeCloseTo(7000, 4);
     expect(payloadFactpy?.items).toHaveLength(1);
-    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(1000, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(50, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(950, 4);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(0, 4);
     expect(payloadFactpy?.items?.[0]).not.toHaveProperty('dDescGloItem');
     expect(Number(payloadFactpy?.items?.[0]?.cantidad)).toBeCloseTo(2, 8);
     expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(1900, 4);

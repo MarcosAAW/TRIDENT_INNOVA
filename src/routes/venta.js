@@ -3227,23 +3227,18 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
   const lastIndex = rawItems.length - 1;
   let descuentoAsignado = 0;
 
-  const buildFactPyItemPayload = (
-    item,
-    cantidad,
-    precioUnitario,
-    precioTotal,
-    descuento = 0,
-    descuentoGlobalItem = 0
-  ) => {
+  const buildFactPyItemPayload = (item, cantidad, precioUnitario, precioTotal) => {
     const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
     const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
     const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
-    // El descuento del ítem debe viajar como descuento particular por unidad (EA002).
-    // FactPy/SIFEN recalculan la base gravada a partir de (precioUnitario - descuento) * cantidad;
-    // enviarlo como dDescGloItem no sirve porque FactPy deriva ese campo del descuentoGlobal a nivel
-    // documento (que aquí es 0) y termina calculando la base sobre el precio SIN descuento, lo que
-    // provoca el rechazo "Error en el cálculo de la base gravada del IVA por ítem".
-    const descuentoUnitario = round(Number(descuentoGlobalItem) > 0 ? descuentoGlobalItem : descuento, decimals);
+    // El descuento se "hornea" en el precio unitario neto y el ítem viaja con descuento 0.
+    // Enviar `descuento` por ítem (o dDescGloItem) hace que FactPy/SIFEN recalculen la base gravada
+    // de forma inconsistente y rechacen con "Error en el cálculo de la base gravada del IVA por ítem".
+    // Con precio unitario neto + descuento 0 el payload adopta la misma forma que los documentos
+    // efectivamente aceptados por SIFEN. `precioUnitario` (bruto) se ignora a propósito.
+    void precioUnitario;
+    const cantidadSegura = Number(cantidad) > 0 ? Number(cantidad) : 1;
+    const precioUnitarioNeto = round(precioTotal / cantidadSegura, decimals);
 
     return {
       descripcion: item.descripcion,
@@ -3252,8 +3247,8 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       ivaTasa: item.ivaTasa,
       ivaAfecta: item.ivaAfecta,
       cantidad,
-      descuento: descuentoUnitario,
-      precioUnitario,
+      descuento: 0,
+      precioUnitario: precioUnitarioNeto,
       precioTotal,
       baseGravItem,
       liqIvaItem
@@ -3323,10 +3318,8 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
       return expandItemForFactPy(item, precioTotal);
     }
 
-    const cantidad = Number(item.cantidad) || 0;
-    const descuentoGlobalItem = cantidad > 0 ? round(descuentoLinea / cantidad, decimals) : 0;
     const precioUnitario = round(Number(item.precioUnitario) || 0, decimals);
-    return [buildFactPyItemPayload(item, item.cantidad, precioUnitario, precioTotal, 0, descuentoGlobalItem)];
+    return [buildFactPyItemPayload(item, item.cantidad, precioUnitario, precioTotal)];
   });
 
   const totalPago = round(items.reduce((sum, item) => sum + (Number(item.precioTotal) || 0), 0), 4);
