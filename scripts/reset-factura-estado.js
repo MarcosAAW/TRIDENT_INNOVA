@@ -75,6 +75,9 @@ async function main() {
 
   console.log('\n--- Cambios propuestos ---');
   console.log(`  estado factura : ${factura.estado} -> ${estado}`);
+  console.log('  pdf_path       : se limpia (era del documento rechazado)');
+  console.log('  xml_path       : se limpia');
+  console.log('  qr_data        : se limpia');
   if (factura.venta) {
     console.log(`  estado venta   : ${factura.venta.estado} -> ${nuevoEstadoVenta}`);
   }
@@ -87,7 +90,7 @@ async function main() {
   const ops = [
     prisma.facturaElectronica.update({
       where: { id: factura.id },
-      data: { estado }
+      data: { estado, pdf_path: null, xml_path: null, qr_data: null }
     })
   ];
 
