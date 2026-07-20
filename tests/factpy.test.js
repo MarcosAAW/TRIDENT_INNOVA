@@ -131,13 +131,13 @@ describe('FactPy API', () => {
     expect(payload.items).toHaveLength(1);
     expect(payload.items[0]).toMatchObject({
       cantidad: 12,
-      descuento: 0,
+      descuento: 4000,
       precioUnitario: 94000,
-      dDescGloItem: 4000,
       precioTotal: 1080000,
       baseGravItem: 981818.18181818,
       liqIvaItem: 98181.81818182
     });
+    expect(payload.items[0]).not.toHaveProperty('dDescGloItem');
     expect(payload.items.every((item) => item.cantidad === 12)).toBe(true);
   });
 

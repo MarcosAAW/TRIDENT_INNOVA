@@ -646,6 +646,41 @@ describe('Ventas API (integración)', () => {
     expect(segundoIntento.body.factura.xml_path).toBe(facturaRes.body.factura.xml_path);
   });
 
+  test('no marca la venta como FACTURADO cuando SIFEN/FactPy rechaza la emisión', async () => {
+    emitirFactura.mockResolvedValueOnce({
+      status: false,
+      error: 'Error en el cálculo de la base gravada del IVA por ítem para tasa del 10%'
+    });
+    procesarFacturaElectronica.mockResolvedValueOnce({
+      factura: {
+        id: 'rechazo-factura-id',
+        nro_factura: '001-001-RECHAZO',
+        estado: 'RECHAZADO',
+        intentos: 1
+      },
+      envio: { ok: false }
+    });
+
+    const createRes = await request(app)
+      .post('/ventas')
+      .send({
+        usuarioId: usuario.id,
+        iva_porcentaje: 10,
+        detalles: [{ productoId: producto.id, cantidad: 1 }]
+      })
+      .expect(201);
+
+    const ventaId = createRes.body.id;
+
+    const facturaRes = await request(app).post(`/ventas/${ventaId}/facturar`).expect(200);
+    expect(facturaRes.body.factura.estado).toBe('RECHAZADO');
+    expect(facturaRes.body.venta.estado).not.toBe('FACTURADO');
+    expect(facturaRes.body.venta.estado).toBe('PENDIENTE');
+
+    const ventaPersistida = await prisma.venta.findUnique({ where: { id: ventaId } });
+    expect(ventaPersistida.estado).toBe('PENDIENTE');
+  });
+
   test('continua la secuencia de factura por prefijo aunque exista una factura previa con otro timbrado', async () => {
     const ventaAnterior = await prisma.venta.create({
       data: {
@@ -730,8 +765,8 @@ describe('Ventas API (integración)', () => {
     expect(payloadFactpy?.moneda).toBe('USD');
     expect(Number(payloadFactpy?.cambio)).toBeCloseTo(6500, 4);
     expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(10, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.dDescGloItem)).toBeCloseTo(1, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(0, 8);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(1, 4);
+    expect(payloadFactpy?.items?.[0]).not.toHaveProperty('dDescGloItem');
     expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(9, 4);
     expect(Number(payloadFactpy?.items?.[0]?.baseGravItem)).toBeCloseTo(8.18181818, 8);
     expect(Number(payloadFactpy?.items?.[0]?.liqIvaItem)).toBeCloseTo(0.81818182, 8);
@@ -872,8 +907,8 @@ describe('Ventas API (integración)', () => {
     expect(Number(payloadFactpy?.cambio)).toBeCloseTo(7000, 4);
     expect(payloadFactpy?.items).toHaveLength(1);
     expect(Number(payloadFactpy?.items?.[0]?.precioUnitario)).toBeCloseTo(1000, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.dDescGloItem)).toBeCloseTo(50, 4);
-    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(0, 8);
+    expect(Number(payloadFactpy?.items?.[0]?.descuento)).toBeCloseTo(50, 4);
+    expect(payloadFactpy?.items?.[0]).not.toHaveProperty('dDescGloItem');
     expect(Number(payloadFactpy?.items?.[0]?.cantidad)).toBeCloseTo(2, 8);
     expect(Number(payloadFactpy?.items?.[0]?.precioTotal)).toBeCloseTo(1900, 4);
     expect(Number(payloadFactpy?.items?.[0]?.baseGravItem)).toBeCloseTo(1727.27272727, 8);

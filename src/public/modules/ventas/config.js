@@ -386,6 +386,25 @@ function renderNotaCreditoBadge(venta) {
   return `<span class="badge muted">${escapeHtml(getNotaCreditoLabel(nota))}</span>`;
 }
 
+function renderFacturaEstadoBadge(venta) {
+  const factura = venta?.factura_electronica;
+  if (!factura?.id) return '';
+  const estado = String(factura.estado || '').toUpperCase();
+  if (estado === 'RECHAZADO') {
+    return '<span class="badge error" title="SIFEN rechazó la factura electrónica">SIFEN: Rechazada</span>';
+  }
+  if (estado === 'ENVIADO') {
+    return '<span class="badge warn" title="Factura electrónica enviada, pendiente de aprobación en SIFEN">SIFEN: Enviada</span>';
+  }
+  if (estado === 'ACEPTADO' || estado === 'PAGADA') {
+    return '<span class="badge ok" title="Factura electrónica aprobada por SIFEN">SIFEN: Aprobada</span>';
+  }
+  if (estado === 'PENDIENTE') {
+    return '<span class="badge muted" title="Factura electrónica pendiente de emisión">SIFEN: Pendiente</span>';
+  }
+  return '';
+}
+
 let ventasResumenNode = null;
 
 function ensureVentasResumenNode() {
@@ -1520,8 +1539,10 @@ export const ventasModule = {
           return '<span class="badge error">Anulada</span>';
         }
         const estadoBase = `<span class="badge ok">${escapeHtml(item.estado || '-')}</span>`;
+        const facturaBadge = renderFacturaEstadoBadge(item);
         const notaBadge = renderNotaCreditoBadge(item);
-        return notaBadge ? `<div>${estadoBase} ${notaBadge}</div>` : estadoBase;
+        const extras = [facturaBadge, notaBadge].filter(Boolean).join(' ');
+        return extras ? `<div>${estadoBase} ${extras}</div>` : estadoBase;
       }
     },
     {

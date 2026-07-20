@@ -1615,6 +1615,15 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
         });
 
         venta.factura_electronica = facturaActualizada;
+
+        // Sincroniza el estado interno de la venta con el resultado real de FactPy/SIFEN.
+        // La venta se marca como FACTURADO de forma optimista dentro de la transacción, pero si
+        // SIFEN rechaza el documento no debe quedar como facturada: se revierte a PENDIENTE para
+        // que refleje la realidad y permita reintentar la emisión.
+        if (estadoFactpy === 'RECHAZADO' && String(venta.estado || '').toUpperCase() === 'FACTURADO') {
+          await prisma.venta.update({ where: { id: venta.id }, data: { estado: 'PENDIENTE' } });
+          venta.estado = 'PENDIENTE';
+        }
       } catch (factpyError) {
         console.error('[FactPy] Error al emitir', factpyError);
       }
@@ -3228,26 +3237,26 @@ function buildFactPyPayload(venta, factura, opciones = {}) {
     const divisor = item.ivaTasa === 5 ? 1.05 : item.ivaTasa === 10 ? 1.1 : 1;
     const baseGravItem = Number(divisor ? (precioTotal / divisor).toFixed(8) : precioTotal.toFixed(8));
     const liqIvaItem = item.ivaTasa === 0 ? 0 : Number((precioTotal - baseGravItem).toFixed(8));
+    // El descuento del ítem debe viajar como descuento particular por unidad (EA002).
+    // FactPy/SIFEN recalculan la base gravada a partir de (precioUnitario - descuento) * cantidad;
+    // enviarlo como dDescGloItem no sirve porque FactPy deriva ese campo del descuentoGlobal a nivel
+    // documento (que aquí es 0) y termina calculando la base sobre el precio SIN descuento, lo que
+    // provoca el rechazo "Error en el cálculo de la base gravada del IVA por ítem".
+    const descuentoUnitario = round(Number(descuentoGlobalItem) > 0 ? descuentoGlobalItem : descuento, decimals);
 
-    const payload = {
+    return {
       descripcion: item.descripcion,
       codigo: item.codigo,
       unidadMedida: item.unidadMedida,
       ivaTasa: item.ivaTasa,
       ivaAfecta: item.ivaAfecta,
       cantidad,
-      descuento,
+      descuento: descuentoUnitario,
       precioUnitario,
       precioTotal,
       baseGravItem,
       liqIvaItem
     };
-
-    if (descuentoGlobalItem > 0) {
-      payload.dDescGloItem = descuentoGlobalItem;
-    }
-
-    return payload;
   };
 
   const floorToDecimals = (value, digits) => {
