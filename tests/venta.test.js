@@ -641,7 +641,10 @@ describe('Ventas API (integración)', () => {
     expect(facturaRes.body.factura.xml_path.endsWith('.xml')).toBe(true);
 
     const segundoIntento = await request(app).post(`/ventas/${ventaId}/facturar`).expect(200);
-    expect(Number(segundoIntento.body.factura.intentos)).toBe(1);
+    // Mientras SIFEN no confirme la aprobación (ACEPTADO), la factura sigue siendo reenviable:
+    // se reutiliza el mismo número pero se incrementa el contador de intentos.
+    expect(segundoIntento.body.factura.nro_factura).toBe(facturaRes.body.factura.nro_factura);
+    expect(Number(segundoIntento.body.factura.intentos)).toBe(2);
     expect(segundoIntento.body.factura.pdf_path).toBe(facturaRes.body.factura.pdf_path);
     expect(segundoIntento.body.factura.xml_path).toBe(facturaRes.body.factura.xml_path);
   });
@@ -990,7 +993,7 @@ describe('Ventas API (integración)', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  test('marca la factura como aceptada cuando FactPy responde cdc en la emision', async () => {
+  test('marca la factura como enviada (pendiente de SIFEN) cuando FactPy responde cdc en la emision', async () => {
     procesarFacturaElectronica.mockResolvedValueOnce(null);
     emitirFactura.mockResolvedValueOnce({
       status: true,
@@ -1013,22 +1016,15 @@ describe('Ventas API (integración)', () => {
       .post(`/ventas/${createRes.body.id}/facturar`)
       .expect(200);
 
-    expect(facturaRes.body.factura?.estado).toBe('ACEPTADO');
+    expect(facturaRes.body.factura?.estado).toBe('ENVIADO');
     expect(facturaRes.body.factura?.qr_data).toBe('01800000000000000000000000000000000000000001');
     expect(facturaRes.body.factura?.xml_path).toBe('https://factpy.test/doc.xml');
     expect(facturaRes.body.factura?.pdf_path).toBe('https://factpy.test/doc.pdf');
     expect(facturaRes.body.factura?.respuesta_set?.factpy?.status).toBe(true);
   });
 
-  test('no reemite a FactPy cuando la factura ya fue aceptada previamente', async () => {
+  test('no reemite a FactPy cuando la factura ya fue aceptada por SIFEN', async () => {
     procesarFacturaElectronica.mockResolvedValue(null);
-    emitirFactura.mockResolvedValueOnce({
-      status: true,
-      code: 'NA',
-      cdc: '01800000000000000000000000000000000000000009',
-      xmlLink: 'https://factpy.test/accepted.xml',
-      kude: 'https://factpy.test/accepted.pdf'
-    });
 
     const createRes = await request(app)
       .post('/ventas')
@@ -1039,17 +1035,35 @@ describe('Ventas API (integración)', () => {
       })
       .expect(201);
 
-    await request(app)
-      .post(`/ventas/${createRes.body.id}/facturar`)
-      .expect(200);
+    const venta = await prisma.venta.findUnique({ where: { id: createRes.body.id } });
 
-    expect(emitirFactura).toHaveBeenCalledTimes(1);
+    const facturaAceptada = await prisma.facturaElectronica.create({
+      data: {
+        ventaId: venta.id,
+        sucursalId: '00000000-0000-0000-0000-000000000001',
+        nro_factura: '001-001-0000777',
+        timbrado: 'TIMBRADO-TEST',
+        establecimiento: '001',
+        punto_expedicion: '001',
+        secuencia: 777,
+        estado: 'ACEPTADO',
+        qr_data: '01800000000000000000000000000000000000000009',
+        respuesta_set: { factpy: { status: true, cdc: '01800000000000000000000000000000000000000009' } }
+      }
+    });
+
+    await prisma.venta.update({
+      where: { id: venta.id },
+      data: { factura_electronicaId: facturaAceptada.id, estado: 'FACTURADO' }
+    });
+
+    emitirFactura.mockClear();
 
     const facturaRes = await request(app)
-      .post(`/ventas/${createRes.body.id}/facturar`)
+      .post(`/ventas/${venta.id}/facturar`)
       .expect(200);
 
-    expect(emitirFactura).toHaveBeenCalledTimes(1);
+    expect(emitirFactura).not.toHaveBeenCalled();
     expect(facturaRes.body.factura?.estado).toBe('ACEPTADO');
     expect(facturaRes.body.factura?.respuesta_set?.factpy?.cdc).toBe('01800000000000000000000000000000000000000009');
   });

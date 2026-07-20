@@ -170,6 +170,30 @@ router.post('/poll', async (req, res) => {
     }
 
     const results = updates.length ? await prisma.$transaction(updates) : [];
+
+    // Sincroniza el estado interno de la venta con el veredicto real de SIFEN:
+    // si SIFEN rechaza, la venta no debe quedar como FACTURADO; si aprueba, se confirma.
+    for (const doc of Array.isArray(estados) ? estados : []) {
+      const rid = doc?.receiptid;
+      if (!rid) continue;
+      const match = pendientes.find((f) => {
+        const localRid = (f?.respuesta_set?.receiptid || f?.ventaId || '').trim();
+        return localRid && localRid === String(rid).trim();
+      });
+      if (!match?.ventaId) continue;
+
+      const estadoLower = String(doc?.estado || '').toLowerCase();
+      const ventaActual = await prisma.venta.findUnique({ where: { id: match.ventaId } });
+      if (!ventaActual) continue;
+      const estadoVenta = String(ventaActual.estado || '').toUpperCase();
+
+      if (estadoLower.includes('rechaz') && estadoVenta === 'FACTURADO') {
+        await prisma.venta.update({ where: { id: match.ventaId }, data: { estado: 'PENDIENTE' } });
+      } else if (estadoLower.includes('aprob') && estadoVenta === 'PENDIENTE') {
+        await prisma.venta.update({ where: { id: match.ventaId }, data: { estado: 'FACTURADO' } });
+      }
+    }
+
     return res.json({
       status: 'ok',
       consultados: receiptIdsToQuery.length,

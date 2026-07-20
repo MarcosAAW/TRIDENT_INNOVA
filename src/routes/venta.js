@@ -578,17 +578,16 @@ function getOperationalSaldoPendiente(venta) {
 }
 
 function hasSuccessfulFactpyEmission(factura) {
-  return Boolean(
-    (
-      factura?.respuesta_set?.factpy?.status === true ||
-      String(factura?.estado || '').toUpperCase() === 'ACEPTADO'
-    ) &&
-    (
+  // La emisión sólo se considera definitiva (y por lo tanto NO reenviable) cuando SIFEN confirmó
+  // la aprobación real del documento (estado ACEPTADO). Tener un CDC o factpy.status===true sólo
+  // significa que el documento se generó, firmó y transmitió; SIFEN puede rechazarlo de forma
+  // asíncrona, y en ese caso la factura debe poder reenviarse con el mismo número.
+  return String(factura?.estado || '').toUpperCase() === 'ACEPTADO' &&
+    Boolean(
       factura?.respuesta_set?.factpy?.cdc ||
       factura?.respuesta_set?.last_estado?.cdc ||
       factura?.qr_data
-    )
-  );
+    );
 }
 
 function normalizeCondicionVenta(value, creditoConfig) {
@@ -1589,9 +1588,11 @@ router.post('/:id/facturar', authorizeRoles('ADMIN'), async (req, res) => {
           timeoutMs: factpyConfig.timeoutMs
         });
 
-        const estadoFactpy = respuestaFactpy?.status === false
-          ? 'RECHAZADO'
-          : (respuestaFactpy?.cdc ? 'ACEPTADO' : 'ENVIADO');
+        // El CDC en la respuesta de emisión sólo indica que el documento fue generado, firmado y
+        // transmitido a SIFEN, NO que SIFEN lo haya aprobado. La aprobación/rechazo real es
+        // asíncrona y se obtiene con el poll (consultarEstados). Por eso al emitir dejamos la
+        // factura en ENVIADO; el poll la moverá luego a ACEPTADO o RECHAZADO según SIFEN.
+        const estadoFactpy = respuestaFactpy?.status === false ? 'RECHAZADO' : 'ENVIADO';
         const mergedRespuesta = {
           receiptid: payload?.receiptid,
           factpy: respuestaFactpy,
