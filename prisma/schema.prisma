@@ -148,7 +148,8 @@ model Categoria {
 model Cliente {
   id                 String    @id @default(uuid()) @db.Uuid
   nombre_razon_social String
-  ruc                String?   @unique
+  // Unicidad real de ruc aplicada solo entre activos via indice parcial (ver migracion cliente_ruc_partial_unique)
+  ruc                String?
   direccion          String?
   telefono           String?
   correo             String?

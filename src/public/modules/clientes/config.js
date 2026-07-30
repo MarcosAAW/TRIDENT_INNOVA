@@ -2,6 +2,7 @@ import { request, buildQuery } from '../common/api.js';
 import { createCliente } from './nuevo.js';
 import { updateCliente } from './editar.js';
 import { deleteCliente } from './eliminar.js';
+import { restoreCliente } from './restaurar.js';
 
 const TIPO_CLIENTE_OPTIONS = [
   { value: 'EMPRESA', label: 'Empresa' },
@@ -84,6 +85,25 @@ export const clientesModule = {
       submit: deleteCliente,
       successMessage: 'Cliente eliminado.',
       confirmMessage: '¿Deseas eliminar este cliente?'
+    }
+  },
+  rowActions: [
+    {
+      action: 'restaurar',
+      label: 'Restaurar',
+      className: 'btn ghost small',
+      shouldRender: ({ item }) => Boolean(item.deleted_at)
+    }
+  ],
+  rowActionHandlers: {
+    async restaurar({ id, reload, showMessage }) {
+      try {
+        await restoreCliente(id);
+        showMessage('Cliente restaurado.', 'success');
+        await reload();
+      } catch (error) {
+        showMessage(error.message || 'No se pudo restaurar el cliente.', 'error');
+      }
     }
   }
 };

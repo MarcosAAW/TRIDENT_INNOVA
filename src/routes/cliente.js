@@ -159,6 +159,17 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createClienteSche
       const msg = err.errors.map(e => e.message).join('; ');
       return res.status(400).json({ error: msg });
     }
+    if (err?.code === 'P2002' && (err.meta?.target || []).includes('ruc')) {
+      const deletedMatch = await prisma.cliente.findFirst({
+        where: { ruc: req.validatedBody.ruc?.trim().toUpperCase() || '', deleted_at: { not: null } }
+      });
+      if (deletedMatch) {
+        return res.status(409).json({
+          error: 'Ya existe un cliente eliminado con este RUC. Restauralo en vez de crear uno nuevo.',
+          clienteEliminadoId: deletedMatch.id
+        });
+      }
+    }
     handlePrismaError(err, res, 'Error al crear cliente');
   }
 });
@@ -214,6 +225,30 @@ router.delete('/:id', async (req, res) => {
     res.json({ ok: true, cliente: serialize(deleted) });
   } catch (err) {
     handlePrismaError(err, res, 'Error al eliminar cliente');
+  }
+});
+
+router.patch('/:id/restaurar', authorizeRoles('ADMIN', 'VENDEDOR'), async (req, res) => {
+  try {
+    const existing = await prisma.cliente.findUnique({ where: { id: req.params.id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Cliente no encontrado' });
+    }
+    if (!existing.deleted_at) {
+      return res.status(400).json({ error: 'El cliente no está eliminado.' });
+    }
+    if (existing.ruc) {
+      const activeConflict = await prisma.cliente.findFirst({
+        where: { ruc: existing.ruc, deleted_at: null, NOT: { id: existing.id } }
+      });
+      if (activeConflict) {
+        return res.status(409).json({ error: 'Ya existe otro cliente activo con este RUC. No se puede restaurar.' });
+      }
+    }
+    const restored = await prisma.cliente.update({ where: { id: req.params.id }, data: { deleted_at: null } });
+    res.json(serialize(restored));
+  } catch (err) {
+    handlePrismaError(err, res, 'Error al restaurar cliente');
   }
 });
 
