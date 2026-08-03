@@ -30,12 +30,17 @@ export function buildPresupuestoPayload(payload) {
   }
   if (moneda === 'USD' && tipoCambio) {
     body.tipo_cambio = tipoCambio;
-    detalles = detalles.map((item) => ({
-      ...item,
-      precio_unitario: item.moneda_precio_unitario === 'USD' && item.precio_unitario !== undefined && item.precio_unitario !== null
-        ? Number((item.precio_unitario * tipoCambio).toFixed(2))
-        : item.precio_unitario
-    }));
+    detalles = detalles.map((item) => {
+      const { precio_unitario_gs: precioUnitarioGs, ...detalle } = item;
+      return {
+        ...detalle,
+        precio_unitario: precioUnitarioGs ?? (
+          item.moneda_precio_unitario === 'USD' && item.precio_unitario !== undefined && item.precio_unitario !== null
+            ? Number((item.precio_unitario * tipoCambio).toFixed(2))
+            : item.precio_unitario
+        )
+      };
+    });
     body.detalles = detalles;
   }
 
@@ -66,6 +71,7 @@ function parseDetalles(raw) {
         productoId: item.productoId ? String(item.productoId).trim() : undefined,
         cantidad: Number.parseInt(item.cantidad, 10),
         precio_unitario: toNumber(item.precio_unitario),
+        precio_unitario_gs: toNumber(item.precio_unitario_gs),
         moneda_precio_unitario: normalizeCurrency(item.moneda_precio_unitario),
         iva_porcentaje: normalizeIva(item.iva_porcentaje)
       }))

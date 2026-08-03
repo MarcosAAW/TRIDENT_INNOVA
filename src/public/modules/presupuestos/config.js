@@ -4,6 +4,14 @@ import { resolveProductUnitPricing } from '../common/pricing.js';
 import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js';
 import { createPresupuesto, buildPresupuestoPayload } from './nuevo.js';
 
+function resolvePresupuestoUnitPricing(producto, options) {
+  return resolveProductUnitPricing({
+    ...producto,
+    moneda_precio_venta: 'PYG',
+    precio_venta_original: null
+  }, options);
+}
+
 async function updateEstadoPresupuesto(id, estado) {
   return request(`/presupuestos/${encodeURIComponent(id)}/estado`, {
     method: 'PUT',
@@ -410,10 +418,11 @@ export const presupuestosModule = {
 
       function syncDetallesField() {
         if (detallesField) {
-          detallesField.value = JSON.stringify(itemsState.map(({ productoId, cantidad, precio_unitario, iva_porcentaje, moneda_precio_unitario }) => ({
+          detallesField.value = JSON.stringify(itemsState.map(({ productoId, cantidad, precio_unitario, precio_unitario_gs, iva_porcentaje, moneda_precio_unitario }) => ({
             productoId: productoId || undefined,
             cantidad,
             precio_unitario,
+            precio_unitario_gs,
             iva_porcentaje,
             moneda_precio_unitario
           })));
@@ -625,7 +634,7 @@ export const presupuestosModule = {
         function getFormCurrencyPricing(producto) {
           const monedaFormulario = getFormCurrency();
           const tipoCambioFormulario = Number(form?.elements?.tipo_cambio?.value || 0);
-          return resolveProductUnitPricing(producto, {
+          return resolvePresupuestoUnitPricing(producto, {
             targetCurrency: monedaFormulario,
             exchangeRate: tipoCambioFormulario > 0 ? tipoCambioFormulario : null
           });
@@ -653,11 +662,12 @@ export const presupuestosModule = {
             }
 
             try {
-              const pricing = resolveProductUnitPricing(producto, {
+              const pricing = resolvePresupuestoUnitPricing(producto, {
                 targetCurrency: monedaFormulario,
                 exchangeRate: tipoCambioFormulario
               });
               item.precio_unitario = Number(pricing.unitCurrency.toFixed(2));
+              item.precio_unitario_gs = Number(producto.precio_venta);
               item.moneda_precio_unitario = monedaFormulario;
               changed = true;
             } catch (_error) {
@@ -726,6 +736,7 @@ export const presupuestosModule = {
             nombre: productoNombre,
             cantidad,
             precio_unitario: Number(precioUnitario.toFixed(2)),
+            precio_unitario_gs: producto ? Number(producto.precio_venta) : null,
             iva_porcentaje: iva,
             moneda_precio_unitario: monedaFormulario,
             precio_es_manual: producto ? precioFueEditadoManualmente : precioIngresadoManualmente

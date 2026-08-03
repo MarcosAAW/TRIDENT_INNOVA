@@ -840,7 +840,11 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
             consumoStock.set(producto.id, totalSolicitado);
           }
           if (precioUnitario === undefined || precioUnitario === null) {
-            const pricing = resolveProductSalePricing(producto, {
+            const pricing = resolveProductSalePricing({
+              ...producto,
+              moneda_precio_venta: 'PYG',
+              precio_venta_original: null
+            }, {
               targetCurrency: moneda,
               exchangeRate: tipoCambio
             });

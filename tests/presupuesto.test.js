@@ -137,7 +137,7 @@ describe('Presupuestos API', () => {
     }
   });
 
-  test('mantiene el precio original en USD al presupuestar con nuevo tipo de cambio', async () => {
+  test('convierte desde el precio PYG al presupuestar con nuevo tipo de cambio', async () => {
     const productoUsd = await prisma.producto.create({
       data: {
         sku: `PRES-USD-${Date.now()}`,
@@ -166,8 +166,8 @@ describe('Presupuestos API', () => {
       });
 
     expect(res.statusCode).toBe(201);
-    expect(Number(res.body.total)).toBeCloseTo(65000, 2);
-    expect(Number(res.body.total_moneda)).toBeCloseTo(10, 2);
+    expect(Number(res.body.total)).toBeCloseTo(70000, 2);
+    expect(Number(res.body.total_moneda)).toBeCloseTo(10.77, 2);
   });
 
   test('Lista presupuestos paginados', async () => {
