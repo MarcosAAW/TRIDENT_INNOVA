@@ -21,6 +21,7 @@ export function initDashboard(modules) {
     secondaryTabsExpanded: isSecondaryModuleKey(modules[0].key)
   };
   let loadRequestSeq = 0;
+  let feedbackTimeoutId = null;
 
   const dom = getDomRefs();
   if (dom.year) {
@@ -1340,14 +1341,21 @@ export function initDashboard(modules) {
   }
 
   function showMessage(message, variant) {
+    clearTimeout(feedbackTimeoutId);
+    feedbackTimeoutId = null;
     dom.feedback.textContent = message;
     dom.feedback.className = 'feedback';
     if (variant) {
       dom.feedback.classList.add(variant);
     }
+    if (variant === 'success') {
+      feedbackTimeoutId = setTimeout(clearMessage, 5000);
+    }
   }
 
   function clearMessage() {
+    clearTimeout(feedbackTimeoutId);
+    feedbackTimeoutId = null;
     dom.feedback.textContent = '';
     dom.feedback.className = 'feedback';
   }

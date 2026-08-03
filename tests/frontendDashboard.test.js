@@ -516,6 +516,10 @@ describe('Frontend dashboard modules', () => {
 
     await page.waitForSelector('[name="clienteId"]');
     await page.select('[name="clienteId"]', cliente.id);
+    await page.$eval('[name="validez_hasta"]', (input) => {
+      input.value = '2026-08-03';
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     await page.select('[name="moneda"]', 'USD');
     await page.type('[name="tipo_cambio"]', '6500');
 
@@ -545,6 +549,16 @@ describe('Frontend dashboard modules', () => {
     expect(presupuesto).toBeTruthy();
     expect(Number(presupuesto.total)).toBeCloseTo(70000, 2);
     expect(Number(presupuesto.total_moneda)).toBeCloseTo(10.77, 2);
+
+    const rowText = await page.$eval(
+      `#records-table tbody tr[data-id="${presupuesto.id}"]`,
+      (row) => row.textContent.replace(/\s+/g, ' ').trim()
+    );
+    expect(rowText).toContain('03/08/2026');
+    await page.waitForFunction(
+      () => !document.getElementById('feedback')?.textContent.trim(),
+      { timeout: 6000 }
+    );
 
     await page.close();
   });

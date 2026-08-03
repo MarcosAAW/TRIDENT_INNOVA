@@ -5,6 +5,11 @@ import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js
 import { createPresupuesto, buildPresupuestoPayload } from './nuevo.js';
 import { deletePresupuesto } from './eliminar.js';
 
+function formatDateOnly(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : '-';
+}
+
 function resolvePresupuestoUnitPricing(producto, options) {
   return resolveProductUnitPricing({
     ...producto,
@@ -238,7 +243,7 @@ export const presupuestosModule = {
     { header: 'Número', accessor: (item) => item.numero || '-' },
     { header: 'Cliente', accessor: (item) => item.cliente_nombre || item.cliente?.nombre_razon_social || '-' },
     { header: 'Fecha', accessor: (item) => (item.fecha ? new Date(item.fecha).toLocaleDateString('es-PY') : '-') },
-    { header: 'Validez', accessor: (item) => (item.validez_hasta ? new Date(item.validez_hasta).toLocaleDateString('es-PY') : '-') },
+    { header: 'Validez', accessor: (item) => formatDateOnly(item.validez_hasta) },
     { header: 'Estado', render: (item) => renderEstado(item.estado) },
     { header: 'Total', render: renderTotal },
     {

@@ -172,6 +172,11 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleDateString('es-PY');
 }
 
+function formatDateOnly(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : '-';
+}
+
 function renderPresupuestoPdf(doc, presupuesto) {
   const data = serialize(presupuesto);
   const cliente = data.cliente || {};
@@ -319,7 +324,7 @@ function drawMetaChips(doc, data, palette, startX, usableWidth) {
   doc.font('Helvetica').fontSize(9);
   const chips = [
     { label: 'Fecha', value: formatDate(data.fecha) },
-    { label: 'Válido hasta', value: formatDate(data.validez_hasta) },
+    { label: 'Válido hasta', value: formatDateOnly(data.validez_hasta) },
     { label: 'Estado', value: data.estado || 'BORRADOR' },
     { label: 'Moneda', value: data.moneda || 'PYG' },
     data.moneda === 'USD' && data.tipo_cambio ? { label: 'TC', value: data.tipo_cambio } : null
