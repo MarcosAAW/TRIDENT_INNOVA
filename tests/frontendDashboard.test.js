@@ -274,6 +274,39 @@ describe('Frontend dashboard modules', () => {
     await page.close();
   });
 
+  test('presupuestos muestra la acción para anular un registro', async () => {
+    const numero = `PRE-UI-${Date.now()}`;
+    const presupuesto = await prisma.presupuesto.create({
+      data: {
+        numero,
+        usuarioId: usuario.id,
+        sucursalId: sucursal.id,
+        fecha: new Date(),
+        moneda: 'PYG',
+        subtotal: 1000,
+        descuento_total: 0,
+        impuesto_total: 90.91,
+        total: 1000,
+        estado: 'GENERADO'
+      }
+    });
+    const page = await newPageWithSession();
+
+    await clickTab(page, 'Presupuestos');
+    await page.waitForFunction((id) => {
+      const row = document.querySelector(`#records-table tbody tr[data-id="${id}"]`);
+      return Boolean(row);
+    }, {}, presupuesto.id);
+
+    const action = await page.$eval(
+      `#records-table tbody tr[data-id="${presupuesto.id}"] button[data-action="delete"]`,
+      (button) => button.textContent.trim()
+    );
+    expect(action).toBe('Eliminar');
+
+    await page.close();
+  });
+
   test('mantiene el scroll de la ventana al avanzar y retroceder paginas en el listado', async () => {
     const productos = Array.from({ length: 24 }, (_, index) => seedProducto({
       sku: `FRONT-PAG-${String(index + 1).padStart(3, '0')}`,

@@ -180,6 +180,34 @@ describe('Presupuestos API', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
   });
 
+  test('marca automáticamente como vencido un presupuesto con vigencia pasada', async () => {
+    const presupuesto = await prisma.presupuesto.create({
+      data: {
+        numero: `PRE-VENCIDO-${Date.now()}`,
+        usuarioId,
+        sucursalId,
+        fecha: new Date('2020-01-01T00:00:00.000Z'),
+        validez_hasta: new Date('2020-01-02T00:00:00.000Z'),
+        moneda: 'PYG',
+        subtotal: 1000,
+        descuento_total: 0,
+        impuesto_total: 90.91,
+        total: 1000,
+        estado: 'GENERADO'
+      }
+    });
+
+    const res = await request(app)
+      .get('/presupuestos?page=1&pageSize=200')
+      .set('x-user-id', usuarioId)
+      .set('x-sucursal-id', sucursalId)
+      .expect(200);
+
+    expect(res.body.data.find((item) => item.id === presupuesto.id)?.estado).toBe('VENCIDO');
+    const actualizado = await prisma.presupuesto.findUnique({ where: { id: presupuesto.id } });
+    expect(actualizado.estado).toBe('VENCIDO');
+  });
+
   test('Obtiene un presupuesto por ID', async () => {
     // Primero crea uno
     const createRes = await request(app)

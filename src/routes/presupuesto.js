@@ -605,6 +605,29 @@ function buildWhere(filters, sucursalId) {
   return where;
 }
 
+function getParaguayDateStart(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Asuncion',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return new Date(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day)));
+}
+
+async function expirePresupuestos(sucursalId) {
+  await prisma.presupuesto.updateMany({
+    where: {
+      sucursalId,
+      deleted_at: null,
+      estado: 'GENERADO',
+      validez_hasta: { lt: getParaguayDateStart() }
+    },
+    data: { estado: 'VENCIDO' }
+  });
+}
+
 router.get('/', async (req, res) => {
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -615,6 +638,7 @@ router.get('/', async (req, res) => {
   const where = buildWhere(filters, req.sucursalId);
 
   try {
+    await expirePresupuestos(req.sucursalId);
     const [presupuestos, total] = await Promise.all([
       prisma.presupuesto.findMany({
         where,

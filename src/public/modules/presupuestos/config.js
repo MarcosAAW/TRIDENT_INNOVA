@@ -3,6 +3,7 @@ import { formatCurrency } from '../common/format.js';
 import { resolveProductUnitPricing } from '../common/pricing.js';
 import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js';
 import { createPresupuesto, buildPresupuestoPayload } from './nuevo.js';
+import { deletePresupuesto } from './eliminar.js';
 
 function resolvePresupuestoUnitPricing(producto, options) {
   return resolveProductUnitPricing({
@@ -262,6 +263,11 @@ export const presupuestosModule = {
       transform: buildPresupuestoPayload,
       submit: createPresupuesto,
       successMessage: 'Presupuesto creado correctamente.'
+    },
+    eliminar: {
+      submit: deletePresupuesto,
+      successMessage: 'Presupuesto anulado correctamente.',
+      confirmMessage: '¿Deseas anular este presupuesto? El registro quedará disponible en Ver eliminados.'
     }
   },
   hooks: {
