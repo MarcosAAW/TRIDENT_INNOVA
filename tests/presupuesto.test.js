@@ -94,6 +94,49 @@ describe('Presupuestos API', () => {
     expect(res.body.moneda).toBe('PYG');
   });
 
+  test('ignora números legados al generar el siguiente correlativo', async () => {
+    try {
+      await prisma.presupuesto.createMany({
+        data: ['PRE-LEGACY', 'PRE-900001'].map((numero) => ({
+          numero,
+          usuarioId,
+          sucursalId,
+          fecha: new Date(),
+          moneda: 'PYG',
+          subtotal: 1000,
+          descuento_total: 0,
+          impuesto_total: 90.91,
+          total: 1000,
+          estado: 'GENERADO'
+        }))
+      });
+
+      const res = await request(app)
+        .post('/presupuestos')
+        .set('x-user-id', usuarioId)
+        .set('x-sucursal-id', sucursalId)
+        .send({
+          clienteId,
+          moneda: 'PYG',
+          detalles: [{ cantidad: 1, precio_unitario: 1000, iva_porcentaje: 10 }]
+        });
+
+      expect(res.statusCode).toBe(201);
+      expect(res.body.numero).toBe('PRE-900002');
+    } finally {
+      const creados = await prisma.presupuesto.findMany({
+        where: { sucursalId, numero: { in: ['PRE-LEGACY', 'PRE-900001', 'PRE-900002'] } },
+        select: { id: true }
+      });
+      await prisma.detallePresupuesto.deleteMany({
+        where: { presupuestoId: { in: creados.map((presupuesto) => presupuesto.id) } }
+      });
+      await prisma.presupuesto.deleteMany({
+        where: { sucursalId, numero: { in: ['PRE-LEGACY', 'PRE-900001', 'PRE-900002'] } }
+      });
+    }
+  });
+
   test('mantiene el precio original en USD al presupuestar con nuevo tipo de cambio', async () => {
     const productoUsd = await prisma.producto.create({
       data: {

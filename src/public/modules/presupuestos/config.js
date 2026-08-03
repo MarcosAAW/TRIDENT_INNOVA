@@ -223,7 +223,7 @@ export const presupuestosModule = {
       helperText: 'Obligatorio solo si usás USD.'
     },
     { name: 'descuento_total', label: 'Descuento total', type: 'number', step: '0.01', cast: 'float' },
-    { name: 'notas', label: 'Notas', type: 'textarea', rows: 3 }
+    { name: 'notas', label: 'Notas (opcional)', type: 'textarea', rows: 3 }
   ],
   columns: [
     { header: 'Número', accessor: (item) => item.numero || '-' },
@@ -274,6 +274,7 @@ export const presupuestosModule = {
 
       const itemsState = [];
       let repriceItemsForFormCurrency = () => {};
+      let itemsBuilderInput = null;
 
       const builderFeedback = document.createElement('p');
       builderFeedback.className = 'form-helper-text';
@@ -283,6 +284,29 @@ export const presupuestosModule = {
       const showBuilderFeedback = (message) => {
         builderFeedback.textContent = message;
         builderFeedback.style.display = message ? 'block' : 'none';
+      };
+
+      const showFieldError = (control, message) => {
+        const wrapper = control?.closest('.form-field');
+        if (!wrapper) return;
+        let error = wrapper.querySelector('.form-field-error');
+        if (!error) {
+          error = document.createElement('small');
+          error.className = 'form-field-error';
+          error.setAttribute('role', 'alert');
+          wrapper.appendChild(error);
+        }
+        error.textContent = message;
+        error.hidden = false;
+        window.clearTimeout(error._hideTimer);
+        error._hideTimer = window.setTimeout(() => {
+          error.hidden = true;
+        }, 5000);
+      };
+
+      const clearFieldError = (control) => {
+        const error = control?.closest('.form-field')?.querySelector('.form-field-error');
+        if (error) error.hidden = true;
       };
 
       const setSpan = (fieldName, className) => {
@@ -453,6 +477,7 @@ export const presupuestosModule = {
         productoInput.placeholder = 'Buscar producto (nombre o SKU)';
         productoInput.className = 'items-builder__producto';
         productoInput.autocomplete = 'off';
+        itemsBuilderInput = productoInput;
 
         const productoIdHidden = document.createElement('input');
         productoIdHidden.type = 'hidden';
@@ -730,7 +755,11 @@ export const presupuestosModule = {
           }
         });
 
-        loadProductos();
+        loadProductos().then(() => {
+          if (productoInput.value.trim()) {
+            renderSuggestions(productoInput.value);
+          }
+        });
 
         let ignoreNextInput = false;
         productoInput.addEventListener('input', (event) => {
@@ -839,8 +868,16 @@ export const presupuestosModule = {
       const toggleTipoCambio = () => {
         const isUsd = String(monedaField?.value || 'PYG').toUpperCase() === 'USD';
         setVisibility('tipo_cambio', isUsd);
+        if (tipoCambioField) {
+          tipoCambioField.required = isUsd;
+          const label = tipoCambioField.closest('.form-field')?.querySelector('span');
+          if (label) {
+            label.textContent = `Tipo de cambio (PYG → moneda)${isUsd ? ' *' : ''}`;
+          }
+        }
         if (!isUsd && tipoCambioField) {
           tipoCambioField.value = '';
+          clearFieldError(tipoCambioField);
         }
         syncDescuentoLabel();
       };
@@ -856,10 +893,37 @@ export const presupuestosModule = {
       }
 
       if (tipoCambioField) {
-        tipoCambioField.addEventListener('input', repriceItemsForFormCurrency);
+        tipoCambioField.addEventListener('input', () => {
+          clearFieldError(tipoCambioField);
+          repriceItemsForFormCurrency();
+        });
         tipoCambioField.addEventListener('change', repriceItemsForFormCurrency);
         tipoCambioField.addEventListener('blur', repriceItemsForFormCurrency);
       }
+
+      if (form.__presupuestoValidateHandler) {
+        form.removeEventListener('submit', form.__presupuestoValidateHandler, true);
+      }
+      form.__presupuestoValidateHandler = (event) => {
+        const missingItems = itemsState.length === 0;
+        const missingExchangeRate = getFormCurrency() === 'USD' && !getFormExchangeRate();
+
+        if (missingItems) {
+          showBuilderFeedback('Agregá al menos un ítem.');
+          window.setTimeout(() => {
+            if (itemsState.length === 0) showBuilderFeedback('');
+          }, 5000);
+        }
+        if (missingExchangeRate) {
+          showFieldError(tipoCambioField, 'Ingresá el tipo de cambio para presupuestos en USD.');
+        }
+        if (!missingItems && !missingExchangeRate) return;
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        (missingItems ? itemsBuilderInput : tipoCambioField)?.focus();
+      };
+      form.addEventListener('submit', form.__presupuestoValidateHandler, true);
 
       if (detallesField && !detallesField.value) {
         detallesField.value = '[]';

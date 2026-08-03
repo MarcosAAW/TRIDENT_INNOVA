@@ -578,6 +578,76 @@ describe('Frontend dashboard modules', () => {
     await page.close();
   });
 
+  test('presupuestos actualiza el precio USD al editar el tipo de cambio', async () => {
+    const producto = await seedProducto({
+      sku: 'FRONT-PYG-REPRICE',
+      nombre: 'Producto PYG Reprice',
+      precio_venta: 7000000,
+      precio_venta_original: null,
+      moneda_precio_venta: 'PYG',
+      tipo_cambio_precio_venta: null,
+      tipo: 'SERVICIO'
+    });
+
+    const page = await newPageWithSession();
+
+    await clickTab(page, 'Presupuestos');
+    await page.waitForFunction(() => document.querySelector('.tab-button.active')?.textContent.trim() === 'Presupuestos');
+    await page.click('#toggle-form-card');
+
+    const notasLabel = await page.$eval('[name="notas"]', (input) => input.closest('.form-field')?.querySelector('span')?.textContent.trim());
+    expect(notasLabel).toBe('Notas (opcional)');
+
+    await page.select('[name="moneda"]', 'USD');
+    await page.click('#submit-button');
+    const requiredMessages = await page.evaluate(() => ({
+      items: document.querySelector('.items-builder .form-helper-text')?.textContent.trim(),
+      exchangeRate: document.querySelector('[name="tipo_cambio"]')?.closest('.form-field')?.querySelector('.form-field-error')?.textContent.trim()
+    }));
+    expect(requiredMessages.items).toBe('Agregá al menos un ítem.');
+    expect(requiredMessages.exchangeRate).toBe('Ingresá el tipo de cambio para presupuestos en USD.');
+
+    await page.type('[name="tipo_cambio"]', '7000');
+
+    await page.type('.items-builder__producto', producto.sku);
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('.suggestion-btn')).some((node) => node.textContent.includes('FRONT-PYG-REPRICE')),
+      { timeout: 5000 }
+    );
+    await page.evaluate(() => {
+      const button = Array.from(document.querySelectorAll('.suggestion-btn')).find((node) => node.textContent.includes('FRONT-PYG-REPRICE'));
+      button?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await page.click('.items-builder button.btn.secondary.small');
+    const initialItemState = await page.evaluate(() => ({
+      list: document.querySelector('.items-list')?.textContent.replace(/\s+/g, ' ').trim(),
+      feedback: document.querySelector('.items-builder .form-helper-text')?.textContent.trim(),
+      selectedProductId: document.querySelector('.items-builder__productoId')?.value,
+      price: document.querySelector('.items-builder__precio')?.value
+    }));
+    expect(initialItemState).toMatchObject({
+      feedback: '',
+      selectedProductId: '',
+      price: ''
+    });
+    expect(initialItemState.list).toContain('1.000,00');
+
+    await page.$eval('[name="tipo_cambio"]', (input) => {
+      input.value = '6000';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await page.waitForFunction(
+      () => document.querySelector('.items-list')?.textContent.includes('1.166,67'),
+      { timeout: 5000 }
+    );
+
+    const exchangeErrorHidden = await page.$eval('.form-field-error', (error) => error.hidden);
+    expect(exchangeErrorHidden).toBe(true);
+
+    await page.close();
+  });
+
   test('presupuestos restaura la lista al cerrar el formulario', async () => {
     const page = await newPageWithSession();
 

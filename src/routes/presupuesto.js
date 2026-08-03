@@ -197,6 +197,10 @@ function renderPresupuestoPdf(doc, presupuesto) {
   drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyView);
   drawTotales(doc, data, palette, startX, usableWidth, currencyView);
 
+  if (currencyView.moneda === 'USD') {
+    drawExchangeObservation(doc, palette, startX, usableWidth);
+  }
+
   if (data.notas) {
     doc.moveDown(0.8);
     doc
@@ -290,12 +294,11 @@ function drawHeader(doc, data, palette, startX, usableWidth) {
   doc.y = bgY + headerHeight + 12;
 }
 
-function drawChip(doc, label, value, palette, x, y) {
+function drawChip(doc, label, value, palette, x, y, width) {
   const chipPaddingX = 10;
   const chipPaddingY = 6;
   const text = `${label}: ${value}`;
-  const width = doc.widthOfString(text) + chipPaddingX * 2;
-  const height = doc.currentLineHeight() + chipPaddingY * 2;
+  const height = 22;
 
   doc.save();
   doc.roundedRect(x, y, width, height, 8).fill('#e2e8f0');
@@ -303,9 +306,13 @@ function drawChip(doc, label, value, palette, x, y) {
 
   doc
     .fillColor(palette.text)
-    .text(text, x + chipPaddingX, y + chipPaddingY - 2, { width: width - chipPaddingX * 2, align: 'left' });
+    .text(text, x + chipPaddingX, y + chipPaddingY - 2, {
+      width: width - chipPaddingX * 2,
+      align: 'left',
+      lineBreak: false
+    });
 
-  return { width, height };
+  return height;
 }
 
 function drawMetaChips(doc, data, palette, startX, usableWidth) {
@@ -318,57 +325,73 @@ function drawMetaChips(doc, data, palette, startX, usableWidth) {
     data.moneda === 'USD' && data.tipo_cambio ? { label: 'TC', value: data.tipo_cambio } : null
   ].filter(Boolean);
 
-  let x = startX;
-  let y = doc.y;
   const gap = 8;
+  const y = doc.y;
+  const availableWidth = usableWidth - gap * (chips.length - 1);
+  const weights = chips.map((chip) => {
+    if (chip.label === 'Válido hasta') return 1.35;
+    if (chip.label === 'Estado') return 1.2;
+    if (chip.label === 'Fecha') return 1.1;
+    return 0.85;
+  });
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  let x = startX;
 
-  chips.forEach((chip) => {
-    const { width } = drawChip(doc, chip.label, chip.value, palette, x, y);
+  chips.forEach((chip, index) => {
+    const width = availableWidth * (weights[index] / totalWeight);
+    drawChip(doc, chip.label, chip.value, palette, x, y, width);
     x += width + gap;
   });
 
-  doc.moveDown(1.2);
+  doc.y = y + 34;
 }
 
-function drawCard(doc, title, rows, palette, startX, width) {
-  const padding = 12;
-  const cardHeightStart = doc.y;
-  doc.save();
-  doc.roundedRect(startX, doc.y - 4, width, 1, 10).fill('#ffffff');
-  doc.restore();
+function drawCard(doc, title, rows, palette, startX, startY, width) {
+  const labelWidth = width * 0.36;
+  const valueX = startX + labelWidth + 10;
+  const valueWidth = width - labelWidth - 10;
+  let rowY = startY + 18;
 
   doc
     .font('Helvetica-Bold')
     .fontSize(11)
     .fillColor(palette.text)
-    .text(title, startX, doc.y, { width });
+    .text(title, startX, startY, { width, lineBreak: false });
 
-  doc.moveDown(0.2);
   rows.forEach((row) => {
     const label = row.label || '';
     const value = row.value || '-';
+    doc.font('Helvetica').fontSize(9.5);
+    const labelHeight = doc.heightOfString(label, { width: labelWidth });
+    doc.font('Helvetica-Bold').fontSize(9.5);
+    const valueHeight = doc.heightOfString(value, { width: valueWidth });
+    const rowHeight = Math.max(labelHeight, valueHeight, 12) + 3;
+
     doc
       .font('Helvetica')
-      .fontSize(10)
+      .fontSize(9.5)
       .fillColor(palette.subtle)
-      .text(label, startX, doc.y, { width: width * 0.4 });
+      .text(label, startX, rowY, { width: labelWidth });
     doc
       .font('Helvetica-Bold')
-      .fontSize(10)
+      .fontSize(9.5)
       .fillColor(palette.text)
-      .text(value, startX + width * 0.4 + 8, doc.y - doc.currentLineHeight(), { width: width * 0.6 - 8 });
+      .text(value, valueX, rowY, { width: valueWidth });
+    rowY += rowHeight;
   });
 
-  const cardBottom = doc.y;
-  doc.y = Math.max(cardBottom, cardHeightStart + padding);
+  return rowY;
 }
 
 function drawClienteSection(doc, presupuesto, cliente, sucursal, usuario, palette, startX, usableWidth) {
-  const columnWidth = (usableWidth - 12) / 2;
+  const gap = 18;
+  const leftWidth = (usableWidth - gap) * 0.56;
+  const rightWidth = usableWidth - gap - leftWidth;
   const leftX = startX;
-  const rightX = startX + columnWidth + 12;
+  const rightX = startX + leftWidth + gap;
+  const startY = doc.y;
 
-  drawCard(
+  const leftBottom = drawCard(
     doc,
     'Cliente',
     [
@@ -380,10 +403,11 @@ function drawClienteSection(doc, presupuesto, cliente, sucursal, usuario, palett
     ],
     palette,
     leftX,
-    columnWidth
+    startY,
+    leftWidth
   );
 
-  drawCard(
+  const rightBottom = drawCard(
     doc,
     'Datos del presupuesto',
     [
@@ -397,10 +421,11 @@ function drawClienteSection(doc, presupuesto, cliente, sucursal, usuario, palett
     ].filter(Boolean),
     palette,
     rightX,
-    columnWidth
+    startY,
+    rightWidth
   );
 
-  doc.moveDown(0.8);
+  doc.y = Math.max(leftBottom, rightBottom) + 14;
 }
 
 function drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyView) {
@@ -421,10 +446,10 @@ function drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyVie
     return;
   }
 
-  const colWidths = [usableWidth * 0.4, usableWidth * 0.12, usableWidth * 0.16, usableWidth * 0.12, usableWidth * 0.2];
+  const colWidths = [usableWidth * 0.46, usableWidth * 0.14, usableWidth * 0.18, usableWidth * 0.22];
   const priceLabel = currencyView.moneda === 'USD' ? 'Precio (USD)' : 'Precio';
   const subtotalLabel = currencyView.moneda === 'USD' ? 'Subtotal (USD)' : 'Subtotal';
-  const headers = ['Producto', 'Cant.', priceLabel, 'IVA', subtotalLabel];
+  const headers = ['Producto', 'Cant.', priceLabel, subtotalLabel];
   const yStart = doc.y;
 
   drawRow(doc, headers, colWidths, startX, yStart, palette, true);
@@ -437,7 +462,6 @@ function drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyVie
       nombreProd,
       String(detalle.cantidad ?? '-'),
       amounts.precio,
-      `${detalle.iva_porcentaje || 10}%`,
       amounts.subtotal
     ];
     drawRow(doc, row, colWidths, startX, doc.y + 2, palette, false, rowIndex);
@@ -448,7 +472,17 @@ function drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyVie
 }
 
 function drawRow(doc, values, colWidths, startX, y, palette, isHeader = false, index = 0) {
-  const rowHeight = 18;
+  const cellPadding = 5;
+  const fontSize = 10;
+  const font = isHeader ? 'Helvetica-Bold' : 'Helvetica';
+
+  doc.font(font).fontSize(fontSize);
+  const cellHeights = values.map((val, idx) => {
+    const width = colWidths[idx] - 12;
+    return doc.heightOfString(String(val || ''), { width, align: idx >= 1 ? 'right' : 'left' });
+  });
+  const rowHeight = Math.max(18, Math.max(...cellHeights) + cellPadding * 2);
+
   const bg = isHeader ? '#e2e8f0' : index % 2 === 0 ? '#ffffff' : '#f8fafc';
 
   doc.save();
@@ -460,9 +494,9 @@ function drawRow(doc, values, colWidths, startX, y, palette, isHeader = false, i
     const width = colWidths[idx] - 12;
     doc
       .font(isHeader ? 'Helvetica-Bold' : 'Helvetica')
-      .fontSize(10)
+      .fontSize(fontSize)
       .fillColor(isHeader ? palette.text : '#0f172a')
-      .text(String(val || ''), cursorX, y + 5, { width, align: idx >= 1 ? 'right' : 'left' });
+      .text(String(val || ''), cursorX, y + cellPadding, { width, align: idx >= 1 ? 'right' : 'left' });
     cursorX += colWidths[idx];
   });
 
@@ -481,7 +515,6 @@ function drawTotales(doc, data, palette, startX, usableWidth, currencyView) {
   if (totals.descuento) {
     lines.push({ label: currencyView.moneda === 'USD' ? 'Descuento (USD)' : 'Descuento', value: totals.descuento });
   }
-  lines.push({ label: currencyView.moneda === 'USD' ? 'IVA (USD)' : 'IVA', value: totals.iva });
   lines.push({ label: currencyView.moneda === 'USD' ? 'Total (USD)' : 'Total', value: totals.total });
   if (currencyView.moneda === 'USD' && totals.totalGs) {
     lines.push({ label: 'Total Gs. (convertido)', value: totals.totalGs });
@@ -513,17 +546,39 @@ function drawTotales(doc, data, palette, startX, usableWidth, currencyView) {
   doc.y = boxY + boxHeight + 10;
 }
 
+function drawExchangeObservation(doc, palette, startX, usableWidth) {
+  const padding = 10;
+  const text = 'Los importes expresados en dólares son referenciales y podrán variar según el tipo de cambio vigente al momento de concretarse la operación.';
+  const boxY = doc.y + 4;
+
+  doc.font('Helvetica').fontSize(8.5);
+  const textHeight = doc.heightOfString(text, { width: usableWidth - padding * 2 });
+  const boxHeight = textHeight + padding * 2;
+
+  doc.save();
+  doc.roundedRect(startX, boxY, usableWidth, boxHeight, 6).fill('#f1f5f9');
+  doc.restore();
+  doc
+    .font('Helvetica')
+    .fontSize(8.5)
+    .fillColor(palette.subtle)
+    .text(text, startX + padding, boxY + padding, { width: usableWidth - padding * 2 });
+
+  doc.y = boxY + boxHeight + 6;
+}
+
 async function generateNumero(tx, sucursalId) {
   const prefix = 'PRE-';
-  const last = await tx.presupuesto.findFirst({
-    where: { sucursalId },
-    select: { numero: true },
-    orderBy: { created_at: 'desc' }
+  const presupuestos = await tx.presupuesto.findMany({
+    where: { sucursalId, numero: { startsWith: prefix } },
+    select: { numero: true }
   });
 
-  const current = last?.numero || null;
-  const match = current && typeof current === 'string' ? current.match(/^PRE-(\d{1,6})$/u) : null;
-  const lastNumber = match ? Number(match[1]) : 0;
+  const lastNumber = presupuestos.reduce((max, presupuesto) => {
+    const match = presupuesto.numero.match(/^PRE-(\d+)$/u);
+    const value = match ? Number(match[1]) : 0;
+    return Number.isSafeInteger(value) ? Math.max(max, value) : max;
+  }, 0);
   const next = String(lastNumber + 1).padStart(6, '0');
   return `${prefix}${next}`;
 }
@@ -703,8 +758,12 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
     return res.status(400).json({ error: 'El tipo de cambio es obligatorio para presupuestos en USD.' });
   }
 
+  const maxAttempts = 3;
+  let created;
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        created = await prisma.$transaction(async (tx) => {
       const numero = await generateNumero(tx, req.sucursalId);
 
       if (payload.clienteId) {
@@ -877,7 +936,16 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
       });
 
       return presupuesto;
-    });
+        });
+        break;
+      } catch (attemptErr) {
+        const isDuplicateNumero = attemptErr?.code === 'P2002';
+        if (isDuplicateNumero && attempt < maxAttempts) {
+          continue;
+        }
+        throw attemptErr;
+      }
+    }
 
     const withRelations = await prisma.presupuesto.findFirst({
       where: { id: created.id },
