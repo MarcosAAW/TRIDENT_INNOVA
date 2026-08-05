@@ -11,7 +11,6 @@ const { z } = require('zod');
 const validate = require('../middleware/validate');
 const { requireAuth } = require('../middleware/authContext');
 const { requireSucursal } = require('../middleware/sucursalContext');
-const { resolveProductSalePricing } = require('../utils/productPricing');
 const { getProductoStockMap, resolveProductoStock } = require('../utils/productStock');
 
 
@@ -83,7 +82,6 @@ const createPresupuestoSchema = z.object({
     .default('PYG')
     .transform((value) => value.toUpperCase())
     .refine((value) => ALLOWED_CURRENCIES.has(value), { message: 'Moneda no soportada (usa PYG o USD).' }),
-  tipo_cambio: z.coerce.number().positive().optional(),
   descuento_total: z.coerce.number().min(0).optional(),
   notas: z.string().optional(),
   detalles: z.array(detalleSchema).min(1, 'Agrega al menos un ítem')
@@ -118,22 +116,27 @@ function formatCurrency(value, currency = 'PYG') {
 function buildCurrencyView(data) {
   const moneda = String(data.moneda || 'PYG').toUpperCase();
   const tipoCambio = Number(data.tipo_cambio);
-  const isUsd = moneda === 'USD' && Number.isFinite(tipoCambio) && tipoCambio > 0;
+  const isLegacyUsd = moneda === 'USD'
+    && Number.isFinite(tipoCambio)
+    && tipoCambio > 0
+    && data.total_moneda !== null
+    && data.total_moneda !== undefined;
 
-  if (!isUsd) {
+  if (!isLegacyUsd) {
+    const currency = moneda === 'USD' ? 'USD' : 'PYG';
     return {
-      moneda: 'PYG',
+      moneda: currency,
       tipoCambio: null,
-      format: (val) => formatCurrency(val, 'PYG'),
+      format: (val) => formatCurrency(val, currency),
       itemAmounts: (detalle) => ({
-        precio: formatCurrency(detalle.precio_unitario, 'PYG'),
-        subtotal: formatCurrency(detalle.subtotal, 'PYG')
+        precio: formatCurrency(detalle.precio_unitario, currency),
+        subtotal: formatCurrency(detalle.subtotal, currency)
       }),
       totals: {
-        subtotal: formatCurrency(data.subtotal, 'PYG'),
-        descuento: data.descuento_total ? formatCurrency(data.descuento_total, 'PYG') : null,
-        iva: formatCurrency(data.impuesto_total || 0, 'PYG'),
-        total: formatCurrency(data.total, 'PYG'),
+        subtotal: formatCurrency(data.subtotal, currency),
+        descuento: data.descuento_total ? formatCurrency(data.descuento_total, currency) : null,
+        iva: formatCurrency(data.impuesto_total || 0, currency),
+        total: formatCurrency(data.total, currency),
         totalMoneda: null,
         totalGs: null
       }
@@ -202,7 +205,7 @@ function renderPresupuestoPdf(doc, presupuesto) {
   drawItemsTable(doc, detalles, palette, startX, usableWidth, currencyView);
   drawTotales(doc, data, palette, startX, usableWidth, currencyView);
 
-  if (currencyView.moneda === 'USD') {
+  if (currencyView.tipoCambio) {
     drawExchangeObservation(doc, palette, startX, usableWidth);
   }
 
@@ -781,11 +784,6 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
 
   const payload = req.validatedBody;
   const moneda = payload.moneda || 'PYG';
-  const tipoCambio = moneda === 'USD' ? payload.tipo_cambio : null;
-
-  if (moneda === 'USD' && !tipoCambio) {
-    return res.status(400).json({ error: 'El tipo de cambio es obligatorio para presupuestos en USD.' });
-  }
 
   const maxAttempts = 3;
   let created;
@@ -831,7 +829,6 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
       const consumoStock = new Map();
 
       let subtotal = 0;
-      let subtotalMoneda = 0;
       let impuestoTotal = 0;
       const basePorIva = new Map();
       const detallesData = [];
@@ -840,7 +837,6 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
         const iva = normalizeIva(item.iva_porcentaje);
         let precioUnitario = item.precio_unitario;
         let producto = null;
-        let subtotalDetalleMoneda = null;
 
         if (item.productoId) {
           producto = productoById.get(item.productoId) || null;
@@ -869,17 +865,11 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
             consumoStock.set(producto.id, totalSolicitado);
           }
           if (precioUnitario === undefined || precioUnitario === null) {
-            const pricing = resolveProductSalePricing({
-              ...producto,
-              moneda_precio_venta: 'PYG',
-              precio_venta_original: null
-            }, {
-              targetCurrency: moneda,
-              exchangeRate: tipoCambio
-            });
-            precioUnitario = pricing.unitGs;
-            if (moneda === 'USD') {
-              subtotalDetalleMoneda = round(pricing.unitCurrency * item.cantidad, 2);
+            precioUnitario = moneda === 'USD'
+              ? Number(producto.precio_venta_original)
+              : Number(producto.precio_venta);
+            if (!Number.isFinite(precioUnitario) || precioUnitario <= 0) {
+              throw new Error(`El producto ${producto.nombre || producto.sku || ''} no tiene precio de venta en ${moneda}.`);
             }
           }
         }
@@ -890,12 +880,6 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
 
         const safePrecio = round(precioUnitario, 2);
         const lineSubtotal = round(safePrecio * item.cantidad, 2);
-        if (moneda === 'USD') {
-          if (subtotalDetalleMoneda === null) {
-            subtotalDetalleMoneda = round(lineSubtotal / tipoCambio, 2);
-          }
-          subtotalMoneda = round(subtotalMoneda + subtotalDetalleMoneda, 2);
-        }
 
         subtotal += lineSubtotal;
         if (iva > 0) {
@@ -916,9 +900,7 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
       const descuentoMoneda = Number.isFinite(descuentoEntrada) && descuentoEntrada > 0
         ? round(descuentoEntrada, 2)
         : 0;
-      const descuento = moneda === 'USD' && tipoCambio
-        ? round(descuentoMoneda * tipoCambio, 2)
-        : descuentoMoneda;
+      const descuento = descuentoMoneda;
 
       if (descuento > subtotal) {
         throw new Error('El descuento no puede superar el subtotal.');
@@ -941,9 +923,6 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
       const baseNeta = round(subtotal - descuento, 2);
       const total = baseNeta; // El total es solo la base neta, NO se suma el IVA
       const safeTotal = total < 0 ? 0 : total;
-      const totalMoneda = moneda === 'USD' && tipoCambio
-        ? round(Math.max(subtotalMoneda - descuentoMoneda, 0), 2)
-        : null;
 
       const presupuesto = await tx.presupuesto.create({
         data: {
@@ -954,12 +933,12 @@ router.post('/', authorizeRoles('ADMIN', 'VENDEDOR'), validate(createPresupuesto
           fecha: new Date(),
           validez_hasta: payload.validez_hasta || null,
           moneda,
-          tipo_cambio: tipoCambio,
+          tipo_cambio: null,
           subtotal: round(subtotal, 2),
           descuento_total: descuento,
           impuesto_total: round(impuestoTotal, 2),
           total: safeTotal,
-          total_moneda: totalMoneda,
+          total_moneda: null,
           estado: 'GENERADO',
           notas: payload.notas,
           detalles: {

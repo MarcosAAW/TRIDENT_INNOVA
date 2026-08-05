@@ -9,6 +9,7 @@ const basePayload = {
   nombre: 'Dron de prueba',
   tipo: 'DRON',
   precio_venta: 1000000,
+  tipo_cambio_precio_venta: 7000,
   stock_actual: 5
 };
 
@@ -111,9 +112,9 @@ describe('Productos API', () => {
 
   test('lista con filtros, paginación y excluye borrados por defecto', async () => {
     const productos = [
-      { sku: 'DRON-001', nombre: 'Dron Profesional', tipo: 'DRON', precio_venta: 2500000, stock_actual: 8 },
-      { sku: 'REP-001', nombre: 'Repuesto Hélice', tipo: 'REPUESTO', precio_venta: 120000, stock_actual: 25 },
-      { sku: 'SER-001', nombre: 'Servicio Técnico', tipo: 'SERVICIO', precio_venta: 500000, stock_actual: 0 }
+      { sku: 'DRON-001', nombre: 'Dron Profesional', tipo: 'DRON', precio_venta: 2500000, tipo_cambio_precio_venta: 7000, stock_actual: 8 },
+      { sku: 'REP-001', nombre: 'Repuesto Hélice', tipo: 'REPUESTO', precio_venta: 120000, tipo_cambio_precio_venta: 7000, stock_actual: 25 },
+      { sku: 'SER-001', nombre: 'Servicio Técnico', tipo: 'SERVICIO', precio_venta: 500000, tipo_cambio_precio_venta: 7000, stock_actual: 0 }
     ];
 
     const created = [];
@@ -147,7 +148,7 @@ describe('Productos API', () => {
     expect(activos.body.data.every((p) => p.activo)).toBe(true);
   });
 
-  test('convierte precios en USD a guaraníes y guarda la referencia', async () => {
+  test('convierte precios en USD a guaraníes y guarda ambos valores', async () => {
     const payload = {
       sku: 'DRON-USD',
       nombre: 'Dron importado',
@@ -167,6 +168,24 @@ describe('Productos API', () => {
     expect(Number(stored.precio_venta.toString())).toBeCloseTo(730000, 2);
     expect(Number(stored.precio_venta_original.toString())).toBeCloseTo(100, 2);
     expect(Number(stored.tipo_cambio_precio_venta.toString())).toBeCloseTo(7300, 4);
+  });
+
+  test('exige tipo de cambio para guardar ambos precios de venta', async () => {
+    const { tipo_cambio_precio_venta, ...payloadSinCambio } = basePayload;
+    await auth(request(app).post('/productos')).send(payloadSinCambio).expect(400);
+  });
+
+  test('guarda los precios de compra en Gs. y USD desde la cotización', async () => {
+    const response = await auth(request(app).post('/productos')).send({
+      ...basePayload,
+      sku: 'DRON-COMPRA-DUAL',
+      precio_compra: 350000,
+      tipo_cambio_precio_compra: 7000
+    }).expect(201);
+
+    expect(Number(response.body.precio_compra)).toBeCloseTo(350000, 2);
+    expect(Number(response.body.precio_compra_original)).toBeCloseTo(50, 2);
+    expect(Number(response.body.tipo_cambio_precio_compra)).toBeCloseTo(7000, 4);
   });
 
   test('genera un PDF con el reporte de inventario', async () => {

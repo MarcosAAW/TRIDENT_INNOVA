@@ -521,7 +521,6 @@ describe('Frontend dashboard modules', () => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await page.select('[name="moneda"]', 'USD');
-    await page.type('[name="tipo_cambio"]', '6500');
 
     const productSearchSelector = '.items-builder__producto';
     await page.click(productSearchSelector);
@@ -547,8 +546,9 @@ describe('Frontend dashboard modules', () => {
     });
 
     expect(presupuesto).toBeTruthy();
-    expect(Number(presupuesto.total)).toBeCloseTo(70000, 2);
-    expect(Number(presupuesto.total_moneda)).toBeCloseTo(10.77, 2);
+    expect(Number(presupuesto.total)).toBeCloseTo(10, 2);
+    expect(presupuesto.total_moneda).toBeNull();
+    expect(presupuesto.tipo_cambio).toBeNull();
 
     const rowText = await page.$eval(
       `#records-table tbody tr[data-id="${presupuesto.id}"]`,
@@ -563,7 +563,7 @@ describe('Frontend dashboard modules', () => {
     await page.close();
   });
 
-  test('presupuestos recalcula a USD desde el precio PYG cuando cambia la moneda luego de agregar el item', async () => {
+  test('presupuestos toma el precio USD guardado cuando cambia la moneda luego de agregar el item', async () => {
     const cliente = await seedCliente({ nombre_razon_social: 'Cliente UI USD Reprice' });
     const producto = await seedProducto({
       sku: 'FRONT-USD-REPRICE',
@@ -604,9 +604,8 @@ describe('Frontend dashboard modules', () => {
     await page.click('.items-builder button.btn.secondary.small');
 
     await page.select('[name="moneda"]', 'USD');
-    await page.type('[name="tipo_cambio"]', '6500');
 
-    await page.waitForFunction(() => document.querySelector('.items-list')?.textContent.includes('USD 10,77') || document.querySelector('.items-list')?.textContent.includes('USD 10,77'));
+  await page.waitForFunction(() => document.querySelector('.items-list')?.textContent.includes('USD 10,00') || document.querySelector('.items-list')?.textContent.includes('USD 10,00'));
 
     await page.click('#submit-button');
     await page.waitForFunction(() => document.getElementById('feedback')?.textContent.includes('Presupuesto creado correctamente.'));
@@ -618,14 +617,14 @@ describe('Frontend dashboard modules', () => {
     });
 
     expect(presupuesto).toBeTruthy();
-    expect(Number(presupuesto.total)).toBeCloseTo(140000, 2);
-    expect(Number(presupuesto.total_moneda)).toBeCloseTo(21.54, 2);
-    expect(Number(presupuesto.detalles[0].precio_unitario)).toBeCloseTo(70000, 2);
+  expect(Number(presupuesto.total)).toBeCloseTo(20, 2);
+  expect(presupuesto.total_moneda).toBeNull();
+  expect(Number(presupuesto.detalles[0].precio_unitario)).toBeCloseTo(10, 2);
 
     await page.close();
   });
 
-  test('presupuestos convierte el precio PYG visible al editar el tipo de cambio', async () => {
+  test('presupuestos alterna entre los precios PYG y USD guardados sin tipo de cambio', async () => {
     const producto = await seedProducto({
       sku: 'FRONT-PYG-REPRICE',
       nombre: 'Producto PYG Reprice',
@@ -649,10 +648,10 @@ describe('Frontend dashboard modules', () => {
     await page.click('#submit-button');
     const requiredMessages = await page.evaluate(() => ({
       items: document.querySelector('.items-builder .form-helper-text')?.textContent.trim(),
-      exchangeRate: document.querySelector('[name="tipo_cambio"]')?.closest('.form-field')?.querySelector('.form-field-error')?.textContent.trim()
+      hasExchangeRate: Boolean(document.querySelector('[name="tipo_cambio"]'))
     }));
     expect(requiredMessages.items).toBe('Agregá al menos un ítem.');
-    expect(requiredMessages.exchangeRate).toBe('Ingresá el tipo de cambio para presupuestos en USD.');
+    expect(requiredMessages.hasExchangeRate).toBe(false);
 
     await page.select('[name="moneda"]', 'PYG');
 
@@ -680,24 +679,10 @@ describe('Frontend dashboard modules', () => {
     expect(pygItemState.list).toContain('10.980.000');
 
     await page.select('[name="moneda"]', 'USD');
-    await page.type('[name="tipo_cambio"]', '7000');
     await page.waitForFunction(
-      () => document.querySelector('.items-list')?.textContent.includes('1.568,57'),
+      () => document.querySelector('.items-list')?.textContent.includes('1.800,00'),
       { timeout: 5000 }
     );
-
-    await page.$eval('[name="tipo_cambio"]', (input) => {
-      input.value = '5000';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-
-    await page.waitForFunction(
-      () => document.querySelector('.items-list')?.textContent.includes('2.196,00'),
-      { timeout: 5000 }
-    );
-
-    const exchangeErrorHidden = await page.$eval('.form-field-error', (error) => error.hidden);
-    expect(exchangeErrorHidden).toBe(true);
 
     await page.close();
   });

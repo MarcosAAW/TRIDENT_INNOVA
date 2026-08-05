@@ -1,6 +1,5 @@
 import { request, buildQuery, urlWithSession } from '../common/api.js';
 import { formatCurrency } from '../common/format.js';
-import { resolveProductUnitPricing } from '../common/pricing.js';
 import { confirmDialog, infoDialog, openUrlInNewTab } from '../common/dialogs.js';
 import { createPresupuesto, buildPresupuestoPayload } from './nuevo.js';
 import { deletePresupuesto } from './eliminar.js';
@@ -11,11 +10,12 @@ function formatDateOnly(value) {
 }
 
 function resolvePresupuestoUnitPricing(producto, options) {
-  return resolveProductUnitPricing({
-    ...producto,
-    moneda_precio_venta: 'PYG',
-    precio_venta_original: null
-  }, options);
+  const currency = String(options?.targetCurrency || 'PYG').toUpperCase() === 'USD' ? 'USD' : 'PYG';
+  const unitCurrency = Number(currency === 'USD' ? producto?.precio_venta_original : producto?.precio_venta);
+  if (!Number.isFinite(unitCurrency) || unitCurrency <= 0) {
+    throw new Error(`El producto no tiene precio de venta en ${currency}.`);
+  }
+  return { unitCurrency, currency };
 }
 
 async function updateEstadoPresupuesto(id, estado) {
@@ -118,9 +118,11 @@ function renderTotal(item) {
   const moneda = (item?.moneda || 'PYG').toUpperCase();
   const totalMoneda = item?.total_moneda ?? null;
   if (moneda === 'USD') {
-    const usdLabel = totalMoneda !== null ? formatCurrency(totalMoneda, 'USD') : '-';
-    const gsLabel = total !== null ? formatCurrency(total, 'PYG') : '-';
-    return `<div>${usdLabel}</div><div class="badge">${gsLabel}</div>`;
+    const usdLabel = formatCurrency(totalMoneda ?? total, 'USD');
+    const legacyGs = totalMoneda !== null && total !== null
+      ? `<div class="badge">${formatCurrency(total, 'PYG')}</div>`
+      : '';
+    return `<div>${usdLabel}</div>${legacyGs}`;
   }
   return total !== null ? formatCurrency(total, 'PYG') : '-';
 }
@@ -228,14 +230,6 @@ export const presupuestosModule = {
         { value: 'USD', label: 'Dólares (USD)' }
       ]
     },
-    {
-      name: 'tipo_cambio',
-      label: 'Tipo de cambio (PYG → moneda)',
-      type: 'number',
-      step: '0.0001',
-      cast: 'float',
-      helperText: 'Obligatorio solo si usás USD.'
-    },
     { name: 'descuento_total', label: 'Descuento total', type: 'number', step: '0.01', cast: 'float' },
     { name: 'notas', label: 'Notas (opcional)', type: 'textarea', rows: 3 }
   ],
@@ -284,9 +278,8 @@ export const presupuestosModule = {
     beforeModuleChange() {
       cleanupListVisibility();
     },
-    afterFormRender({ form, setVisibility }) {
+    afterFormRender({ form }) {
       const monedaField = form?.elements?.moneda;
-      const tipoCambioField = form?.elements?.tipo_cambio;
       const detallesField = form?.elements?.detalles;
       const clienteField = form?.elements?.clienteId;
       const descuentoField = form?.elements?.descuento_total;
@@ -303,29 +296,6 @@ export const presupuestosModule = {
       const showBuilderFeedback = (message) => {
         builderFeedback.textContent = message;
         builderFeedback.style.display = message ? 'block' : 'none';
-      };
-
-      const showFieldError = (control, message) => {
-        const wrapper = control?.closest('.form-field');
-        if (!wrapper) return;
-        let error = wrapper.querySelector('.form-field-error');
-        if (!error) {
-          error = document.createElement('small');
-          error.className = 'form-field-error';
-          error.setAttribute('role', 'alert');
-          wrapper.appendChild(error);
-        }
-        error.textContent = message;
-        error.hidden = false;
-        window.clearTimeout(error._hideTimer);
-        error._hideTimer = window.setTimeout(() => {
-          error.hidden = true;
-        }, 5000);
-      };
-
-      const clearFieldError = (control) => {
-        const error = control?.closest('.form-field')?.querySelector('.form-field-error');
-        if (error) error.hidden = true;
       };
 
       const setSpan = (fieldName, className) => {
@@ -442,11 +412,6 @@ export const presupuestosModule = {
 
       function getFormCurrency() {
         return String(form?.elements?.moneda?.value || 'PYG').toUpperCase();
-      }
-
-      function getFormExchangeRate() {
-        const raw = Number(form?.elements?.tipo_cambio?.value || 0);
-        return Number.isFinite(raw) && raw > 0 ? raw : null;
       }
 
       function renderItemsList(container) {
@@ -644,22 +609,13 @@ export const presupuestosModule = {
 
         function getFormCurrencyPricing(producto) {
           const monedaFormulario = getFormCurrency();
-          const tipoCambioFormulario = Number(form?.elements?.tipo_cambio?.value || 0);
           return resolvePresupuestoUnitPricing(producto, {
-            targetCurrency: monedaFormulario,
-            exchangeRate: tipoCambioFormulario > 0 ? tipoCambioFormulario : null
+            targetCurrency: monedaFormulario
           });
         }
 
         repriceItemsForFormCurrency = () => {
           const monedaFormulario = getFormCurrency();
-          const tipoCambioFormulario = getFormExchangeRate();
-
-          if (monedaFormulario === 'USD' && !tipoCambioFormulario) {
-            renderItemsList(listContainer);
-            syncDetallesField();
-            return;
-          }
 
           let changed = false;
           for (const item of itemsState) {
@@ -674,15 +630,13 @@ export const presupuestosModule = {
 
             try {
               const pricing = resolvePresupuestoUnitPricing(producto, {
-                targetCurrency: monedaFormulario,
-                exchangeRate: tipoCambioFormulario
+                targetCurrency: monedaFormulario
               });
               item.precio_unitario = Number(pricing.unitCurrency.toFixed(2));
-              item.precio_unitario_gs = Number(producto.precio_venta);
               item.moneda_precio_unitario = monedaFormulario;
               changed = true;
             } catch (_error) {
-              // Si falta tipo de cambio para USD, dejamos el valor actual hasta que el usuario lo complete.
+              showBuilderFeedback(`El producto no tiene precio de venta en ${monedaFormulario}.`);
             }
           }
 
@@ -881,46 +835,19 @@ export const presupuestosModule = {
       setSpan('clienteId', 'span-2');
       setSpan('validez_hasta', 'span-1');
       setSpan('moneda', 'span-1');
-      setSpan('tipo_cambio', 'span-1');
       setSpan('descuento_total', 'span-1');
       setSpan('notas', 'full-span');
 
       loadClientes();
 
-      const toggleTipoCambio = () => {
-        const isUsd = String(monedaField?.value || 'PYG').toUpperCase() === 'USD';
-        setVisibility('tipo_cambio', isUsd);
-        if (tipoCambioField) {
-          tipoCambioField.required = isUsd;
-          const label = tipoCambioField.closest('.form-field')?.querySelector('span');
-          if (label) {
-            label.textContent = `Tipo de cambio (PYG → moneda)${isUsd ? ' *' : ''}`;
-          }
-        }
-        if (!isUsd && tipoCambioField) {
-          tipoCambioField.value = '';
-          clearFieldError(tipoCambioField);
-        }
-        syncDescuentoLabel();
-      };
-
       if (monedaField) {
-        monedaField.addEventListener('change', toggleTipoCambio);
         monedaField.addEventListener('change', () => {
           repriceItemsForFormCurrency();
+          syncDescuentoLabel();
         });
-        toggleTipoCambio();
+        syncDescuentoLabel();
       } else {
         syncDescuentoLabel();
-      }
-
-      if (tipoCambioField) {
-        tipoCambioField.addEventListener('input', () => {
-          clearFieldError(tipoCambioField);
-          repriceItemsForFormCurrency();
-        });
-        tipoCambioField.addEventListener('change', repriceItemsForFormCurrency);
-        tipoCambioField.addEventListener('blur', repriceItemsForFormCurrency);
       }
 
       if (form.__presupuestoValidateHandler) {
@@ -928,7 +855,6 @@ export const presupuestosModule = {
       }
       form.__presupuestoValidateHandler = (event) => {
         const missingItems = itemsState.length === 0;
-        const missingExchangeRate = getFormCurrency() === 'USD' && !getFormExchangeRate();
 
         if (missingItems) {
           showBuilderFeedback('Agregá al menos un ítem.');
@@ -936,14 +862,11 @@ export const presupuestosModule = {
             if (itemsState.length === 0) showBuilderFeedback('');
           }, 5000);
         }
-        if (missingExchangeRate) {
-          showFieldError(tipoCambioField, 'Ingresá el tipo de cambio para presupuestos en USD.');
-        }
-        if (!missingItems && !missingExchangeRate) return;
+        if (!missingItems) return;
 
         event.preventDefault();
         event.stopImmediatePropagation();
-        (missingItems ? itemsBuilderInput : tipoCambioField)?.focus();
+        itemsBuilderInput?.focus();
       };
       form.addEventListener('submit', form.__presupuestoValidateHandler, true);
 

@@ -37,11 +37,6 @@ export function sanitizeProductoPayload(payload) {
     return Number(numeric.toFixed(decimals));
   };
 
-  const normalizeMoneda = (value) => {
-    if (!value) return DEFAULT_CURRENCY;
-    return String(value).trim().toUpperCase();
-  };
-
   const ensurePositive = (value, message) => {
     if (value === undefined || value === null) return undefined;
     if (!(value > 0)) {
@@ -71,26 +66,13 @@ export function sanitizeProductoPayload(payload) {
       throw new Error('El precio debe ser mayor a 0.');
     }
 
-    const moneda = normalizeMoneda(body[monedaKey]);
-    body[monedaKey] = moneda;
-
-    if (moneda === DEFAULT_CURRENCY) {
-      body[precioKey] = precio;
-      delete body[cambioKey];
-      delete body[originalKey];
-      return;
-    }
-
-    if (moneda !== 'USD') {
-      throw new Error('Por ahora solo soportamos PYG o USD.');
-    }
-
     const tipoCambio = ensurePositive(parseDecimal(body[cambioKey], 4), 'Ingresá un tipo de cambio mayor a 0.');
     if (!tipoCambio) {
       throw new Error('Ingresá un tipo de cambio mayor a 0.');
     }
 
-    body[originalKey] = precio;
+    body[monedaKey] = DEFAULT_CURRENCY;
+    delete body[originalKey];
     body[cambioKey] = tipoCambio;
     body[precioKey] = precio;
   };

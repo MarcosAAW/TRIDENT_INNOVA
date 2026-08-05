@@ -104,11 +104,6 @@ const ESTADO_OPTIONS = [
   { value: 'false', label: 'Inactivos' }
 ];
 
-const MONEDA_OPTIONS = [
-  { value: 'PYG', label: 'Guaraníes (PYG)' },
-  { value: 'USD', label: 'Dólares (USD)' }
-];
-
 const UNIDAD_OPTIONS = [
   { value: 'Unidad', label: 'Unidad' }
 ];
@@ -248,40 +243,39 @@ export const productosModule = {
     { name: 'sku', label: 'SKU', type: 'text', required: true, placeholder: 'DRON-001' },
     { name: 'nombre', label: 'Nombre', type: 'text', required: true, placeholder: 'Nombre' },
     { name: 'codigo_dji', label: 'Código DJI (opcional)', type: 'text', placeholder: 'DJI-XXXXX' },
-    { name: 'moneda_precio_venta', label: 'Moneda del precio de venta', type: 'select', required: true, defaultValue: 'PYG', options: MONEDA_OPTIONS },
     {
       name: 'precio_venta',
-      label: 'Precio de venta',
+      label: 'Precio de venta en Gs.',
       type: 'number',
       required: true,
       step: '0.01',
       cast: 'float',
-      helperText: 'Si eliges USD se convertirá automáticamente a guaraníes usando el tipo de cambio.'
+      helperText: 'Ingresá el precio de venta en guaraníes.'
     },
     {
       name: 'tipo_cambio_precio_venta',
-      label: 'Tipo de cambio (venta → PYG)',
+      label: 'Cotización de venta (1 USD en Gs.)',
       type: 'number',
+      required: true,
       step: '0.0001',
       cast: 'float',
-      helperText: 'Obligatorio solo cuando la moneda es USD.'
+      helperText: 'Ingresá cuántos guaraníes equivalen a 1 dólar. Ejemplo: 7000.'
     },
-    { name: 'moneda_precio_compra', label: 'Moneda del precio de compra', type: 'select', defaultValue: 'PYG', options: MONEDA_OPTIONS },
     {
       name: 'precio_compra',
-      label: 'Precio de compra',
+      label: 'Precio de compra en Gs.',
       type: 'number',
       step: '0.01',
       cast: 'float',
-      helperText: 'Opcional. Si es USD se convertirá con el tipo de cambio indicado.'
+      helperText: 'Opcional. Ingresá el precio de compra en guaraníes.'
     },
     {
       name: 'tipo_cambio_precio_compra',
-      label: 'Tipo de cambio (compra → PYG)',
+      label: 'Cotización de compra (1 USD en Gs.)',
       type: 'number',
       step: '0.0001',
       cast: 'float',
-      helperText: 'Solo si la moneda seleccionada es USD.'
+      helperText: 'Obligatorio cuando cargás un precio de compra.'
     },
     { name: 'stock_actual', label: 'Stock actual', type: 'number', step: '1', min: 0, cast: 'int', defaultValue: 0 },
     { name: 'minimo_stock', label: 'Stock mínimo', type: 'number', step: '1', min: 0, cast: 'int' },
@@ -299,8 +293,8 @@ export const productosModule = {
       header: 'Precio venta',
       render: (item) => {
         const base = formatCurrency(item.precio_venta, 'PYG');
-        if (item.moneda_precio_venta && item.moneda_precio_venta !== 'PYG' && item.precio_venta_original) {
-          const original = formatCurrency(item.precio_venta_original, item.moneda_precio_venta);
+        if (item.precio_venta_original) {
+          const original = formatCurrency(item.precio_venta_original, 'USD');
           return `${base}<div class="badge">${original}</div>`;
         }
         return base;
@@ -311,8 +305,8 @@ export const productosModule = {
       render: (item) => {
         if (item.precio_compra === null || item.precio_compra === undefined) return '-';
         const base = formatCurrency(item.precio_compra, 'PYG');
-        if (item.moneda_precio_compra && item.moneda_precio_compra !== 'PYG' && item.precio_compra_original) {
-          const original = formatCurrency(item.precio_compra_original, item.moneda_precio_compra);
+        if (item.precio_compra_original) {
+          const original = formatCurrency(item.precio_compra_original, 'USD');
           return `${base}<div class="badge">${original}</div>`;
         }
         return base;
@@ -375,22 +369,14 @@ export const productosModule = {
       ...item,
       activo: Boolean(item.activo),
       unidad: item.unidad || 'Unidad',
-      moneda_precio_venta: (item.moneda_precio_venta || 'PYG').toUpperCase(),
-      precio_venta:
-        item.moneda_precio_venta && item.moneda_precio_venta !== 'PYG' && item.precio_venta_original
-          ? Number(item.precio_venta_original)
-          : Number(item.precio_venta ?? 0),
+      precio_venta: Number(item.precio_venta ?? 0),
       tipo_cambio_precio_venta:
         item.tipo_cambio_precio_venta !== undefined && item.tipo_cambio_precio_venta !== null
           ? Number(item.tipo_cambio_precio_venta)
           : '',
-      moneda_precio_compra: item.moneda_precio_compra ? item.moneda_precio_compra.toUpperCase() : 'PYG',
-      precio_compra:
-        item.moneda_precio_compra && item.moneda_precio_compra !== 'PYG' && item.precio_compra_original
-          ? Number(item.precio_compra_original)
-          : item.precio_compra !== undefined && item.precio_compra !== null
-            ? Number(item.precio_compra)
-            : '',
+      precio_compra: item.precio_compra !== undefined && item.precio_compra !== null
+        ? Number(item.precio_compra)
+        : '',
       tipo_cambio_precio_compra:
         item.tipo_cambio_precio_compra !== undefined && item.tipo_cambio_precio_compra !== null
           ? Number(item.tipo_cambio_precio_compra)
@@ -399,58 +385,71 @@ export const productosModule = {
   },
   hooks: {
     afterFormRender({ form, setVisibility }) {
-      const monedaVenta = form?.elements.moneda_precio_venta;
+      const precioVenta = form?.elements.precio_venta;
       const tipoCambioVenta = form?.elements.tipo_cambio_precio_venta;
-      const monedaCompra = form?.elements.moneda_precio_compra;
+      const precioCompra = form?.elements.precio_compra;
       const tipoCambioCompra = form?.elements.tipo_cambio_precio_compra;
       resetSkuState();
       wireSkuAutoFill(form);
+      setVisibility('tipo_cambio_precio_venta', true);
+      if (tipoCambioVenta) tipoCambioVenta.required = true;
 
-      const toggleVenta = () => {
-        const isUsd = monedaVenta?.value?.toUpperCase() === 'USD';
-        setVisibility('tipo_cambio_precio_venta', isUsd);
-        if (!isUsd && tipoCambioVenta) {
-          tipoCambioVenta.value = '';
+      const cambioWrapper = tipoCambioVenta?.closest('.form-field');
+      const precioEquivalente = document.createElement('strong');
+      precioEquivalente.className = 'form-helper-text precio-venta-equivalente';
+      if (cambioWrapper) cambioWrapper.appendChild(precioEquivalente);
+
+      const updatePrecioEquivalente = () => {
+        const precio = Number(precioVenta?.value || 0);
+        const tipoCambio = Number(tipoCambioVenta?.value || 0);
+        if (!(precio > 0) || !(tipoCambio > 0)) {
+          precioEquivalente.textContent = 'Completá el precio y la cotización para ver el equivalente.';
+          return;
         }
+        precioEquivalente.textContent = `Precio equivalente: ${formatCurrency(precio / tipoCambio, 'USD')}`;
       };
 
-      const toggleCompra = () => {
-        const isUsd = monedaCompra?.value?.toUpperCase() === 'USD';
-        setVisibility('tipo_cambio_precio_compra', isUsd);
-        if (!isUsd && tipoCambioCompra) {
-          tipoCambioCompra.value = '';
-        }
+      precioVenta?.addEventListener('input', updatePrecioEquivalente);
+      tipoCambioVenta?.addEventListener('input', updatePrecioEquivalente);
+      updatePrecioEquivalente();
+
+      const syncCompraCambio = () => {
+        const hasPrecioCompra = Number(precioCompra?.value || 0) > 0;
+        setVisibility('tipo_cambio_precio_compra', true);
+        if (tipoCambioCompra) tipoCambioCompra.required = hasPrecioCompra;
       };
 
-      if (monedaVenta) {
-        monedaVenta.addEventListener('change', toggleVenta);
-        toggleVenta();
-      }
+      const compraWrapper = tipoCambioCompra?.closest('.form-field');
+      const compraEquivalente = document.createElement('strong');
+      compraEquivalente.className = 'form-helper-text precio-compra-equivalente';
+      if (compraWrapper) compraWrapper.appendChild(compraEquivalente);
 
-      if (monedaCompra) {
-        monedaCompra.addEventListener('change', toggleCompra);
-        toggleCompra();
-      }
+      const updateCompraEquivalente = () => {
+        syncCompraCambio();
+        const precio = Number(precioCompra?.value || 0);
+        const tipoCambio = Number(tipoCambioCompra?.value || 0);
+        if (!(precio > 0)) {
+          compraEquivalente.textContent = '';
+          return;
+        }
+        if (!(tipoCambio > 0)) {
+          compraEquivalente.textContent = 'Completá la cotización para ver el equivalente.';
+          return;
+        }
+        compraEquivalente.textContent = `Precio equivalente: ${formatCurrency(precio / tipoCambio, 'USD')}`;
+      };
+
+      precioCompra?.addEventListener('input', updateCompraEquivalente);
+      tipoCambioCompra?.addEventListener('input', updateCompraEquivalente);
+      updateCompraEquivalente();
     },
     afterEditStart({ form }) {
-      const monedaVenta = form?.elements.moneda_precio_venta;
-      monedaVenta?.dispatchEvent(new Event('change'));
-      const monedaCompra = form?.elements.moneda_precio_compra;
-      monedaCompra?.dispatchEvent(new Event('change'));
+      form?.elements.precio_compra?.dispatchEvent(new Event('input'));
       skuTouched = true;
       lastSuggestedSku = null;
     },
     onResetForm({ form }) {
-      const monedaVenta = form?.elements.moneda_precio_venta;
-      if (monedaVenta) {
-        monedaVenta.value = 'PYG';
-        monedaVenta.dispatchEvent(new Event('change'));
-      }
-      const monedaCompra = form?.elements.moneda_precio_compra;
-      if (monedaCompra) {
-        monedaCompra.value = 'PYG';
-        monedaCompra.dispatchEvent(new Event('change'));
-      }
+      form?.elements.precio_compra?.dispatchEvent(new Event('input'));
       resetSkuState();
       wireSkuAutoFill(form);
     }

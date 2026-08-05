@@ -86,12 +86,8 @@ const createProductoSchema = z.object({
   sku: z.string().min(1),
   nombre: z.string().min(1),
   tipo: z.nativeEnum(TipoProducto),
-  precio_venta: optionalDecimal('El precio de venta debe ser numérico.').transform((value) => {
-    if (value === undefined) {
-      throw new Error('El precio de venta es obligatorio.');
-    }
-    return value;
-  }),
+  precio_venta: optionalDecimal('El precio de venta debe ser numérico.')
+    .refine((value) => value !== undefined, { message: 'El precio de venta es obligatorio.' }),
   moneda_precio_venta: currencySchema.default('PYG'),
   tipo_cambio_precio_venta: optionalDecimal('El tipo de cambio debe ser numérico.'),
   precio_venta_original: optionalDecimal('El precio original debe ser numérico.'),
@@ -278,10 +274,14 @@ function normalizePrecioFields(data, { partial = false } = {}) {
 
     if (moneda === 'PYG') {
       const montoRedondeado = round(montoIngresado, 2);
+      const tipoCambio = Number(tipoCambioEnviado);
+      if (!Number.isFinite(tipoCambio) || tipoCambio <= 0) {
+        throw new ProductoValidationError(`Ingresá una cotización válida para guardar ${descripcionCampo.toLowerCase()} en USD.`);
+      }
       ensureWithinLimit(montoRedondeado, etiqueta);
       normalized[campoPrecio] = montoRedondeado;
-      normalized[campoOriginal] = null;
-      normalized[campoCambio] = null;
+      normalized[campoOriginal] = round(montoRedondeado / tipoCambio, 2);
+      normalized[campoCambio] = round(tipoCambio, 4);
       return;
     }
 

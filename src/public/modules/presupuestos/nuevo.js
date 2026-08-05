@@ -24,29 +24,7 @@ export function buildPresupuestoPayload(payload) {
   const moneda = String(payload.moneda || 'PYG').toUpperCase();
   body.moneda = moneda;
 
-  const tipoCambio = toNumber(payload.tipo_cambio);
-  if (moneda === 'USD' && (!tipoCambio || tipoCambio <= 0)) {
-    throw new Error('Para moneda USD ingresá el tipo de cambio.');
-  }
-  if (moneda === 'USD' && tipoCambio) {
-    body.tipo_cambio = tipoCambio;
-    detalles = detalles.map((item) => {
-      const { precio_unitario_gs: precioUnitarioGs, ...detalle } = item;
-      return {
-        ...detalle,
-        precio_unitario: precioUnitarioGs ?? (
-          item.moneda_precio_unitario === 'USD' && item.precio_unitario !== undefined && item.precio_unitario !== null
-            ? Number((item.precio_unitario * tipoCambio).toFixed(2))
-            : item.precio_unitario
-        )
-      };
-    });
-    body.detalles = detalles;
-  }
 
-  if (moneda === 'PYG' && detalles.some((item) => item.moneda_precio_unitario === 'USD')) {
-    throw new Error('Hay ítems cargados en USD. Volvé a agregarlos en guaraníes antes de guardar el presupuesto.');
-  }
 
   const descuento = toNumber(payload.descuento_total);
   if (descuento && descuento > 0) {
