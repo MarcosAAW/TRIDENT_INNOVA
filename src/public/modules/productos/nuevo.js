@@ -45,7 +45,7 @@ export function sanitizeProductoPayload(payload) {
     return value;
   };
 
-  const processPrecio = (precioKey, monedaKey, cambioKey, originalKey, isRequired) => {
+  const processPrecio = (precioKey, monedaKey, cambioKey, originalKey, isRequired, currency = DEFAULT_CURRENCY) => {
     const precio = parseDecimal(body[precioKey]);
     if (precio === undefined) {
       if (isRequired) {
@@ -71,14 +71,14 @@ export function sanitizeProductoPayload(payload) {
       throw new Error('Ingresá un tipo de cambio mayor a 0.');
     }
 
-    body[monedaKey] = DEFAULT_CURRENCY;
+    body[monedaKey] = currency;
     delete body[originalKey];
     body[cambioKey] = tipoCambio;
     body[precioKey] = precio;
   };
 
-  processPrecio('precio_venta', 'moneda_precio_venta', 'tipo_cambio_precio_venta', 'precio_venta_original', true);
-  processPrecio('precio_compra', 'moneda_precio_compra', 'tipo_cambio_precio_compra', 'precio_compra_original', false);
+  processPrecio('precio_venta', 'moneda_precio_venta', 'tipo_cambio_precio_venta', 'precio_venta_original', true, 'USD');
+  processPrecio('precio_compra', 'moneda_precio_compra', 'tipo_cambio_precio_compra', 'precio_compra_original', false, 'USD');
 
   ['stock_actual', 'minimo_stock'].forEach((key) => {
     if (body[key] === undefined || body[key] === null || body[key] === '') {

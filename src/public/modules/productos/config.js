@@ -245,12 +245,12 @@ export const productosModule = {
     { name: 'codigo_dji', label: 'Código DJI (opcional)', type: 'text', placeholder: 'DJI-XXXXX' },
     {
       name: 'precio_venta',
-      label: 'Precio de venta en Gs.',
+      label: 'Precio de venta en USD',
       type: 'number',
       required: true,
       step: '0.01',
       cast: 'float',
-      helperText: 'Ingresá el precio de venta en guaraníes.'
+      helperText: 'Ingresá el precio de venta en dólares.'
     },
     {
       name: 'tipo_cambio_precio_venta',
@@ -263,11 +263,11 @@ export const productosModule = {
     },
     {
       name: 'precio_compra',
-      label: 'Precio de compra en Gs.',
+      label: 'Precio de compra en USD',
       type: 'number',
       step: '0.01',
       cast: 'float',
-      helperText: 'Opcional. Ingresá el precio de compra en guaraníes.'
+      helperText: 'Opcional. Ingresá el precio de compra en dólares.'
     },
     {
       name: 'tipo_cambio_precio_compra',
@@ -369,14 +369,18 @@ export const productosModule = {
       ...item,
       activo: Boolean(item.activo),
       unidad: item.unidad || 'Unidad',
-      precio_venta: Number(item.precio_venta ?? 0),
+      precio_venta: item.precio_venta_original !== undefined && item.precio_venta_original !== null
+        ? Number(item.precio_venta_original)
+        : Number(item.precio_venta ?? 0),
       tipo_cambio_precio_venta:
         item.tipo_cambio_precio_venta !== undefined && item.tipo_cambio_precio_venta !== null
           ? Number(item.tipo_cambio_precio_venta)
           : '',
-      precio_compra: item.precio_compra !== undefined && item.precio_compra !== null
-        ? Number(item.precio_compra)
-        : '',
+      precio_compra: item.precio_compra_original !== undefined && item.precio_compra_original !== null
+        ? Number(item.precio_compra_original)
+        : item.precio_compra !== undefined && item.precio_compra !== null
+          ? Number(item.precio_compra)
+          : '',
       tipo_cambio_precio_compra:
         item.tipo_cambio_precio_compra !== undefined && item.tipo_cambio_precio_compra !== null
           ? Number(item.tipo_cambio_precio_compra)
@@ -406,7 +410,7 @@ export const productosModule = {
           precioEquivalente.textContent = 'Completá el precio y la cotización para ver el equivalente.';
           return;
         }
-        precioEquivalente.textContent = `Precio equivalente: ${formatCurrency(precio / tipoCambio, 'USD')}`;
+        precioEquivalente.textContent = `Precio en guaraníes: ${formatCurrency(precio * tipoCambio, 'PYG')}`;
       };
 
       precioVenta?.addEventListener('input', updatePrecioEquivalente);
@@ -436,7 +440,7 @@ export const productosModule = {
           compraEquivalente.textContent = 'Completá la cotización para ver el equivalente.';
           return;
         }
-        compraEquivalente.textContent = `Precio equivalente: ${formatCurrency(precio / tipoCambio, 'USD')}`;
+        compraEquivalente.textContent = `Precio en guaraníes: ${formatCurrency(precio * tipoCambio, 'PYG')}`;
       };
 
       precioCompra?.addEventListener('input', updateCompraEquivalente);
